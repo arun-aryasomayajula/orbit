@@ -55,7 +55,9 @@ notify(){ python3 "$ENGINE/notify.py" "$1" "$2" >/dev/null 2>&1 || true; }
 # --- preflight: are this repo's gate dependencies up? (config gates[].needs) ---
 service_up() {
   case "$1" in
-    postgres) pg_isready >/dev/null 2>&1 ;;
+    # pg_isready is often keg-only (not on launchd PATH) — fall back to a TCP probe
+    postgres) if command -v pg_isready >/dev/null 2>&1; then pg_isready >/dev/null 2>&1
+              else (exec 3<>"/dev/tcp/127.0.0.1/${PGPORT:-5432}") 2>/dev/null; fi ;;
     mysql)    mysqladmin ping >/dev/null 2>&1 ;;
     redis)    redis-cli ping >/dev/null 2>&1 ;;
     docker)   docker info >/dev/null 2>&1 ;;
