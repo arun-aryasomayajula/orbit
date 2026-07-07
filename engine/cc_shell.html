@@ -568,6 +568,20 @@ function inboxItems(){
   const e=(S&&S.escalated)||[], s=((S&&S.done)||[]).filter(t=>!t.merged&&!t.rejected);
   return {esc:e,ships:s,n:e.length+s.length};
 }
+// Human-readable "why idle + when it resumes + when it last ran", so an empty orbit
+// reads as a healthy resting loop, not a dead one.
+function idleWhy(r,t){
+  const beat = r.heartbeat ? `last active ${fmt(t-r.heartbeat)} ago` : 'no activity logged yet';
+  const resumeIn = (r.resume_at && r.resume_at>t) ? Math.round((r.resume_at-t)/60) : 0;
+  const eta = resumeIn>=1 ? `resumes in ~${resumeIn}m` : `next pick within ~${r.interval}s`;
+  switch(r.idle_reason){
+    case 'usage-limit': return {tag:'Backing off', msg:`Usage limit hit — ${eta}. ${beat}.`, cls:'amber'};
+    case 'queue-empty': return {tag:'Idle', msg:`Nothing pickable — queue something from Deep space. ${beat}.`, cls:'green'};
+    case 'waiting-for-services': return {tag:'Waiting', msg:`A gate dependency (DB/etc.) is down — ${eta}. ${beat}.`, cls:'amber'};
+    case 'recovering': return {tag:'Recovering', msg:`Last cycle failed — retrying, ${eta}. ${beat}.`, cls:'amber'};
+    default: return {tag:'Armed', msg:`Between cycles — ${eta}. ${beat}.`, cls:'green'};
+  }
+}
 function renderTop(){
   if(!S)return; const r=S,t=srvClock(),ib=inboxItems();
   // status sentence
@@ -575,7 +589,7 @@ function renderTop(){
   let s;
   if(r.stopped)s=`⏸ <b>Paused.</b> Nothing runs or spends until you resume · ${r.counts.next} queued · ${money} today`;
   else if(r.cycle_running&&r.cycle_start)s=`<b>In orbit: ${esc(r.current_task||'claiming a task…')}</b> · ${fmt(t-r.cycle_start)} elapsed · ${r.daily_count}/${r.max_tasks} tasks + ${money} today · ${r.counts.next} queued behind it`;
-  else s=`<b>Armed.</b> Watching the queue — next pick within ~${r.interval}s · ${r.daily_count}/${r.max_tasks} tasks + ${money} today · ${r.counts.next} queued`;
+  else {const w=idleWhy(r,t); s=`<b>${w.tag}.</b> ${w.msg} · ${r.daily_count}/${r.max_tasks} tasks + ${money} today · ${r.counts.next} queued`;}
   if(ib.n)s+=` · <span class=hot>${ib.n} item${ib.n===1?'':'s'} need you</span>`;
   document.getElementById('statusText').innerHTML=s;
   // orbit
@@ -590,11 +604,14 @@ function renderTop(){
     arc.style.stroke=p>.8?'var(--amber)':'var(--blue)';
     hs.innerHTML=`In orbit <span class=mut>· ${esc(r.current_task||'claiming a task…')}</span>`;
     hsub.innerHTML=`<b>${fmt(t-r.cycle_start)}</b> elapsed of a ${Math.floor(r.cycle_timeout/60)}m watchdog window · one atomic commit per cycle, pushed to its own branch.`;}
-  else{orbit.className='orbit idle';arc.style.strokeDashoffset=ORBIT_C*0.25;arc.style.stroke='var(--green)';
-    hs.innerHTML=`Armed <span class=mut>— watching the queue</span>`;
-    hsub.innerHTML=r.counts.next?`Next pick within ~<b>${r.interval}s</b> · <b>${r.counts.next}</b> task(s) ready.`
-      :(r.auto_feed?`Launch pad is dry and Auto-feed found nothing safe to promote — queue something from <b>Deep space</b>.`
-                   :`Launch pad is dry — queue something from <b>Deep space</b>, or switch on Auto-feed.`);}
+  else{const w=idleWhy(r,t);
+    orbit.className='orbit idle';arc.style.strokeDashoffset=ORBIT_C*0.25;
+    arc.style.stroke=w.cls==='amber'?'var(--amber)':'var(--green)';
+    hs.innerHTML=`${w.tag} <span class=mut>— nothing in orbit right now</span>`;
+    hsub.innerHTML = (r.idle_reason==='queue-empty' && !r.counts.next)
+      ? (r.auto_feed?`Launch pad is dry and Auto-feed found nothing safe to promote — queue something from <b>Deep space</b>.`
+                    :`Launch pad is dry — queue something from <b>Deep space</b>, or switch on Auto-feed.`)
+      : `${w.msg} <b>${r.counts.next}</b> task(s) ready to launch.`;}
   // hero buttons
   document.getElementById('heroBtns').innerHTML=
     (r.stopped?`<button class="btn btn-go" onclick="post('/resume',{})">Resume loop</button>`
@@ -700,8 +717,12 @@ function promoteAllShown(){
 }
 function renderQueue(){
   const r=S;
+  const w=idleWhy(r,srvClock());
+  const orbitEmpty = r.stopped
+    ? 'Paused — resume the loop to send a task into orbit.'
+    : `Nothing in orbit right now — <b>${esc(w.tag)}</b>. ${esc(w.msg)}<br>A task appears here while a cycle is actively working it.`;
   document.getElementById('queueCols').innerHTML=
-    col('In orbit','hl-run',r.running.map(x=>({...x,_start:r.cycle_start})),'run','Nothing in orbit.')+
+    col('In orbit','hl-run',r.running.map(x=>({...x,_start:r.cycle_start})),'run',orbitEmpty)+
     col('Launch pad','hl-next',r.next_up,'next',r.auto_feed
       ?'Launch pad is dry — Auto-feed found nothing safe to promote.<br><b>Queue something from Deep space.</b>'
       :'Launch pad is dry.<br><b>Queue something from Deep space, or switch on Auto-feed.</b>')+

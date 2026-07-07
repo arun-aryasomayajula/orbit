@@ -196,12 +196,15 @@ while true; do
   count="$(cat "$STATE/.count-$(today)" 2>/dev/null || echo 0)"
   if [ "$count" -ge "$MAX_TASKS_PER_DAY" ]; then log "daily cap $MAX_TASKS_PER_DAY reached — idling."; sleep 600; continue; fi
   status="$(one_iteration)"
+  # Marker the dashboard reads to explain WHY the loop is idle (backoff / idle reason + when it resumes).
+  # Format: "<reason> <resume-epoch>". Cleared to a plain reason on normal iterations.
+  set_idle_reason(){ echo "$1 $(( $(date +%s) + ${2:-0} ))" > "$STATE/.idle-reason"; }
   case "$status" in
-    OK)    echo $((count+1)) > "$STATE/.count-$(today)"; sleep "$INTERVAL" ;;
-    FAIL)  echo $((count+1)) > "$STATE/.count-$(today)"; sleep 120 ;;
-    EMPTY) sleep 600 ;;
-    SKIP)  sleep 300 ;;
-    LIMIT) log "usage limit — backing off ${LIMIT_BACKOFF}s."; sleep "$LIMIT_BACKOFF" ;;
-    *)     sleep "$INTERVAL" ;;
+    OK)    echo $((count+1)) > "$STATE/.count-$(today)"; set_idle_reason "between-cycles" "$INTERVAL"; sleep "$INTERVAL" ;;
+    FAIL)  echo $((count+1)) > "$STATE/.count-$(today)"; set_idle_reason "recovering" 120; sleep 120 ;;
+    EMPTY) set_idle_reason "queue-empty" 600; sleep 600 ;;
+    SKIP)  set_idle_reason "waiting-for-services" 300; sleep 300 ;;
+    LIMIT) log "usage limit — backing off ${LIMIT_BACKOFF}s."; set_idle_reason "usage-limit" "$LIMIT_BACKOFF"; sleep "$LIMIT_BACKOFF" ;;
+    *)     set_idle_reason "between-cycles" "$INTERVAL"; sleep "$INTERVAL" ;;
   esac
 done

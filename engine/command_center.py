@@ -72,7 +72,7 @@ MARKER = AP_STATE / ".current-task-id"
 FEATURE_BUILDS = AP_STATE / "feature_builds.json"   # dedicated feature-agent builds (outside the loop)
 AUTO_PROMOTE = AP_STATE / "AUTO_PROMOTE"   # presence = auto-feed ON (wrapper reads it)
 LOGDIR = AP_STATE / "logs"
-APLOG = LOGDIR / "autopilot.log"
+APLOG = LOGDIR / "orbit.log"   # the loop's live log (run.sh writes here). Heartbeat + cycle stats read from it.
 CONVERTER = ENGINE / "backlog_to_tasks.py"
 BASE_BRANCH = os.environ.get("ORBIT_BASE_BRANCH") or os.environ.get("AP_BASE_BRANCH", "main")
 PORT = int(os.environ.get("PORT", "8787"))
@@ -216,6 +216,15 @@ def probe_runtime() -> dict:
     except Exception:
         spend = 0.0
 
+    # Why the loop is idle + when it resumes (written by run.sh each iteration): "<reason> <resume-epoch>".
+    idle_reason, resume_at = None, None
+    try:
+        parts = (AP_STATE / ".idle-reason").read_text().split()
+        idle_reason = parts[0]
+        resume_at = int(parts[1]) if len(parts) > 1 else None
+    except Exception:
+        pass
+
     return {
         "now": time.time(),
         "loop_loaded": loop_loaded(),
@@ -224,6 +233,8 @@ def probe_runtime() -> dict:
         "cycle_start": start if running else None,
         "current_task": (MARKER.read_text().strip() if MARKER.exists() else None),
         "heartbeat": heartbeat,
+        "idle_reason": idle_reason,
+        "resume_at": resume_at,
         "last_cycle_dur": last_dur,
         "avg_cycle_sec": avg_cycle,
         "cycle_samples": len(durs),
