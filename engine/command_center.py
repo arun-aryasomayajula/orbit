@@ -96,10 +96,11 @@ _TOKEN = secrets.token_urlsafe(18)
 _ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}", f"[::1]:{PORT}"}
 _TID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 
-# Mirror run.sh tunables (defaults) so the timers/budget match reality.
-INTERVAL = int(os.environ.get("AP_INTERVAL", "180"))
-MAX_TASKS = int(os.environ.get("AP_MAX_TASKS", "12"))
-CYCLE_TIMEOUT = int(os.environ.get("AP_CYCLE_TIMEOUT", "3600"))
+# Mirror run.sh tunables so the timers/budget match reality. Accept the
+# RATCHET_* names (what engine/config.py exports) with AP_* as legacy fallback.
+INTERVAL = int(os.environ.get("RATCHET_INTERVAL") or os.environ.get("AP_INTERVAL", "180"))
+MAX_TASKS = int(os.environ.get("RATCHET_MAX_TASKS") or os.environ.get("AP_MAX_TASKS", "12"))
+CYCLE_TIMEOUT = int(os.environ.get("RATCHET_CYCLE_TIMEOUT") or os.environ.get("AP_CYCLE_TIMEOUT", "3600"))
 
 PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}
 PRIORITY_LADDER = ["low", "medium", "high"]
@@ -207,11 +208,11 @@ def probe_runtime() -> dict:
 
     today = datetime.now().strftime("%Y-%m-%d")
     try:
-        daily = int((AP / f".count-{today}").read_text().strip())
+        daily = int((AP_STATE / f".count-{today}").read_text().strip())
     except Exception:
         daily = 0
     try:
-        spend = float((AP / f".spend-{today}").read_text().strip())
+        spend = float((AP_STATE / f".spend-{today}").read_text().strip())
     except Exception:
         spend = 0.0
 
@@ -489,7 +490,7 @@ def do_mark(tid: str, outcome: str, note: str = "") -> str:
     (delete it manually if you want); the id stays worked so it isn't re-picked."""
     if outcome not in ("merged", "rejected"):
         return f"Invalid outcome '{outcome}'."
-    r = subprocess.run(["python3", str(AP / "ledger.py"), "mark", tid, outcome, note],
+    r = subprocess.run(["python3", str(ENGINE / "ledger.py"), "mark", tid, outcome, note],
                        capture_output=True, text=True)
     _MERGED_CACHE.update(t=0.0)   # re-check ancestry on the next poll
     if r.returncode != 0:
@@ -550,7 +551,7 @@ def do_answer(tid: str, text: str) -> str:
                            lambda m: f"{m.group(1)}{m.group(2)}\n{m.group(1)}operator_answer: {quoted}",
                            blocks[i], count=1)
     _write_blocks(header, blocks)
-    subprocess.run(["python3", str(AP / "ledger.py"), "clear", tid], capture_output=True)
+    subprocess.run(["python3", str(ENGINE / "ledger.py"), "clear", tid], capture_output=True)
     if tid in load_skips():
         kept = [ln for ln in SKIPS.read_text().splitlines() if ln.strip() != tid]
         SKIPS.write_text("\n".join(kept) + ("\n" if kept else ""))
@@ -745,7 +746,7 @@ def agent_metrics() -> dict:
     except Exception:
         pass
     now = time.time()
-    diffdir = AP / "diffs"
+    diffdir = AP_STATE / "diffs"
     if diffdir.exists():
         for p in diffdir.glob("*.patch"):
             try:
@@ -834,11 +835,11 @@ def spend_history(days: int = 14) -> list[dict]:
     for i in range(days - 1, -1, -1):
         d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
         try:
-            sp = float((AP / f".spend-{d}").read_text().strip())
+            sp = float((AP_STATE / f".spend-{d}").read_text().strip())
         except Exception:
             sp = 0.0
         try:
-            ct = int((AP / f".count-{d}").read_text().strip())
+            ct = int((AP_STATE / f".count-{d}").read_text().strip())
         except Exception:
             ct = 0
         out.append({"date": d, "spend": round(sp, 2), "tasks": ct})
