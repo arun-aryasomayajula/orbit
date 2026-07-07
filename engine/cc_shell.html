@@ -568,18 +568,29 @@ function inboxItems(){
   const e=(S&&S.escalated)||[], s=((S&&S.done)||[]).filter(t=>!t.merged&&!t.rejected);
   return {esc:e,ships:s,n:e.length+s.length};
 }
-// Human-readable "why idle + when it resumes + when it last ran", so an empty orbit
-// reads as a healthy resting loop, not a dead one.
+// Duration as a plain "X ago" phrase (NOT the m:ss stopwatch fmt, which reads like a clock time).
+const agoStr=s=>{s=Math.max(0,Math.floor(s));
+  if(s<45)return'just now'; if(s<90)return'1 min ago';
+  if(s<3600)return`${Math.round(s/60)} min ago`;
+  const h=Math.floor(s/3600),m=Math.round(s%3600/60); return m?`${h}h ${m}m ago`:`${h}h ago`;};
+// "why idle + when it resumes + when it last ran", so an empty orbit reads as a resting loop.
 function idleWhy(r,t){
-  const beat = r.heartbeat ? `last active ${fmt(t-r.heartbeat)} ago` : 'no activity logged yet';
-  const resumeIn = (r.resume_at && r.resume_at>t) ? Math.round((r.resume_at-t)/60) : 0;
-  const eta = resumeIn>=1 ? `resumes in ~${resumeIn}m` : `next pick within ~${r.interval}s`;
+  const beat = r.heartbeat ? `last active ${agoStr(t-r.heartbeat)}` : 'no activity logged yet';
+  const idleAge = r.heartbeat ? t-r.heartbeat : Infinity;
+  // ETA only when we actually know it: an explicit resume_at, or a heartbeat recent enough
+  // that the normal interval genuinely applies. Never assert "~180s" when it's been minutes.
+  let eta='';
+  if(r.resume_at && r.resume_at>t){const s=Math.round(r.resume_at-t); eta = s<60?`resumes in ~${s}s`:`resumes in ~${Math.round(s/60)}m`;}
+  else if(idleAge <= r.interval*1.5) eta = `next pick within ~${r.interval}s`;
+  const etaPart = eta?` — ${eta}`:'';
   switch(r.idle_reason){
-    case 'usage-limit': return {tag:'Backing off', msg:`Usage limit hit — ${eta}. ${beat}.`, cls:'amber'};
+    case 'usage-limit': return {tag:'Backing off', msg:`Usage limit hit${etaPart}. ${beat}.`, cls:'amber'};
     case 'queue-empty': return {tag:'Idle', msg:`Nothing pickable — queue something from Deep space. ${beat}.`, cls:'green'};
-    case 'waiting-for-services': return {tag:'Waiting', msg:`A gate dependency (DB/etc.) is down — ${eta}. ${beat}.`, cls:'amber'};
-    case 'recovering': return {tag:'Recovering', msg:`Last cycle failed — retrying, ${eta}. ${beat}.`, cls:'amber'};
-    default: return {tag:'Armed', msg:`Between cycles — ${eta}. ${beat}.`, cls:'green'};
+    case 'waiting-for-services': return {tag:'Waiting', msg:`A gate dependency (DB/etc.) is down${etaPart}. ${beat}.`, cls:'amber'};
+    case 'recovering': return {tag:'Recovering', msg:`Last cycle failed — retrying${etaPart}. ${beat}.`, cls:'amber'};
+    default: return eta
+      ? {tag:'Armed', msg:`Between cycles${etaPart}. ${beat}.`, cls:'green'}
+      : {tag:'Armed', msg:`Waiting for the next cycle. ${beat}.`, cls:'green'};  // no false interval claim
   }
 }
 function renderTop(){
