@@ -150,9 +150,9 @@ def _ts_to_epoch(s: str) -> float | None:
 
 
 def cycle_pids() -> list[int]:
-    """PIDs of the in-flight cycle (claude --print /autopilot-cycle + its caffeinate)."""
+    """PIDs of the in-flight cycle (claude --print /orbit-cycle + its caffeinate)."""
     try:
-        out = subprocess.run(["pgrep", "-f", "autopilot-cycle"], capture_output=True, text=True).stdout
+        out = subprocess.run(["pgrep", "-f", "orbit-cycle"], capture_output=True, text=True).stdout
         return [int(x) for x in out.split()]
     except Exception:
         return []
