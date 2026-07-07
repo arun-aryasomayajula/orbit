@@ -129,11 +129,19 @@ run_cycle() {
   $caff "$CLAUDE_BIN" --print "/orbit-cycle" \
       --permission-mode "$PERM" --settings "$SETTINGS" --model "$MODEL" \
       --add-dir "$REPO" --add-dir "$ORBIT_HOME" \
-      --output-format stream-json --verbose >"$out" 2>&1 &
+      --output-format stream-json --verbose >"$out" 2>&1 </dev/null &
   local cpid=$!
-  ( sleep "$CYCLE_TIMEOUT"; kill -TERM "$cpid" 2>/dev/null; sleep 10; kill -KILL "$cpid" 2>/dev/null ) &
+  # Watchdog: hard-kill the cycle if it outruns CYCLE_TIMEOUT.
+  # CRITICAL: run_cycle executes inside status="$(one_iteration)", whose stdout is a
+  # pipe. If the watchdog (and its `sleep`) inherit that pipe, killing the subshell
+  # orphans the `sleep`, which keeps the pipe's write end open — so the command
+  # substitution never gets EOF and the whole loop wedges for the full CYCLE_TIMEOUT
+  # (~1h). Redirect all of the watchdog's fds off the pipe, and kill its sleep child
+  # on teardown so nothing is left holding it.
+  ( sleep "$CYCLE_TIMEOUT"; kill -TERM "$cpid" 2>/dev/null; sleep 10; kill -KILL "$cpid" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
   local wpid=$!
   wait "$cpid"; local rc=$?
+  pkill -P "$wpid" 2>/dev/null || true   # kill the watchdog's sleep child first
   kill "$wpid" 2>/dev/null || true
   return $rc
 }
