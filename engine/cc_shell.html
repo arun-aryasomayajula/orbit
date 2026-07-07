@@ -1,0 +1,986 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Autopilot — Mission Control</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='88'>🛰️</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ── tokens ─────────────────────────────────────────────────────────────── */
+:root{
+  --void:#0B0E14; --panel:#131824; --card:#1A2130; --card2:#202940; --line:#232C3D; --line2:#2E3A52;
+  --ink:#E8EDF7; --dim:#8B96AC; --faint:#5A6478;
+  --amber:#FFB454; --amber-dim:#4a3416; --green:#3DD68C; --green-dim:#0d3526;
+  --blue:#5EA2FF; --blue-dim:#16294a; --red:#FF6B6B; --red-dim:#43181d;
+  --violet:#A78BFA; --violet-dim:#2d2350;
+  --disp:"Space Grotesk",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --body:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  --rail:224px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--void);color:var(--ink);font:13.5px/1.55 var(--body);
+  background-image:radial-gradient(1100px 500px at 85% -10%,rgba(94,162,255,.06),transparent 60%),
+                   radial-gradient(900px 420px at -10% 110%,rgba(255,180,84,.04),transparent 55%)}
+::selection{background:var(--blue-dim);color:var(--ink)}
+:focus-visible{outline:2px solid var(--blue);outline-offset:2px;border-radius:4px}
+a{color:var(--blue)}
+button{font-family:inherit}
+
+/* ── left rail ──────────────────────────────────────────────────────────── */
+#rail{position:fixed;inset:0 auto 0 0;width:var(--rail);background:var(--panel);
+  border-right:1px solid var(--line);display:flex;flex-direction:column;z-index:20}
+.brand{padding:20px 18px 16px;border-bottom:1px solid var(--line)}
+.brand .sat{display:flex;align-items:center;gap:10px}
+.brand h1{font:700 17px/1 var(--disp);letter-spacing:.14em;margin:0;text-transform:uppercase}
+.brand .base{margin-top:8px;font:500 10.5px var(--mono);color:var(--faint);word-break:break-all}
+.brand .base b{color:var(--dim);font-weight:500}
+nav{padding:12px 10px;display:flex;flex-direction:column;gap:2px;flex:1;overflow-y:auto}
+.navlbl{font:600 9.5px var(--disp);letter-spacing:.2em;color:var(--faint);text-transform:uppercase;padding:12px 10px 5px}
+.nav{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:none;border:0;
+  color:var(--dim);font:500 13px var(--disp);letter-spacing:.02em;padding:9px 10px;border-radius:8px;cursor:pointer;position:relative}
+.nav:hover{background:var(--card);color:var(--ink)}
+.nav.on{background:var(--card2);color:var(--ink)}
+.nav.on::before{content:"";position:absolute;left:-10px;top:7px;bottom:7px;width:3px;border-radius:2px;background:var(--amber)}
+.nav .ico{width:18px;text-align:center;flex:none;font-size:14px}
+.nav .nb{margin-left:auto;font:600 10.5px var(--mono);background:var(--card);border:1px solid var(--line2);
+  color:var(--dim);border-radius:9px;padding:1px 7px;min-width:24px;text-align:center}
+.nav .nb.hot{background:var(--amber);border-color:var(--amber);color:#1a1206}
+.nav .key{position:absolute;right:8px;top:50%;transform:translateY(-50%);font:500 9px var(--mono);color:var(--faint);
+  border:1px solid var(--line);border-radius:3px;padding:0 4px;opacity:0;transition:opacity .15s}
+.nav:hover .key{opacity:1}.nav .nb~.key{display:none}
+.railfoot{padding:14px;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:9px}
+.meter{font:500 10.5px var(--mono);color:var(--dim)}
+.meter .bar{height:4px;border-radius:3px;background:var(--card2);margin-top:5px;overflow:hidden}
+.meter .bar i{display:block;height:100%;background:var(--green);border-radius:3px;transition:width .5s}
+.meter .bar i.warn{background:var(--amber)}
+.meter .row{display:flex;justify-content:space-between}
+
+/* ── buttons ────────────────────────────────────────────────────────────── */
+.btn{border:1px solid var(--line2);border-radius:7px;padding:7px 12px;font:600 12px var(--disp);
+  letter-spacing:.02em;cursor:pointer;background:var(--card);color:var(--ink);transition:filter .12s}
+.btn:hover{filter:brightness(1.18)} .btn:active{transform:translateY(1px)} .btn:disabled{opacity:.4;cursor:not-allowed}
+.btn-mini{padding:4px 9px;font-size:11px;border-radius:6px}
+.btn-go{background:var(--green-dim);border-color:#1d5c40;color:var(--green)}
+.btn-stop{background:var(--red-dim);border-color:#6e2a30;color:var(--red)}
+.btn-blue{background:var(--blue-dim);border-color:#2b4f86;color:var(--blue)}
+.btn-vio{background:var(--violet-dim);border-color:#4b3d84;color:var(--violet)}
+.btn-amber{background:var(--amber-dim);border-color:#7a5620;color:var(--amber)}
+.btn-ghost{background:transparent;color:var(--dim)}
+a.btn{text-decoration:none;display:inline-block}
+
+/* ── main pane ──────────────────────────────────────────────────────────── */
+#main{margin-left:var(--rail);min-height:100vh;display:flex;flex-direction:column}
+#topbar{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:14px;padding:11px 26px;
+  background:color-mix(in srgb,var(--void) 82%,transparent);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+#statusText{font:500 12.5px var(--mono);color:var(--dim);flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#statusText b{color:var(--ink);font-weight:600}
+#statusText .hot{color:var(--amber)}
+.stale{font:500 11px var(--mono);color:var(--amber);display:none}
+.view{display:none;padding:22px 26px 48px;animation:vin .18s ease}
+.view.on{display:block}
+@keyframes vin{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.eyebrow{font:600 10px var(--disp);letter-spacing:.24em;text-transform:uppercase;color:var(--faint);margin:26px 0 10px}
+.eyebrow:first-child{margin-top:0}
+.eyebrow .n{color:var(--amber)}
+.eyebrow .aside{float:right;letter-spacing:.04em;color:var(--faint);text-transform:none;font:500 11px var(--mono)}
+
+/* ── orbit hero (signature) ─────────────────────────────────────────────── */
+#hero{display:flex;align-items:center;gap:24px;padding:22px 24px;background:var(--panel);
+  border:1px solid var(--line);border-radius:14px;position:relative;overflow:hidden}
+#hero::after{content:"";position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(105deg,transparent 60%,rgba(94,162,255,.05))}
+.orbit{position:relative;width:96px;height:96px;flex:none}
+.orbit svg{width:96px;height:96px;transform:rotate(-90deg)}
+.orbit .track{fill:none;stroke:var(--card2);stroke-width:3}
+.orbit .arc{fill:none;stroke:var(--blue);stroke-width:3;stroke-linecap:round;transition:stroke-dashoffset 1s linear,stroke .5s}
+.orbit .sat{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:34px}
+.orbit.idle .arc{stroke:var(--green);animation:breathe 4s ease-in-out infinite}
+.orbit.paused .arc{stroke:var(--faint);animation:none}
+@keyframes breathe{0%,100%{opacity:.9}50%{opacity:.25}}
+.hero-main{flex:1;min-width:0}
+.hero-state{font:700 22px/1.2 var(--disp);letter-spacing:.01em;margin:0 0 4px}
+.hero-state .mut{color:var(--dim);font-weight:500}
+.hero-sub{font:500 12px var(--mono);color:var(--dim)}
+.hero-sub b{color:var(--ink)}
+.hero-btns{display:flex;gap:8px;flex:none;flex-wrap:wrap;justify-content:flex-end}
+
+/* ── stat strip ─────────────────────────────────────────────────────────── */
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:10px;margin-top:12px}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:13px 15px}
+.stat .k{font:600 9.5px var(--disp);letter-spacing:.16em;text-transform:uppercase;color:var(--faint)}
+.stat .v{font:600 22px/1.15 var(--mono);margin-top:5px;font-variant-numeric:tabular-nums}
+.stat .s{font:500 10.5px var(--mono);color:var(--dim);margin-top:3px}
+.stat .v .u{font-size:12px;color:var(--dim)}
+
+/* ── cards ──────────────────────────────────────────────────────────────── */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:10px}
+.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(258px,1fr));gap:14px;align-items:start}
+.col{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:0 10px 10px;
+  max-height:calc(100vh - 170px);overflow-y:auto}
+.col::-webkit-scrollbar{width:8px}.col::-webkit-scrollbar-thumb{background:var(--card2);border-radius:4px}
+.col h2{font:600 10.5px var(--disp);letter-spacing:.18em;text-transform:uppercase;color:var(--dim);
+  margin:0 -10px 10px;padding:12px 14px 10px;position:sticky;top:0;background:var(--panel);z-index:2;
+  border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
+.col h2 .cnt{margin-left:auto;font:600 10.5px var(--mono);color:var(--faint)}
+.col.hl-run h2{color:var(--blue)} .col.hl-next h2{color:var(--amber)} .col.hl-skip h2{color:var(--faint)}
+.card{background:var(--card);border:1px solid var(--line2);border-radius:10px;padding:11px 13px;margin-bottom:9px}
+.grid>.card{margin-bottom:0}
+.card.live{border-color:var(--blue);box-shadow:0 0 0 1px var(--blue),0 0 24px -6px rgba(94,162,255,.45)}
+.card-h{display:flex;align-items:center;gap:6px;margin-bottom:5px;flex-wrap:wrap}
+.tid{font:500 10px var(--mono);color:var(--faint)}
+.title{font:600 13px/1.4 var(--body);color:var(--ink);margin:2px 0}
+.meta{font:500 11px var(--mono);color:var(--dim);margin-top:4px}
+.b{font:600 9.5px var(--disp);letter-spacing:.06em;padding:2px 7px;border-radius:4px;text-transform:uppercase}
+.b-ok{background:var(--green-dim);color:var(--green)} .b-warn{background:var(--amber-dim);color:var(--amber)}
+.b-stop{background:var(--red-dim);color:var(--red)} .b-muted{background:var(--card2);color:var(--dim)}
+.b-vio{background:var(--violet-dim);color:var(--violet)} .b-acc{background:var(--blue-dim);color:var(--blue)}
+details{margin-top:7px} summary{cursor:pointer;color:var(--dim);font-size:11.5px}
+ul.acc{margin:6px 0 0 16px;padding:0;font-size:11.5px;color:var(--dim)}
+.timer{font:600 12px var(--mono);color:var(--blue);font-variant-numeric:tabular-nums}
+.wd{height:3px;border-radius:2px;background:var(--card2);margin-top:6px;overflow:hidden}.wd>i{display:block;height:100%;background:var(--blue)}
+.btns{display:flex;gap:5px;margin-top:9px;flex-wrap:wrap}
+.reason{font:500 11.5px/1.5 var(--mono);color:var(--red);margin-top:5px}
+.lint{font:500 11px/1.5 var(--mono);color:var(--amber);margin-top:4px}
+.empty{color:var(--faint);font-size:12px;padding:16px 6px;text-align:center;line-height:1.6}
+.empty b{color:var(--dim)}
+
+/* ── inbox ──────────────────────────────────────────────────────────────── */
+.inbox-zero{display:flex;align-items:center;gap:12px;padding:16px 18px;background:var(--panel);
+  border:1px solid var(--line);border-left:3px solid var(--green);border-radius:11px;color:var(--dim);font-size:12.5px}
+.inbox-hot{border-left:3px solid var(--amber)}
+.morelink{font:600 11.5px var(--disp);color:var(--amber);background:none;border:0;cursor:pointer;padding:6px 2px}
+
+/* ── filters / chips ────────────────────────────────────────────────────── */
+.chips{display:flex;flex-wrap:wrap;gap:7px;margin:0 0 12px;align-items:center}
+.chip{border:1px solid var(--line2);background:var(--card);color:var(--dim);border-radius:15px;
+  padding:4px 11px;font:600 11px var(--disp);cursor:pointer}
+.chip:hover{color:var(--ink);border-color:var(--faint)}
+.chip.on{background:var(--blue-dim);color:var(--blue);border-color:#2b4f86}
+.chip b{font-weight:700;margin-left:4px;font-family:var(--mono)}
+.chip-go{margin-left:auto;background:var(--green-dim);color:var(--green);border-color:#1d5c40}
+
+/* ── telemetry tail ─────────────────────────────────────────────────────── */
+.tailwrap{margin-top:12px;background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--blue);border-radius:11px;padding:13px 15px}
+.viewer{max-height:56vh;overflow:auto;background:var(--void);border:1px solid var(--line);border-radius:8px;
+  padding:12px;margin:0;font:400 11.5px/1.6 var(--mono);white-space:pre-wrap;word-break:break-word;color:#B7C2D8}
+#tailbody{max-height:250px}
+.dl-add{color:var(--green);background:var(--green-dim);display:block}
+.dl-del{color:var(--red);background:var(--red-dim);display:block}
+.dl-hunk{color:var(--blue);font-weight:600;display:block}
+
+/* ── activity chart / funnel ────────────────────────────────────────────── */
+.band{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:15px 17px;margin-bottom:14px}
+.bandhead{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+.bandhead h3{margin:0;font:600 10.5px var(--disp);letter-spacing:.18em;text-transform:uppercase;color:var(--dim)}
+.bandsum{font:500 11px var(--mono);color:var(--faint)} .bandsum b{color:var(--ink)}
+.hrange{display:flex;gap:6px;margin-left:auto}
+.hchart{display:flex;gap:3px;height:98px;overflow-x:auto;padding-top:6px}
+.hday{display:flex;flex-direction:column;justify-content:flex-end;align-items:center;min-width:13px;flex:1 0 13px}
+.hbar{width:78%;display:flex;flex-direction:column-reverse;border-radius:2px 2px 0 0;overflow:hidden;min-height:2px;background:var(--card2)}
+.hbar i{display:block;width:100%} .hday:hover .hbar{outline:1px solid var(--blue)}
+.hlbl{font:400 8.5px var(--mono);color:var(--faint);margin-top:4px;writing-mode:vertical-rl;transform:rotate(180deg);white-space:nowrap}
+.hlegend{display:flex;gap:12px;flex-wrap:wrap;font:500 10px var(--mono);color:var(--dim);margin-top:10px}
+.hlegend span{display:inline-flex;align-items:center;gap:5px} .hlegend i{width:8px;height:8px;border-radius:2px;display:inline-block}
+.frow{display:flex;align-items:center;gap:12px;padding:6px 0}
+.fsrc{width:120px;font:600 11.5px var(--disp);color:var(--ink);flex:none}
+.fbar{flex:1;display:flex;height:12px;border-radius:6px;overflow:hidden;background:var(--card2);min-width:80px}
+.fbar i{display:block} .fnum{font:500 10.5px var(--mono);color:var(--dim);flex:none}
+.runlog{list-style:none;margin:6px 0 0;padding:0}
+.runlog li{font:400 11px/1.6 var(--mono);color:var(--dim);padding:5px 0;border-bottom:1px solid var(--line)}
+.runlog li:last-child{border-bottom:0}
+
+/* ── feature agents ─────────────────────────────────────────────────────── */
+.fbuild{display:flex;align-items:flex-start;gap:11px;padding:10px 0;border-bottom:1px solid var(--line)}
+.fbuild:last-child{border-bottom:0}
+.fb-dot{width:9px;height:9px;border-radius:50%;margin-top:5px;flex:none}
+.fb-dot.run{animation:breathe 1.4s infinite}
+.fb-title{font:600 13px var(--body)} .fb-meta{font:500 10.5px var(--mono);color:var(--dim);margin-top:3px}
+.fb-act{margin-left:auto;flex:none;padding-left:10px}
+.fb-merged{font:600 10.5px var(--disp);color:var(--green);background:var(--green-dim);border-radius:11px;padding:3px 10px;white-space:nowrap}
+.flow{font:500 11.5px/1.7 var(--mono);color:var(--dim);margin-bottom:8px}
+.flow code{background:var(--card);border:1px solid var(--line2);border-radius:4px;padding:1px 5px;color:var(--ink)}
+
+/* ── modal / toast ──────────────────────────────────────────────────────── */
+.modal{display:none;position:fixed;inset:0;background:rgba(4,6,10,.72);z-index:100;align-items:center;justify-content:center}
+.modalbox{background:var(--panel);border:1px solid var(--line2);border-radius:13px;padding:18px 20px;
+  width:min(680px,92vw);box-shadow:0 24px 64px rgba(0,0,0,.5)}
+.modalbox.wide{width:min(1000px,94vw)}
+.modalbox h3{margin:0 0 10px;font:600 14px var(--disp);letter-spacing:.03em}
+.modalbox textarea{width:100%;height:300px;font:400 11.5px/1.6 var(--mono);border:1px solid var(--line2);
+  border-radius:8px;padding:11px;color:var(--ink);background:var(--void);resize:vertical}
+.toast{position:fixed;right:18px;bottom:18px;max-width:480px;background:var(--panel);border:1px solid var(--blue);
+  border-radius:10px;padding:12px 16px;font:500 12px/1.6 var(--mono);white-space:pre-wrap;
+  box-shadow:0 12px 40px rgba(0,0,0,.5);opacity:0;transform:translateY(10px);transition:.25s;z-index:200;color:var(--ink)}
+.toast.show{opacity:1;transform:none}
+
+/* ── command palette ────────────────────────────────────────────────────── */
+#palette{display:none;position:fixed;inset:0;background:rgba(4,6,10,.66);z-index:150;align-items:flex-start;justify-content:center;padding-top:12vh}
+#palette.open{display:flex}
+.palbox{width:min(640px,92vw);background:var(--panel);border:1px solid var(--line2);border-radius:13px;overflow:hidden;box-shadow:0 28px 80px rgba(0,0,0,.6)}
+#palinput{width:100%;background:var(--void);border:0;border-bottom:1px solid var(--line);color:var(--ink);
+  font:500 15px var(--mono);padding:15px 18px;outline:none}
+#palinput::placeholder{color:var(--faint)}
+#pallist{max-height:46vh;overflow-y:auto;padding:6px}
+.palitem{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:8px;cursor:pointer}
+.palitem.sel{background:var(--card2)}
+.palitem .pk{font:600 9px var(--disp);letter-spacing:.08em;text-transform:uppercase;padding:2px 7px;border-radius:4px;flex:none;background:var(--card);color:var(--dim);border:1px solid var(--line2);min-width:74px;text-align:center}
+.palitem .pk.hot{background:var(--amber-dim);color:var(--amber);border-color:#7a5620}
+.palitem .pk.act{background:var(--blue-dim);color:var(--blue);border-color:#2b4f86}
+.palitem .pt{font:500 12.5px var(--body);color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.palitem .pid{font:400 10px var(--mono);color:var(--faint);margin-left:auto;flex:none;max-width:180px;overflow:hidden;text-overflow:ellipsis}
+.palhint{padding:8px 14px;font:500 10px var(--mono);color:var(--faint);border-top:1px solid var(--line);display:flex;gap:14px}
+kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line2);border-bottom-width:2px;border-radius:4px;padding:1px 5px;color:var(--dim)}
+/* card locate flash (palette jump target) */
+@keyframes flash{0%,60%{box-shadow:0 0 0 2px var(--amber),0 0 28px -4px rgba(255,180,84,.7)}100%{box-shadow:none}}
+.card.flash{animation:flash 1.6s ease-out}
+/* clamped escalation reasons — click to expand */
+.reason{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;cursor:pointer}
+.reason.open{display:block;-webkit-line-clamp:unset}
+.reason:not(.open):hover{text-decoration:underline dotted}
+/* answer/reject modal */
+.m3ctx{background:var(--void);border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:10px;font:500 12px/1.6 var(--mono);color:var(--dim);max-height:180px;overflow-y:auto}
+.m3ctx b{color:var(--ink)} .m3ctx .rr{color:var(--red)}
+#m3text{height:110px}
+/* KPI row (insights) */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px}
+/* telemetry tail colors */
+.tl-tool{color:var(--blue)} .tl-start{color:var(--green);font-weight:600} .tl-end{color:var(--amber);font-weight:600}
+/* spend chart */
+.schart{display:flex;gap:6px;height:86px;overflow-x:auto;padding-top:6px}
+.sday{display:flex;flex-direction:column;justify-content:flex-end;align-items:center;flex:1 0 34px;min-width:34px}
+.sval{font:500 8.5px var(--mono);color:var(--dim);margin-bottom:3px;white-space:nowrap}
+.sbar{width:66%;background:var(--amber);border-radius:3px 3px 0 0;min-height:2px;opacity:.85}
+.sday.zero .sbar{background:var(--card2)}
+.slbl{font:400 8.5px var(--mono);color:var(--faint);margin-top:4px;white-space:nowrap}
+
+/* ── responsive / a11y ──────────────────────────────────────────────────── */
+@media (max-width:940px){
+  :root{--rail:0px}
+  #rail{position:sticky;inset:auto;width:100%;height:auto;flex-direction:row;align-items:center;
+    overflow-x:auto;border-right:0;border-bottom:1px solid var(--line);top:0}
+  .brand{padding:10px 14px;border:0;flex:none} .brand .base{display:none}
+  nav{flex-direction:row;padding:6px;flex:none} .navlbl{display:none}
+  .nav{padding:7px 9px} .nav .key{display:none}
+  .railfoot{flex-direction:row;border:0;margin-left:auto;align-items:center} .meter{display:none}
+  #main{margin-left:0} .view{padding:16px 14px 40px}
+  #hero{flex-wrap:wrap} .hero-btns{justify-content:flex-start}
+}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation:none!important;transition:none!important}
+}
+</style></head><body>
+
+<aside id="rail">
+  <div class="brand">
+    <div class="sat"><span style="font-size:20px">🛰️</span><h1>Autopilot</h1></div>
+    <div class="base">flying <b>__BRANCH__</b></div>
+  </div>
+  <nav aria-label="Views">
+    <div class="navlbl">Console</div>
+    <button class="nav on" data-view="overview" onclick="go('overview')"><span class="ico">◉</span>Overview<span class="key">1</span></button>
+    <button class="nav" data-view="inbox" onclick="go('inbox')"><span class="ico">📥</span>Inbox<span class="nb" id="nb-inbox">0</span></button>
+    <button class="nav" data-view="queue" onclick="go('queue')"><span class="ico">☰</span>Queue<span class="nb" id="nb-queue">0</span></button>
+    <button class="nav" data-view="ships" onclick="go('ships')"><span class="ico">⬆</span>Ships<span class="nb" id="nb-ships">0</span></button>
+    <div class="navlbl">Fleet</div>
+    <button class="nav" data-view="agents" onclick="go('agents')"><span class="ico">🚧</span>Feature agents<span class="key">5</span></button>
+    <button class="nav" data-view="insights" onclick="go('insights')"><span class="ico">📈</span>Insights<span class="key">6</span></button>
+  </nav>
+  <div class="railfoot">
+    <button class="btn" id="loopBtn" onclick="toggleLoop()">…</button>
+    <button class="btn btn-ghost" id="feedBtn" onclick="toggleFeed()" title="When on, the loop promotes the next safe task itself whenever the queue runs dry.">Auto-feed</button>
+    <div class="meter" id="budgetMeter"></div>
+  </div>
+</aside>
+
+<main id="main">
+  <div id="topbar">
+    <span id="statusText">connecting to the loop…</span>
+    <span class="stale" id="stalePill">⚠ reconnecting…</span>
+  </div>
+
+  <!-- ── OVERVIEW ── -->
+  <section class="view on" id="view-overview">
+    <div id="hero">
+      <div class="orbit idle" id="orbit">
+        <svg viewBox="0 0 96 96" aria-hidden="true">
+          <circle class="track" cx="48" cy="48" r="42"/>
+          <circle class="arc" id="orbitArc" cx="48" cy="48" r="42" stroke-dasharray="263.9" stroke-dashoffset="263.9"/>
+        </svg>
+        <div class="sat">🛰️</div>
+      </div>
+      <div class="hero-main">
+        <p class="hero-state" id="heroState">…</p>
+        <p class="hero-sub" id="heroSub"></p>
+      </div>
+      <div class="hero-btns" id="heroBtns"></div>
+    </div>
+    <div class="stats" id="stats"></div>
+    <div class="eyebrow" id="planEyebrow" style="display:none">Flight plan — next picks <span class="aside">highest priority first</span></div>
+    <div class="chips" id="nextPreview" style="display:none"></div>
+    <div class="eyebrow">Needs you <span class="aside" id="inboxAside"></span></div>
+    <div id="inboxPreview"></div>
+    <div class="tailwrap" id="tailband" style="display:none">
+      <div class="bandhead"><h3>Telemetry</h3><span class="bandsum" id="tailfile"></span></div>
+      <pre class="viewer" id="tailbody"></pre>
+    </div>
+  </section>
+
+  <!-- ── INBOX ── -->
+  <section class="view" id="view-inbox">
+    <div class="eyebrow">Escalations — the agent stopped and asked <span class="aside">answer one and it re-queues with your answer in the contract</span></div>
+    <div class="grid" id="inboxEsc"></div>
+    <div class="eyebrow">Ships awaiting your review <span class="aside">read the packet, then merge or reject</span></div>
+    <div class="grid" id="inboxShips"></div>
+  </section>
+
+  <!-- ── QUEUE ── -->
+  <section class="view" id="view-queue">
+    <div class="chips" id="filterbar"></div>
+    <div class="cols" id="queueCols"></div>
+  </section>
+
+  <!-- ── SHIPS ── -->
+  <section class="view" id="view-ships">
+    <div class="chips" id="shipRange"></div>
+    <div class="grid" id="shipsGrid"></div>
+  </section>
+
+  <!-- ── FEATURE AGENTS ── -->
+  <section class="view" id="view-agents">
+    <div class="band">
+      <div class="bandhead"><h3>Worktree agents</h3><span class="bandsum" id="fbCount"></span></div>
+      <div class="flow">Dedicated agents for features too big for the one-commit loop. Each builds in its own worktree and pushes its own branch:
+        worktree branch → <b style="color:var(--violet)">Merge into loop</b> → <code id="fbLoop"></code> → <i>you merge</i> → <code>phase-2</code>.</div>
+      <div id="featureband"></div>
+    </div>
+  </section>
+
+  <!-- ── INSIGHTS ── -->
+  <section class="view" id="view-insights">
+    <div class="kpis" id="kpis"></div>
+    <div class="band">
+      <div class="bandhead"><h3>Cost &amp; throughput</h3><span class="bandsum" id="spendsum"></span></div>
+      <div class="schart" id="spendchart"></div>
+    </div>
+    <div class="band">
+      <div class="bandhead"><h3>Activity</h3><span class="bandsum" id="histsum"></span><span class="hrange" id="histrange"></span></div>
+      <div class="hchart" id="hchart"></div><div class="hlegend" id="hlegend"></div>
+    </div>
+    <div class="band">
+      <div class="bandhead"><h3>Where the work comes from</h3><span class="bandsum">source → proposed → queued → shipped → <b style="color:var(--green)">merged</b>. Merged is the number that matters.</span></div>
+      <div id="funnelrows"></div>
+    </div>
+    <div class="band">
+      <div class="bandhead"><h3>Run log</h3><span class="bandsum">the agent's own one-line lessons, newest last</span>
+        <span class="hrange"><button class="chip chip-go" onclick="buildDigest()">Copy weekly digest</button></span></div>
+      <ul class="runlog" id="runlog"></ul>
+    </div>
+  </section>
+</main>
+
+<div class="modal" id="modal" onclick="closeModal()"><div class="modalbox" onclick="event.stopPropagation()">
+  <h3>Weekly digest</h3>
+  <textarea id="digesttext" readonly></textarea>
+  <div style="margin-top:10px;display:flex;gap:8px">
+    <button class="btn btn-blue btn-mini" onclick="copyDigest()">Copy to clipboard</button>
+    <button class="btn btn-mini" onclick="closeModal()">Close</button></div>
+</div></div>
+<div class="modal" id="modal2" onclick="closeModal2()"><div class="modalbox wide" onclick="event.stopPropagation()">
+  <h3 id="m2title"></h3>
+  <pre id="m2body" class="viewer"></pre>
+  <div style="margin-top:10px"><button class="btn btn-mini" onclick="closeModal2()">Close</button></div>
+</div></div>
+<div class="modal" id="modal3" onclick="closeModal3()"><div class="modalbox" onclick="event.stopPropagation()">
+  <h3 id="m3title"></h3>
+  <div class="m3ctx" id="m3ctx"></div>
+  <textarea id="m3text" class="modalbox-ta" placeholder=""></textarea>
+  <div style="margin-top:10px;display:flex;gap:8px">
+    <button class="btn btn-go btn-mini" id="m3go" onclick="submitAction()"></button>
+    <button class="btn btn-mini" onclick="closeModal3()">Cancel</button></div>
+</div></div>
+<div class="modal" id="modal4" onclick="closeModal4()"><div class="modalbox" onclick="event.stopPropagation()" style="width:min(440px,92vw)">
+  <h3>Keyboard</h3>
+  <div style="font:500 12.5px/2.2 var(--mono);color:var(--dim)">
+    <div><kbd>⌘K</kbd> or <kbd>/</kbd> &nbsp;find anything, jump to it</div>
+    <div><kbd>1</kbd>–<kbd>6</kbd> &nbsp;switch views</div>
+    <div><kbd>?</kbd> &nbsp;this help</div>
+    <div><kbd>Esc</kbd> &nbsp;close any overlay</div>
+  </div>
+  <div style="margin-top:10px"><button class="btn btn-mini" onclick="closeModal4()">Close</button></div>
+</div></div>
+<div id="palette" onclick="closePalette()"><div class="palbox" onclick="event.stopPropagation()">
+  <input id="palinput" placeholder="Find a task, ship, or escalation… (or type an action)" autocomplete="off">
+  <div id="pallist"></div>
+  <div class="palhint"><span><kbd>↑↓</kbd> move</span><span><kbd>↵</kbd> jump / run</span><span><kbd>Esc</kbd> close</span></div>
+</div></div>
+<div class="toast" id="toast"></div>
+
+<script>
+/* ── plumbing ───────────────────────────────────────────────────────────── */
+const TOKEN="__TOKEN__";
+const POST_HDRS={'Content-Type':'application/x-www-form-urlencoded','X-CC-Token':TOKEN};
+const esc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+const fmt=s=>{s=Math.max(0,Math.floor(s));const m=Math.floor(s/60),r=s%60;
+  return m<60?`${m}:${String(r).padStart(2,'0')}`:`${Math.floor(m/60)}h${String(m%60).padStart(2,'0')}m`;};
+let S=null,fetchedAt=0,serverNow=0,lastSig='';
+const srvClock=()=>serverNow+(Date.now()-fetchedAt)/1000;
+function post(path,params){const b=new URLSearchParams(params).toString();
+  fetch(path,{method:'POST',headers:POST_HDRS,body:b})
+    .then(r=>r.json()).then(j=>{toast(j.msg||'done');refresh();}).catch(e=>toast('error: '+e));}
+function toast(m){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');
+  clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),6000);}
+
+/* ── navigation ─────────────────────────────────────────────────────────── */
+const VIEWS=['overview','inbox','queue','ships','agents','insights'];
+function go(v){
+  document.querySelectorAll('.view').forEach(x=>x.classList.toggle('on',x.id==='view-'+v));
+  document.querySelectorAll('.nav').forEach(x=>x.classList.toggle('on',x.dataset.view===v));
+  try{localStorage.setItem('cc-view',v)}catch(e){}
+}
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'){closePalette();closeModal();closeModal2();closeModal3();closeModal4();return;}
+  if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();openPalette();return;}
+  if(e.target.tagName==='TEXTAREA'||e.target.tagName==='INPUT')return;
+  if(e.key==='/'){e.preventDefault();openPalette();return;}
+  if(e.key==='?'){document.getElementById('modal4').style.display='flex';return;}
+  const i=parseInt(e.key,10); if(i>=1&&i<=6) go(VIEWS[i-1]);
+});
+try{const v=localStorage.getItem('cc-view'); if(v&&VIEWS.includes(v)) go(v);}catch(e){}
+
+/* ── shared card renderer ───────────────────────────────────────────────── */
+const SAFE_CATS=['testing','documentation','dependencies','code_quality','developer_experience'];
+function badge(t,c){return t?`<span class="b b-${c}">${esc(t)}</span>`:'';}
+function gateCls(g){return{allow:'ok','review-only':'warn',human:'stop'}[g]||'muted';}
+function accList(list){if(!list||!list.length)return'';
+  return `<details><summary>done when… (${list.length} criteria)</summary><ul class=acc>`+
+    list.map(a=>`<li>${esc(a)}</li>`).join('')+`</ul></details>`;}
+function card(t,kind){
+  const cat=badge(t.category,(t.category&&SAFE_CATS.includes(t.category))?'ok':'warn');
+  const gate=badge(t.autopilot,gateCls(t.autopilot));
+  const src=t.source?badge(t.source,'muted'):'';
+  let live='',timer='',btns='';
+  if(kind==='run'){live='live';
+    timer=`<div class="meta">in flight <span class="timer" data-start="${t._start||''}">…</span>`+
+      `<div class="wd"><i data-wd="${t._start||''}" style="width:0%"></i></div></div>`;
+    btns=`<button class="btn btn-stop btn-mini" onclick="if(confirm('Abort the running cycle and set ${esc(t.id)} aside?'))post('/killtask',{})">Abort &amp; skip</button>`;
+  }else if(kind==='next'){
+    btns=`<button class="btn btn-go btn-mini" title="move it to the front and resume the loop" onclick="post('/runnow',{id:'${esc(t.id)}'})">Run this next</button>
+      <button class="btn btn-mini" title="move up in the queue" onclick="post('/move',{id:'${esc(t.id)}',dir:'up'})">▲</button>
+      <button class="btn btn-mini" title="move down" onclick="post('/move',{id:'${esc(t.id)}',dir:'down'})">▼</button>
+      <button class="btn btn-mini" title="raise priority" onclick="post('/priority',{id:'${esc(t.id)}',dir:'up'})">Pri +</button>
+      <button class="btn btn-ghost btn-mini" onclick="post('/skip',{id:'${esc(t.id)}'})">Set aside</button>`;
+  }else if(kind==='board'){
+    if(t.promotable){
+      btns+=`<button class="btn btn-go btn-mini" title="queue it — the loop will build it on its own branch" onclick="post('/promote',{id:'${esc(t.id)}'})">Queue it</button>`;
+    }else{
+      btns+=`<button class="btn btn-amber btn-mini" title="human override: hand this ${esc(t.category)} task to the agent" onclick="forceTask('${esc(t.id)}','${esc(t.category)}')">Hand to agent</button>`;
+    }
+    if(t.lint_hard&&t.lint_hard.length){
+      btns+=`<button class="btn btn-mini" title="let it through despite the thin contract" onclick="post('/lintok',{id:'${esc(t.id)}'})">Waive lint</button>`;
+    }
+    btns+=`<button class="btn btn-mini" title="raise priority" onclick="post('/priority',{id:'${esc(t.id)}',dir:'up'})">Pri +</button>
+      <button class="btn btn-ghost btn-mini" onclick="post('/skip',{id:'${esc(t.id)}'})">Set aside</button>`;
+  }else if(kind==='skipped'){
+    btns=`<button class="btn btn-go btn-mini" onclick="post('/unskip',{id:'${esc(t.id)}'})">Bring back</button>`;
+  }else if(kind==='esc'){
+    btns=`<button class="btn btn-go btn-mini" title="your answer joins the contract and the task re-queues" onclick="answerTask('${esc(t.id)}')">Answer &amp; re-queue</button>
+      <button class="btn btn-ghost btn-mini" onclick="post('/skip',{id:'${esc(t.id)}'})">Set aside</button>`;
+  }else if(kind==='done'){
+    const ref=`${(t.sha||'').slice(0,8)} → ${esc(t.branch||t.remote_ref||'')}`;
+    const when=t.committed_at?` · ${t.committed_at} (${relDays(t.committed_at)})`:'';
+    btns='';
+    if(t.has_packet)btns+=`<button class="btn btn-blue btn-mini" title="the 2-minute read: contract, diffstat, verifier evidence" onclick="openText('Review packet — ${esc(t.id)}','/review?id=${encodeURIComponent(t.id)}',false)">Review packet</button>`;
+    if(t.has_patch)btns+=`<button class="btn btn-mini" title="the full diff" onclick="openText('Diff — ${esc(t.id)}','/diff?id=${encodeURIComponent(t.id)}',true)">Diff</button>`;
+    if(t.pr_url)btns+=`<a class="btn btn-blue btn-mini" href="${esc(t.pr_url)}" target="_blank" rel="noopener" title="opens Bitbucket with source and target prefilled">Open PR ↗</a>`;
+    if(!t.merged&&!t.rejected){
+      btns+=`<button class="btn btn-go btn-mini" title="record that this ship landed" onclick="post('/mark',{id:'${esc(t.id)}',outcome:'merged'})">Mark merged</button>
+        <button class="btn btn-stop btn-mini" onclick="rejectTask('${esc(t.id)}')">Reject</button>`;
+    }
+    if(t.merged)btns+=`<button class="btn btn-vio btn-mini" onclick="if(confirm('Revert ${esc(t.id)} on the loop branch and push the revert?'))post('/rollback',{id:'${esc(t.id)}'})">Revert</button>`;
+    timer=`<div class="meta">${ref}${when}</div>`;
+  }
+  const pri=(kind==='next'||kind==='board')?badge((t.priority||'medium')+' priority',t.priority==='high'?'warn':'acc'):'';
+  const rev=(kind==='done')?(t.merged?badge('merged','ok'):t.rejected?badge('rejected','stop'):badge('needs review','warn')):'';
+  const reason=t.reason?`<div class=reason title="click to expand" onclick="this.classList.toggle('open')">⚠ ${esc(t.reason)}</div>`:'';
+  const lint=(kind==='board'&&((t.lint_hard&&t.lint_hard.length)||(t.lint_soft&&t.lint_soft.length)))?
+    `<div class=lint>contract: ${esc([...(t.lint_hard||[]).map(x=>'HELD — '+x),...(t.lint_soft||[])].join(' · '))}</div>`:'';
+  const note=t.review_note?`<div class=lint>rejected: ${esc(t.review_note)}</div>`:'';
+  return `<div class="card ${live}" data-tid="${esc(t.id)}">
+    <div class="card-h"><span class="tid">${esc(t.id)}</span> ${cat} ${gate} ${pri} ${rev} ${src}</div>
+    <div class="title">${esc(t.title)}</div>
+    ${timer}${reason}${lint}${note}${accList(t.acceptance_criteria)}
+    <div class="btns">${btns}</div></div>`;
+}
+function col(title,cls,items,kind,emptyMsg){
+  const body=items.length?items.map(t=>card(t,kind)).join(''):`<div class=empty>${emptyMsg||'—'}</div>`;
+  return `<section class="col ${cls}"><h2>${title}<span class=cnt>${items.length}</span></h2>${body}</section>`;
+}
+
+/* ── topbar + orbit + rail ──────────────────────────────────────────────── */
+const ORBIT_C=263.9;
+function inboxItems(){
+  const e=(S&&S.escalated)||[], s=((S&&S.done)||[]).filter(t=>!t.merged&&!t.rejected);
+  return {esc:e,ships:s,n:e.length+s.length};
+}
+function renderTop(){
+  if(!S)return; const r=S,t=srvClock(),ib=inboxItems();
+  // status sentence
+  const money=`$${(r.daily_spend||0).toFixed(2)} est.`;
+  let s;
+  if(r.stopped)s=`⏸ <b>Paused.</b> Nothing runs or spends until you resume · ${r.counts.next} queued · ${money} today`;
+  else if(r.cycle_running&&r.cycle_start)s=`<b>In flight: ${esc(r.current_task||'claiming a task…')}</b> · ${fmt(t-r.cycle_start)} elapsed · ${r.daily_count}/${r.max_tasks} tasks + ${money} today · ${r.counts.next} queued behind it`;
+  else s=`<b>Armed.</b> Watching the queue — next pick within ~${r.interval}s · ${r.daily_count}/${r.max_tasks} tasks + ${money} today · ${r.counts.next} queued`;
+  if(ib.n)s+=` · <span class=hot>${ib.n} item${ib.n===1?'':'s'} need you</span>`;
+  document.getElementById('statusText').innerHTML=s;
+  // orbit
+  const orbit=document.getElementById('orbit'),arc=document.getElementById('orbitArc');
+  const hs=document.getElementById('heroState'),hsub=document.getElementById('heroSub');
+  if(r.stopped){orbit.className='orbit paused';arc.style.strokeDashoffset=ORBIT_C;
+    hs.innerHTML=`Paused <span class=mut>— holding position</span>`;
+    hsub.innerHTML=`The loop idles free of charge. Resume when you're ready · <b>${r.counts.next}</b> task(s) queued.`;}
+  else if(r.cycle_running&&r.cycle_start){
+    const p=Math.min(1,(t-r.cycle_start)/r.cycle_timeout);
+    orbit.className='orbit';arc.style.strokeDashoffset=ORBIT_C*(1-p);
+    arc.style.stroke=p>.8?'var(--amber)':'var(--blue)';
+    hs.innerHTML=`In flight <span class=mut>· ${esc(r.current_task||'claiming a task…')}</span>`;
+    hsub.innerHTML=`<b>${fmt(t-r.cycle_start)}</b> elapsed of a ${Math.floor(r.cycle_timeout/60)}m watchdog window · one atomic commit per cycle, pushed to its own branch.`;}
+  else{orbit.className='orbit idle';arc.style.strokeDashoffset=ORBIT_C*0.25;arc.style.stroke='var(--green)';
+    hs.innerHTML=`Armed <span class=mut>— watching the queue</span>`;
+    hsub.innerHTML=r.counts.next?`Next pick within ~<b>${r.interval}s</b> · <b>${r.counts.next}</b> task(s) ready.`
+      :(r.auto_feed?`Queue is dry and Auto-feed found nothing safe to promote — queue something from <b>Triage</b>.`
+                   :`Queue is dry — queue something from <b>Triage</b>, or switch on Auto-feed.`);}
+  // hero buttons
+  document.getElementById('heroBtns').innerHTML=
+    (r.stopped?`<button class="btn btn-go" onclick="post('/resume',{})">Resume loop</button>`
+             :`<button class="btn btn-stop" onclick="post('/stop',{})">Pause loop</button>`)+
+    (r.cycle_running?`<button class="btn" onclick="if(confirm('Abort the running cycle? The task is set aside, not retried.'))post('/killtask',{})">Abort cycle</button>`:'');
+  // rail buttons + meter
+  const lb=document.getElementById('loopBtn');
+  lb.textContent=r.stopped?'▶ Resume':'⏸ Pause';
+  lb.className='btn '+(r.stopped?'btn-go':'btn-stop');
+  const fb=document.getElementById('feedBtn');
+  fb.textContent='Auto-feed '+(r.auto_feed?'on':'off');
+  fb.className='btn '+(r.auto_feed?'btn-blue':'btn-ghost');
+  const spendPct=0; // spend is informational only — never a gauge against a cap
+  const taskPct=Math.min(100,r.daily_count/r.max_tasks*100);
+  const pct=Math.max(spendPct,taskPct);
+  document.getElementById('budgetMeter').innerHTML=
+    `<div class=row><span>Today</span><span>${r.daily_count}/${r.max_tasks} · $${(r.daily_spend||0).toFixed(2)}</span></div>
+     <div class=bar><i class="${pct>=85?'warn':''}" style="width:${pct}%"></i></div>`;
+  // nav badges
+  const nb=(id,n,hot)=>{const e2=document.getElementById(id);e2.textContent=n;e2.className='nb'+(hot&&n>0?' hot':'');};
+  nb('nb-inbox',ib.n,true); nb('nb-queue',r.counts.next,false);
+  nb('nb-ships',(r.done||[]).filter(x=>!x.merged&&!x.rejected).length,false);
+  if(!r.loop_loaded)document.getElementById('statusText').innerHTML+=' · <span class=hot>daemon not loaded</span>';
+  // pinned-tab notifier: title count + amber-dotted favicon while items wait
+  const wantTitle=(ib.n?`(${ib.n}) `:'')+'Autopilot — Mission Control';
+  if(document.title!==wantTitle)document.title=wantTitle;
+  const fav=document.querySelector('link[rel=icon]');
+  const want=ib.n?FAV_HOT:FAV_BASE;
+  if(fav&&fav.href!==want)fav.href=want;
+}
+const FAV_BASE="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='88'>🛰️</text></svg>";
+const FAV_HOT="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='88'>🛰️</text><circle cx='78' cy='24' r='20' fill='%23FFB454' stroke='%230B0E14' stroke-width='6'/></svg>";
+
+/* ── overview ───────────────────────────────────────────────────────────── */
+function renderStats(){
+  const r=S,mx=r.metrics||{};
+  const stat=(k,v,s2)=>`<div class=stat><div class=k>${k}</div><div class=v>${v}</div><div class=s>${s2||''}</div></div>`;
+  const merged=(r.done||[]).filter(t=>t.merged).length;
+  const wait=(r.done||[]).filter(t=>!t.merged&&!t.rejected).length;
+  document.getElementById('stats').innerHTML=
+    stat('Queued',r.counts.next,`${r.counts.board} in triage · ${r.counts.skipped} set aside`)+
+    stat('Shipped',mx.pushed||0,`${merged} merged · ${wait} need review`)+
+    stat('Turnaround',r.avg_cycle_sec!=null?fmt(r.avg_cycle_sec):'—',`per task · last ${r.cycle_samples||0} cycle${(r.cycle_samples||0)===1?'':'s'}`)+
+    stat('Code churn · 7d',`${mx.changes_7d||0}`,`+${mx.loc_added_7d||0} / −${mx.loc_removed_7d||0} lines`)+
+    stat('Heartbeat',r.heartbeat?fmt(srvClock()-r.heartbeat)+`<span class=u> ago</span>`:'—','last sign of life in the log')+
+    stat('Escalated',mx.escalated||0,'stopped and asked for you');
+  // flight plan: the next few picks, in the picker's real order
+  const plan=(r.next_up||[]).slice(0,4);
+  const pe=document.getElementById('planEyebrow'),np=document.getElementById('nextPreview');
+  if(plan.length){
+    pe.style.display='';np.style.display='';
+    np.innerHTML=plan.map((t,i)=>`<button class="chip" title="${esc(t.title)}" onclick="go('queue')">${i+1}. ${esc(t.title.length>52?t.title.slice(0,52)+'…':t.title)}</button>`).join('');
+  }else{pe.style.display='none';np.style.display='none';}
+}
+function renderInboxAll(){
+  const ib=inboxItems();
+  const aside=document.getElementById('inboxAside');
+  const prev=document.getElementById('inboxPreview');
+  const proposed=(S.board||[]).filter(t=>t.status==='proposed').length;
+  if(!ib.n){
+    aside.textContent='';
+    prev.innerHTML=`<div class="inbox-zero">✓ Inbox zero. ${proposed?`<b>${proposed}</b>&nbsp;proposed task(s) wait in Triage.`:'Nothing waits on you.'}</div>`;
+  }else{
+    aside.textContent=`${ib.esc.length} escalation(s) · ${ib.ships.length} ship(s) to review`;
+    const items=[...ib.esc.map(t=>card(t,'esc')),...ib.ships.map(t=>card(t,'done'))];
+    prev.innerHTML=`<div class=grid>${items.slice(0,4).join('')}</div>`+
+      (ib.n>4?`<button class=morelink onclick="go('inbox')">Open the full inbox — ${ib.n} items →</button>`:'');
+  }
+  document.getElementById('inboxEsc').innerHTML=ib.esc.length?ib.esc.map(t=>card(t,'esc')).join('')
+    :`<div class=empty>No open escalations. When the agent hits a judgment call it stops and files one here.</div>`;
+  document.getElementById('inboxShips').innerHTML=ib.ships.length?ib.ships.map(t=>card(t,'done')).join('')
+    :`<div class=empty>Nothing waiting. Every ship has been merged or rejected.</div>`;
+}
+
+/* ── queue view ─────────────────────────────────────────────────────────── */
+const FILTERS=[
+  {k:'all',label:'All'},
+  {k:'bug',label:'Bugs',test:t=>t.category==='bug'},
+  {k:'feature',label:'Features',test:t=>t.category==='feature'},
+  {k:'foundry',label:'Foundry',test:t=>t.source==='maturity-score'},
+  {k:'logwatch',label:'Prod logs',test:t=>t.source==='logwatch'},
+  {k:'uitest',label:'UI QA',test:t=>t.source==='ui-test'},
+  {k:'review',label:'Reviews',test:t=>['code-review','security-review','network-review'].includes(t.source)},
+  {k:'infra',label:'Infra & sec',test:t=>['security','infrastructure','release_management','git_practices'].includes(t.category)},
+  {k:'docs',label:'Docs & tests',test:t=>['documentation','testing'].includes(t.category)},
+];
+let activeFilter='all';
+function filtered(items){const f=FILTERS.find(x=>x.k===activeFilter);return(f&&f.test)?items.filter(f.test):items;}
+function setFilter(k){activeFilter=k;renderViews();}
+function renderFilters(){
+  const bar=document.getElementById('filterbar');
+  bar.innerHTML=FILTERS.map(f=>{
+    const n=f.test?S.board.filter(f.test).length:S.board.length;
+    return `<button class="chip ${f.k===activeFilter?'on':''}" onclick="setFilter('${f.k}')">${f.label}<b>${n}</b></button>`;
+  }).join('')+`<button class="chip chip-go" onclick="promoteAllShown()">Queue all shown</button>`;
+}
+function promoteAllShown(){
+  const vis=filtered(S.board).filter(t=>t.promotable&&t.status==='proposed');
+  if(!vis.length){toast('Nothing here is both safe and proposed — nothing to queue.');return;}
+  if(!confirm('Queue '+vis.length+' shown task(s)? The loop will work them one per cycle.'))return;
+  Promise.all(vis.map(t=>fetch('/promote',{method:'POST',headers:POST_HDRS,body:'id='+encodeURIComponent(t.id)})))
+    .then(()=>{toast('Queued '+vis.length+' task(s).');refresh();});
+}
+function renderQueue(){
+  const r=S;
+  document.getElementById('queueCols').innerHTML=
+    col('In flight','hl-run',r.running.map(x=>({...x,_start:r.cycle_start})),'run','Nothing in flight.')+
+    col('Up next','hl-next',r.next_up,'next',r.auto_feed
+      ?'Queue is dry — Auto-feed found nothing safe to promote.<br><b>Queue something from Triage.</b>'
+      :'Queue is dry.<br><b>Queue something from Triage, or switch on Auto-feed.</b>')+
+    col('Triage'+(activeFilter!=='all'?' · '+esc(activeFilter):''),'',filtered(r.board),'board','Nothing to triage — discovery sources will refill this.')+
+    col('Set aside','hl-skip',r.skipped,'skipped','Nothing set aside.');
+}
+
+/* ── ships view ─────────────────────────────────────────────────────────── */
+let rangeDays=7;
+function setRange(d){rangeDays=d;renderViews();}
+function daysList(n){const out=[],d=new Date();for(let i=n-1;i>=0;i--){const x=new Date(d);x.setDate(d.getDate()-i);out.push(x.toISOString().slice(0,10));}return out;}
+function withinRange(dstr){if(rangeDays>365)return true;if(!dstr)return false;
+  const c=new Date();c.setHours(0,0,0,0);c.setDate(c.getDate()-(rangeDays-1));return new Date(dstr+'T00:00:00')>=c;}
+function relDays(d){if(!d)return'';const n=Math.floor((Date.now()-new Date(d+'T00:00:00'))/864e5);return n<=0?'today':n===1?'1d ago':n+'d ago';}
+let shipFilter='all';
+function setShipFilter(k){shipFilter=k;renderViews();}
+function renderShips(){
+  const all=S.done||[];
+  const F=[['all','All',()=>true],
+           ['wait','Needs review',t=>!t.merged&&!t.rejected],
+           ['merged','Merged',t=>t.merged],
+           ['rejected','Rejected',t=>t.rejected]];
+  const fchips=F.map(([k,l,fn])=>`<button class="chip ${shipFilter===k?'on':''}" onclick="setShipFilter('${k}')">${l}<b>${all.filter(fn).length}</b></button>`).join('');
+  const rchips=[['Today',1],['7 days',7],['30 days',30],['All time',9999]].map(([l,d])=>
+    `<button class="chip ${rangeDays===d?'on':''}" onclick="setRange(${d})">${l}</button>`).join('');
+  document.getElementById('shipRange').innerHTML=fchips+`<span style="margin-left:auto"></span>`+rchips;
+  const ffn=F.find(([k])=>k===shipFilter)[2];
+  const items=all.filter(t=>ffn(t)&&(withinRange(t.committed_at)||rangeDays>365));
+  document.getElementById('shipsGrid').innerHTML=items.length?items.map(t=>card(t,'done')).join('')
+    :`<div class=empty>No ships match. Widen the range or clear the filter.</div>`;
+}
+
+/* ── agents view ────────────────────────────────────────────────────────── */
+function relSince(ep){if(!ep)return'';const s=Math.max(0,Math.floor(Date.now()/1000-ep)),m=Math.floor(s/60);return m<60?m+'m':Math.floor(m/60)+'h'+String(m%60).padStart(2,'0')+'m';}
+function mergeToLoop(branch){
+  if(!branch)return;const loop=(S&&S.base_branch)||'the loop branch';
+  if(confirm('Merge worktree branch\n\n'+branch+'\n\ninto '+loop+' and push?\n\n• runs in an isolated worktree — your checkout is untouched\n• aborts on conflict, nothing pushed\n• never force-pushes'))
+    post('/merge-to-loop',{branch:branch});
+}
+function renderAgents(){
+  const fb=(S&&S.feature_builds)||[];
+  document.getElementById('fbLoop').textContent=(S&&S.base_branch)||'';
+  const nRun=fb.filter(b=>b.status==='running').length;
+  document.getElementById('fbCount').textContent=fb.length?`${fb.length} agent${fb.length===1?'':'s'}${nRun?` · ${nRun} building now`:''}`:'';
+  const band=document.getElementById('featureband');
+  if(!fb.length){
+    band.innerHTML=`<div class=empty>No feature agents yet.<br>Start one with <b>python3 feature_build.py start &lt;id&gt; "&lt;title&gt;" &lt;branch&gt;</b> — it appears here with live status.</div>`;
+    return;
+  }
+  const SC={running:['var(--blue)','building'],pushed:['var(--green)','pushed — review it'],failed:['var(--red)','failed']};
+  band.innerHTML=fb.map(b=>{
+    const sc=SC[b.status]||['var(--faint)',b.status];
+    const when=b.status==='running'?('running '+relSince(b.started)):(b.finished?('finished '+relSince(b.finished)+' ago'):'');
+    const act=b.merged?`<span class="fb-merged">on the loop branch ✓</span>`
+      :(b.status==='pushed'&&b.branch)?`<button class="btn btn-vio btn-mini" onclick="mergeToLoop('${esc(b.branch)}')">Merge into loop</button>`:'';
+    return `<div class=fbuild><span class="fb-dot ${b.status==='running'?'run':''}" style="background:${sc[0]}"></span>
+      <div><div class=fb-title>${esc(b.title)}</div>
+        <div class=fb-meta>${esc(b.branch||'')}${b.sha?(' @ '+esc(String(b.sha).slice(0,8))):''} · <span style="color:${sc[0]};font-weight:600">${sc[1]}</span> · ${when}${b.note?(' · '+esc(b.note)):''}</div></div>
+      <div class=fb-act>${act}</div></div>`;
+  }).join('');
+}
+
+/* ── insights view ──────────────────────────────────────────────────────── */
+const TYPE_COLORS={docs:'#5EA2FF',tests:'#3DD68C',feature:'#A78BFA',bug:'#FF6B6B',refactor:'#FFB454',chore:'#8B96AC',other:'#5A6478'};
+function renderHistory(){
+  const h=(S&&S.history)||{};
+  let span;
+  if(rangeDays>365){const ks=Object.keys(h).sort();if(ks.length){const arr=[];for(let x=new Date(ks[0]);x<=new Date();x.setDate(x.getDate()+1))arr.push(x.toISOString().slice(0,10));span=arr.slice(-60);}else span=daysList(14);}
+  else span=daysList(Math.max(7,rangeDays));
+  const maxC=Math.max(1,...span.map(d=>(h[d]||{}).commits||0));
+  let totC=0,totA=0,totR=0;
+  document.getElementById('hchart').innerHTML=span.map(date=>{
+    const d=h[date]||{commits:0,added:0,removed:0,types:{}};
+    totC+=d.commits;totA+=d.added;totR+=d.removed;
+    const hpct=d.commits?Math.max(6,d.commits/maxC*100):0;
+    const segs=Object.entries(d.types||{}).map(([t,n])=>`<i style="height:${n/Math.max(1,d.commits)*100}%;background:${TYPE_COLORS[t]||TYPE_COLORS.other}"></i>`).join('');
+    return `<div class=hday title="${date}: ${d.commits} commit(s), +${d.added}/−${d.removed} lines"><div class=hbar style="height:${hpct}%">${segs}</div><div class=hlbl>${date.slice(5)}</div></div>`;
+  }).join('');
+  document.getElementById('histsum').innerHTML=`<b>${totC}</b> commits · <b>+${totA}</b>/<b>−${totR}</b> lines · <b>${(totC/span.length).toFixed(1)}</b>/day`;
+  document.getElementById('histrange').innerHTML=[['Today',1],['7d',7],['30d',30],['All',9999]].map(([l,d])=>
+    `<button class="chip ${rangeDays===d?'on':''}" onclick="setRange(${d})">${l}</button>`).join('');
+  document.getElementById('hlegend').innerHTML=Object.entries(TYPE_COLORS).map(([t,c])=>`<span><i style="background:${c}"></i>${t}</span>`).join('');
+}
+function ftot(c){return(c.proposed||0)+(c.queued||0)+(c.shipped||0)+(c.merged||0)+(c.rejected||0)+(c.escalated||0)+(c.skipped||0);}
+function renderFunnel(){
+  const f=(S&&S.funnel)||{};
+  const STAGES=[['proposed','#5A6478'],['queued','#FFB454'],['shipped','#5EA2FF'],['merged','#3DD68C'],['rejected','#FF6B6B'],['escalated','#c25050'],['skipped','#39415a']];
+  const SRC={'maturity-score':'Foundry','logwatch':'Prod logs','ui-test':'UI QA','backlog':'Manual','backlog-research':'Research','code-review':'Code review','security-review':'Security review','network-review':'Network review','other':'Other'};
+  document.getElementById('funnelrows').innerHTML=Object.entries(f).filter(([s,c])=>ftot(c)>0)
+    .sort((a,b)=>ftot(b[1])-ftot(a[1])).map(([src,c])=>{
+      const segs=STAGES.map(([k,col2])=>c[k]?`<i title="${k}: ${c[k]}" style="flex:${c[k]};background:${col2}"></i>`:'').join('');
+      const nums=STAGES.filter(([k])=>c[k]).map(([k,col2])=>`<span style="color:${col2}">${c[k]} ${k}</span>`).join(' · ');
+      return `<div class=frow><div class=fsrc>${SRC[src]||esc(src)}</div><div class=fbar>${segs}</div><div class=fnum>${nums}</div></div>`;
+    }).join('')||'<div class=empty>—</div>';
+}
+function renderKpis(){
+  const all=S.done||[], merged=all.filter(t=>t.merged).length, rej=all.filter(t=>t.rejected).length;
+  const reviewed=merged+rej, shipped=all.length;
+  const sh=S.spend_history||[];
+  const spend14=sh.reduce((a,d)=>a+d.spend,0), tasks14=sh.reduce((a,d)=>a+d.tasks,0);
+  // cost/task only over days that HAVE spend data (tracking started 2026-07-03) —
+  // dividing by task counts from pre-tracking days would understate the cost.
+  const tasksTracked=sh.filter(d=>d.spend>0).reduce((a,d)=>a+d.tasks,0);
+  const stat=(k,v,s2)=>`<div class=stat><div class=k>${k}</div><div class=v>${v}</div><div class=s>${s2||''}</div></div>`;
+  document.getElementById('kpis').innerHTML=
+    stat('Merge rate',shipped?Math.round(merged/shipped*100)+'<span class=u>%</span>':'—',`${merged} of ${shipped} ships landed`)+
+    stat('Reject rate',reviewed?Math.round(rej/reviewed*100)+'<span class=u>%</span>':'—',`${rej} rejected of ${reviewed} reviewed`)+
+    stat('Spend · 14d',`$${spend14.toFixed(2)}`,`${tasks14} task${tasks14===1?'':'s'} counted`)+
+    stat('Cost per task',tasksTracked?`$${(spend14/tasksTracked).toFixed(2)}`:'—','on days with cost tracking')+
+    stat('Open escalations',(S.escalated||[]).length,'each is one answer away from re-queueing');
+}
+function renderSpend(){
+  const sh=S.spend_history||[];
+  const maxS=Math.max(0.01,...sh.map(d=>d.spend));
+  document.getElementById('spendchart').innerHTML=sh.map(d=>{
+    const pct=d.spend?Math.max(4,d.spend/maxS*100):0;
+    return `<div class="sday ${d.spend?'':'zero'}" title="${d.date}: $${d.spend.toFixed(2)} · ${d.tasks} task(s)">
+      <span class=sval>${d.spend?('$'+d.spend.toFixed(d.spend<10?2:0)):''}</span>
+      <div class=sbar style="height:${pct}%"></div><span class=slbl>${d.date.slice(5)}</span></div>`;
+  }).join('');
+  const t=sh.reduce((a,d)=>a+d.spend,0);
+  document.getElementById('spendsum').innerHTML=`<b>$${t.toFixed(2)}</b> across 14 days — estimated cost from each cycle's result (informational only)`;
+}
+function renderRunlog(){
+  document.getElementById('runlog').innerHTML=(S.runlog||[]).length?
+    S.runlog.map(l=>`<li>${esc(l)}</li>`).join(''):'<li>No runs yet.</li>';
+}
+
+/* ── digest ─────────────────────────────────────────────────────────────── */
+function buildDigest(){
+  const h=(S&&S.history)||{},days=daysList(7);
+  let c=0,a=0,r=0,types={};
+  days.forEach(d=>{const x=h[d];if(x){c+=x.commits;a+=x.added;r+=x.removed;Object.entries(x.types||{}).forEach(([t,n])=>types[t]=(types[t]||0)+n);}});
+  const cut=new Date();cut.setHours(0,0,0,0);cut.setDate(cut.getDate()-6);
+  const ships=(S.done||[]).filter(t=>t.committed_at&&new Date(t.committed_at+'T00:00:00')>=cut).map(t=>`  • ${t.title} (${t.committed_at})`);
+  const fn=S.funnel||{};
+  const disc=Object.entries(fn).filter(([s,x])=>ftot(x)>0).map(([s,x])=>`  ${s}: ${x.merged||0} merged, ${x.shipped||0} awaiting review, ${x.rejected||0} rejected, ${(x.proposed||0)+(x.queued||0)} open`).join('\n');
+  const awaiting=(S.done||[]).filter(t=>!t.merged&&!t.rejected).length;
+  const mergedN=(S.done||[]).filter(t=>t.merged).length;
+  const txt=`📊 Autopilot — last 7 days (as of ${new Date().toISOString().slice(0,10)})
+Shipped: ${c} commits, +${a} / −${r} LOC · ${mergedN} merged, ${awaiting} awaiting review
+By type: ${Object.entries(types).map(([t,n])=>t+' '+n).join(', ')||'—'}
+Avg turnaround: ${S.avg_cycle_sec?fmt(S.avg_cycle_sec):'—'} per task
+Spend today: $${(S.daily_spend||0).toFixed(2)} (est., informational)
+Branches: per-task autopilot/task-<id> off ${S.base_branch} (review each, merge or reject)
+
+Recent ships:
+${ships.slice(0,15).join('\n')||'  (none)'}
+
+Discovery (by source):
+${disc||'  —'}`;
+  document.getElementById('digesttext').value=txt;
+  document.getElementById('modal').style.display='flex';
+}
+function copyDigest(){const t=document.getElementById('digesttext');t.select();
+  (navigator.clipboard?navigator.clipboard.writeText(t.value):Promise.reject()).then(()=>toast('Digest copied.')).catch(()=>{document.execCommand('copy');toast('Digest copied.');});}
+function closeModal(){document.getElementById('modal').style.display='none';}
+
+/* ── inbox actions / text viewer ────────────────────────────────────────── */
+function forceTask(id,cat){
+  const msg='Hand "'+id+'" to the agent?\n\nThis is a '+cat+' task — normally human-only. The agent will attempt a code fix on its own branch for your review (never merged). Work it cannot do — secret rotation, infra grants, migrations — comes back as an escalation.';
+  if(confirm(msg))post('/force',{id:id});
+}
+/* Answer / Reject — a real modal that keeps the task's context in view. */
+let m3={id:null,mode:null};
+function findTask(id){
+  for(const list of [S.escalated,S.done,S.board,S.next_up,S.skipped])
+    for(const t of (list||[])) if(t.id===id) return t;
+  return {id:id,title:id};
+}
+function answerTask(id){
+  const t=findTask(id); m3={id:id,mode:'answer'};
+  document.getElementById('m3title').textContent='Answer & re-queue';
+  document.getElementById('m3ctx').innerHTML=`<b>${esc(t.title)}</b>`+(t.reason?`<br><span class=rr>⚠ ${esc(t.reason)}</span>`:'');
+  const ta=document.getElementById('m3text');
+  ta.value=''; ta.placeholder='What should the agent do, or what decision unblocks it? Your answer joins the contract and the task re-queues.';
+  document.getElementById('m3go').textContent='Answer & re-queue';
+  document.getElementById('m3go').className='btn btn-go btn-mini';
+  document.getElementById('modal3').style.display='flex'; ta.focus();
+}
+function rejectTask(id){
+  const t=findTask(id); m3={id:id,mode:'reject'};
+  document.getElementById('m3title').textContent='Reject this ship';
+  document.getElementById('m3ctx').innerHTML=`<b>${esc(t.title)}</b><br>${esc((t.sha||'').slice(0,8))} → ${esc(t.branch||'')}`;
+  const ta=document.getElementById('m3text');
+  ta.value=''; ta.placeholder='Why is it rejected? The reason is recorded on the task and tunes what gets auto-fed.';
+  document.getElementById('m3go').textContent='Reject ship';
+  document.getElementById('m3go').className='btn btn-stop btn-mini';
+  document.getElementById('modal3').style.display='flex'; ta.focus();
+}
+function submitAction(){
+  const txt=document.getElementById('m3text').value.trim();
+  if(m3.mode==='answer'){ if(!txt){toast('Write an answer first — it becomes part of the contract.');return;}
+    post('/answer',{id:m3.id,text:txt}); }
+  else post('/mark',{id:m3.id,outcome:'rejected',note:txt});
+  closeModal3();
+}
+function closeModal3(){document.getElementById('modal3').style.display='none';}
+function closeModal4(){document.getElementById('modal4').style.display='none';}
+
+/* ── command palette ────────────────────────────────────────────────────── */
+let palSel=0;
+function paletteItems(q){
+  const items=[];
+  if(!S)return items;
+  items.push({act:S.stopped?'/resume':'/stop',title:S.stopped?'Resume the loop':'Pause the loop',kind:'action'});
+  items.push({act:'autofeed',title:'Turn Auto-feed '+(S.auto_feed?'off':'on'),kind:'action'});
+  items.push({act:'digest',title:'Copy weekly digest',kind:'action'});
+  const add=(t,view,kind,hot)=>items.push({id:t.id,title:t.title,view,kind,hot});
+  (S.escalated||[]).forEach(t=>add(t,'inbox','escalated',true));
+  (S.done||[]).forEach(t=>add(t,'ships',t.merged?'merged':t.rejected?'rejected':'needs review',!t.merged&&!t.rejected));
+  (S.next_up||[]).forEach(t=>add(t,'queue','queued'));
+  (S.board||[]).forEach(t=>add(t,'queue','triage'));
+  (S.skipped||[]).forEach(t=>add(t,'queue','set aside'));
+  if(!q)return items.slice(0,12);
+  const ql=q.toLowerCase();
+  const score=x=>{const s=(x.title+' '+(x.id||'')+' '+x.kind).toLowerCase();
+    if(!s.includes(ql))return -1; return s.startsWith(ql)?2:(x.title.toLowerCase().includes(ql)?1:0);};
+  return items.map(x=>[score(x),x]).filter(([s])=>s>=0).sort((a,b)=>b[0]-a[0]).map(([,x])=>x).slice(0,12);
+}
+function renderPalette(){
+  const q=document.getElementById('palinput').value.trim();
+  const items=paletteItems(q);
+  palSel=Math.min(palSel,Math.max(0,items.length-1));
+  document.getElementById('pallist').innerHTML=items.length?items.map((x,i)=>
+    `<div class="palitem ${i===palSel?'sel':''}" onclick="palGo(${i})" onmousemove="palSel=${i};renderPalette()">
+      <span class="pk ${x.kind==='action'?'act':(x.hot?'hot':'')}">${esc(x.kind)}</span>
+      <span class="pt">${esc(x.title)}</span><span class="pid">${esc(x.id||'')}</span></div>`).join('')
+    :'<div class="palitem"><span class="pt" style="color:var(--faint)">Nothing matches.</span></div>';
+  document.getElementById('pallist')._items=items;
+}
+function openPalette(){
+  document.getElementById('palette').classList.add('open');
+  const inp=document.getElementById('palinput'); inp.value=''; palSel=0; renderPalette(); inp.focus();
+}
+function closePalette(){document.getElementById('palette').classList.remove('open');}
+function palGo(i){
+  const items=document.getElementById('pallist')._items||[]; const x=items[i]; if(!x)return;
+  closePalette();
+  if(x.kind==='action'){
+    if(x.act==='autofeed')toggleFeed();
+    else if(x.act==='digest'){go('insights');buildDigest();}
+    else post(x.act,{});
+    return;
+  }
+  go(x.view);
+  setTimeout(()=>{
+    const el=document.querySelector(`.view.on [data-tid="${CSS.escape(x.id)}"]`);
+    if(el){el.scrollIntoView({block:'center'});el.classList.remove('flash');void el.offsetWidth;el.classList.add('flash');}
+    else toast('It’s in the '+x.view+' view but not visible under the current filter.');
+  },180);
+}
+document.getElementById('palinput').addEventListener('keydown',e=>{
+  const items=document.getElementById('pallist')._items||[];
+  if(e.key==='ArrowDown'){e.preventDefault();palSel=Math.min(items.length-1,palSel+1);renderPalette();}
+  else if(e.key==='ArrowUp'){e.preventDefault();palSel=Math.max(0,palSel-1);renderPalette();}
+  else if(e.key==='Enter'){e.preventDefault();palGo(palSel);}
+});
+document.getElementById('palinput').addEventListener('input',()=>{palSel=0;renderPalette();});
+function openText(title,url,isDiff){
+  fetch(url).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.text();}).then(txt=>{
+    document.getElementById('m2title').textContent=title;
+    const body=document.getElementById('m2body');
+    if(isDiff){body.innerHTML=txt.split('\n').map(l=>{
+      const e2=esc(l);
+      if(l.startsWith('+')&&!l.startsWith('+++'))return`<span class=dl-add>${e2}</span>`;
+      if(l.startsWith('-')&&!l.startsWith('---'))return`<span class=dl-del>${e2}</span>`;
+      if(l.startsWith('@@'))return`<span class=dl-hunk>${e2}</span>`;
+      return e2;}).join('\n');}
+    else body.textContent=txt;
+    document.getElementById('modal2').style.display='flex';
+  }).catch(e=>toast('Could not load it: '+e.message));
+}
+function closeModal2(){document.getElementById('modal2').style.display='none';}
+
+/* ── telemetry tail ─────────────────────────────────────────────────────── */
+function pollTail(){
+  const band=document.getElementById('tailband');if(!band)return;
+  if(!S||!S.cycle_running){band.style.display='none';return;}
+  fetch('/api/cycletail').then(r=>r.json()).then(j=>{
+    band.style.display='';
+    document.getElementById('tailfile').textContent=(j.file||'')+' — live, 5s refresh';
+    const pre=document.getElementById('tailbody');
+    const atBottom=pre.scrollHeight-pre.scrollTop-pre.clientHeight<50;
+    pre.innerHTML=(j.lines&&j.lines.length)?j.lines.map(l=>{
+      const e2=esc(l);
+      if(l.startsWith('→'))return`<span class=tl-tool>${e2}</span>`;
+      if(l.startsWith('●'))return`<span class=tl-start>${e2}</span>`;
+      if(l.startsWith('■'))return`<span class=tl-end>${e2}</span>`;
+      return e2;
+    }).join('\n'):'Cycle starting — first telemetry lands in a few seconds.';
+    if(atBottom)pre.scrollTop=pre.scrollHeight;
+  }).catch(()=>{});
+}
+
+/* ── loop controls ──────────────────────────────────────────────────────── */
+function toggleLoop(){if(!S)return;post(S.stopped?'/resume':'/stop',{});}
+function toggleFeed(){if(!S)return;post('/autofeed',{on:S.auto_feed?'0':'1'});}
+
+/* ── render pipeline ────────────────────────────────────────────────────── */
+function sig(r){return JSON.stringify([r.running,r.next_up,r.done,r.board,r.skipped,r.escalated,r.runlog,r.history,r.funnel,r.feature_builds,r.spend_history]);}
+function renderViews(){
+  // Preserve column scroll positions across rebuilds.
+  const colsEl=document.getElementById('queueCols');
+  const scrolls=[...colsEl.querySelectorAll('.col')].map(c=>c.scrollTop);
+  renderStats();renderInboxAll();renderFilters();renderQueue();renderShips();renderAgents();
+  renderKpis();renderSpend();renderHistory();renderFunnel();renderRunlog();
+  [...colsEl.querySelectorAll('.col')].forEach((c,i)=>{if(scrolls[i])c.scrollTop=scrolls[i];});
+}
+function tick(){
+  if(!S)return;const t=srvClock();
+  document.querySelectorAll('.timer[data-start]').forEach(e=>{const s=parseFloat(e.dataset.start);if(s)e.textContent=fmt(t-s);});
+  document.querySelectorAll('.wd > i[data-wd]').forEach(e=>{const s=parseFloat(e.dataset.wd);if(s)e.style.width=Math.min(100,(t-s)/S.cycle_timeout*100)+'%';});
+  renderTop();
+}
+function refresh(){
+  fetch('/api/state').then(r=>r.json()).then(j=>{
+    S=j;serverNow=j.now;fetchedAt=Date.now();
+    document.getElementById('stalePill').style.display='none';
+    renderTop();
+    const s2=sig(j);
+    if(s2!==lastSig){lastSig=s2;renderViews();}
+  }).catch(()=>{document.getElementById('stalePill').style.display='inline';});
+}
+refresh();setInterval(refresh,3000);setInterval(tick,1000);pollTail();setInterval(pollTail,5000);
+</script></body></html>
