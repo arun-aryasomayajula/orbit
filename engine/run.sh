@@ -1,7 +1,7 @@
 #!/bin/bash
-# Ratchet — resilient outer loop wrapper (worktree-isolated, repo-agnostic).
+# Orbit — resilient outer loop wrapper (worktree-isolated, repo-agnostic).
 #
-# Runs Claude Code headless for ONE task (/ratchet-cycle) per iteration inside a
+# Runs Claude Code headless for ONE task (/orbit-cycle) per iteration inside a
 # DEDICATED git worktree on a fresh origin/<base_branch>. Never touches the target's
 # main checkout or uncommitted work. Ships each task to its OWN branch
 # (<branch_prefix>/task-<id>, never the base, never --force) for independent review.
@@ -9,46 +9,46 @@
 # The ENGINE is generic. Everything project-specific comes from the TARGET repo's
 # .autopilot/config.yaml (read via config.py). State lives in .autopilot/state/.
 #
-# Usage:  RATCHET_HOME=/path/to/ratchet ./run.sh <target-repo>
-#   or set RATCHET_TARGET. install.sh writes a launchd/systemd unit that sets both.
+# Usage:  ORBIT_HOME=/path/to/orbit ./run.sh <target-repo>
+#   or set ORBIT_TARGET. install.sh writes a launchd/systemd unit that sets both.
 set -uo pipefail
 
-RATCHET_HOME="${RATCHET_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-ENGINE="$RATCHET_HOME/engine"
-TARGET="${1:-${RATCHET_TARGET:-}}"
-[ -n "$TARGET" ] || { echo "usage: run.sh <target-repo>  (or set RATCHET_TARGET)"; exit 2; }
+ORBIT_HOME="${ORBIT_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+ENGINE="$ORBIT_HOME/engine"
+TARGET="${1:-${ORBIT_TARGET:-}}"
+[ -n "$TARGET" ] || { echo "usage: run.sh <target-repo>  (or set ORBIT_TARGET)"; exit 2; }
 TARGET="$(cd "$TARGET" && pwd)"
 
-# Load the target's profile → RATCHET_* + AP_HOME/AP_STATE exports.
+# Load the target's profile → ORBIT_* + AP_HOME/AP_STATE exports.
 eval "$(python3 "$ENGINE/config.py" shellenv "$TARGET")" || { echo "config load failed"; exit 2; }
 
-REPO="$RATCHET_REPO"
-WT="${AP_WORKTREE:-${REPO}-ratchet-worktree}"
+REPO="$ORBIT_REPO"
+WT="${AP_WORKTREE:-${REPO}-orbit-worktree}"
 STATE="$AP_STATE"
 LOGDIR="$STATE/logs"
 DIFFDIR="$STATE/diffs"
 STOP_FILE="$STATE/STOP"
-SETTINGS="$RATCHET_HOME/config/ratchet.settings.json"
-MODEL="${AP_MODEL:-$RATCHET_MODEL}"
-PERM="${AP_PERM:-$RATCHET_PERM}"
-INTERVAL="${AP_INTERVAL:-$RATCHET_INTERVAL}"
-MAX_TASKS_PER_DAY="${AP_MAX_TASKS:-$RATCHET_MAX_TASKS}"
-CYCLE_TIMEOUT="${AP_CYCLE_TIMEOUT:-$RATCHET_CYCLE_TIMEOUT}"
+SETTINGS="$ORBIT_HOME/config/orbit.settings.json"
+MODEL="${AP_MODEL:-$ORBIT_MODEL}"
+PERM="${AP_PERM:-$ORBIT_PERM}"
+INTERVAL="${AP_INTERVAL:-$ORBIT_INTERVAL}"
+MAX_TASKS_PER_DAY="${AP_MAX_TASKS:-$ORBIT_MAX_TASKS}"
+CYCLE_TIMEOUT="${AP_CYCLE_TIMEOUT:-$ORBIT_CYCLE_TIMEOUT}"
 LIMIT_BACKOFF="${AP_LIMIT_BACKOFF:-1800}"
-BASE_REF="origin/$RATCHET_BASE_BRANCH"
-export AP_HOME AP_STATE RATCHET_HOME
-export AP_BASE_BRANCH="$RATCHET_BASE_BRANCH"   # the cycle reads this to branch/diff against the right base
+BASE_REF="origin/$ORBIT_BASE_BRANCH"
+export AP_HOME AP_STATE ORBIT_HOME
+export AP_BASE_BRANCH="$ORBIT_BASE_BRANCH"   # the cycle reads this to branch/diff against the right base
 
 # Resolve the claude binary.
-if [ "$RATCHET_CLAUDE_BIN" = "auto" ]; then
+if [ "$ORBIT_CLAUDE_BIN" = "auto" ]; then
   CLAUDE_BIN="$(command -v claude || echo "$HOME/.local/bin/claude")"
 else
-  CLAUDE_BIN="$RATCHET_CLAUDE_BIN"
+  CLAUDE_BIN="$ORBIT_CLAUDE_BIN"
 fi
 
 mkdir -p "$LOGDIR" "$DIFFDIR" "$STATE/reviews"
 ts(){ date '+%Y-%m-%d %H:%M:%S'; }
-log(){ echo "[$(ts)] $*" | tee -a "$LOGDIR/ratchet.log"; }
+log(){ echo "[$(ts)] $*" | tee -a "$LOGDIR/orbit.log"; }
 today(){ date '+%Y-%m-%d'; }
 notify(){ python3 "$ENGINE/notify.py" "$1" "$2" >/dev/null 2>&1 || true; }
 
@@ -76,16 +76,16 @@ gates_ready() {
 }
 
 prepare_worktree() {
-  git -C "$REPO" fetch origin --quiet 2>>"$LOGDIR/ratchet.log" || true
+  git -C "$REPO" fetch origin --quiet 2>>"$LOGDIR/orbit.log" || true
   if [ ! -d "$WT/.git" ] && ! git -C "$REPO" worktree list | grep -q "$WT"; then
     log "creating worktree at $WT"
-    git -C "$REPO" worktree add --force "$WT" "$BASE_REF" >>"$LOGDIR/ratchet.log" 2>&1 || { log "FATAL: worktree add failed"; return 1; }
+    git -C "$REPO" worktree add --force "$WT" "$BASE_REF" >>"$LOGDIR/orbit.log" 2>&1 || { log "FATAL: worktree add failed"; return 1; }
   fi
-  git -C "$WT" checkout --detach "$BASE_REF" >>"$LOGDIR/ratchet.log" 2>&1 || true
-  git -C "$WT" reset --hard "$BASE_REF" >>"$LOGDIR/ratchet.log" 2>&1
-  git -C "$WT" clean -fd >>"$LOGDIR/ratchet.log" 2>&1
-  git -C "$WT" for-each-ref --format='%(refname:short)' "refs/heads/$RATCHET_BRANCH_PREFIX/" 2>/dev/null \
-    | while read -r b; do [ -n "$b" ] && git -C "$WT" branch -D "$b" >>"$LOGDIR/ratchet.log" 2>&1 || true; done
+  git -C "$WT" checkout --detach "$BASE_REF" >>"$LOGDIR/orbit.log" 2>&1 || true
+  git -C "$WT" reset --hard "$BASE_REF" >>"$LOGDIR/orbit.log" 2>&1
+  git -C "$WT" clean -fd >>"$LOGDIR/orbit.log" 2>&1
+  git -C "$WT" for-each-ref --format='%(refname:short)' "refs/heads/$ORBIT_BRANCH_PREFIX/" 2>/dev/null \
+    | while read -r b; do [ -n "$b" ] && git -C "$WT" branch -D "$b" >>"$LOGDIR/orbit.log" 2>&1 || true; done
 }
 
 record_spend() {
@@ -126,9 +126,9 @@ PYEOF
 run_cycle() {
   local out="$1"; cd "$WT" || return 1
   local caff=""; command -v caffeinate >/dev/null 2>&1 && caff="caffeinate -i"
-  $caff "$CLAUDE_BIN" --print "/ratchet-cycle" \
+  $caff "$CLAUDE_BIN" --print "/orbit-cycle" \
       --permission-mode "$PERM" --settings "$SETTINGS" --model "$MODEL" \
-      --add-dir "$REPO" --add-dir "$RATCHET_HOME" \
+      --add-dir "$REPO" --add-dir "$ORBIT_HOME" \
       --output-format stream-json --verbose >"$out" 2>&1 &
   local cpid=$!
   ( sleep "$CYCLE_TIMEOUT"; kill -TERM "$cpid" 2>/dev/null; sleep 10; kill -KILL "$cpid" 2>/dev/null ) &
@@ -141,10 +141,10 @@ run_cycle() {
 one_iteration() {
   gates_ready || { echo SKIP; return; }
   prepare_worktree || { echo FAIL; return; }
-  python3 "$ENGINE/backlog_to_tasks.py" >>"$LOGDIR/ratchet.log" 2>&1 || log "WARN: backlog→queue refresh failed"
+  python3 "$ENGINE/backlog_to_tasks.py" >>"$LOGDIR/orbit.log" 2>&1 || log "WARN: backlog→queue refresh failed"
   if [ -f "$STATE/AUTO_PROMOTE" ] && [ "$(count_pickable)" = "0" ]; then
     log "auto-feed: promoting next safe task"
-    python3 "$ENGINE/autopromote.py" >>"$LOGDIR/ratchet.log" 2>&1 || log "WARN: autopromote failed"
+    python3 "$ENGINE/autopromote.py" >>"$LOGDIR/orbit.log" 2>&1 || log "WARN: autopromote failed"
   fi
   local pickable; pickable="$(count_pickable)"
   if [ "${pickable:-0}" = "0" ]; then log "no pickable tasks — idling, no cycle spent."; echo EMPTY; return; fi
@@ -163,24 +163,24 @@ one_iteration() {
 
   if [ "$ahead" -gt 0 ]; then
     local sha branch; sha="$(git -C "$WT" rev-parse --short HEAD 2>/dev/null || echo '?')"
-    branch="$RATCHET_BRANCH_PREFIX/task-${tid:-cycle-$(date '+%Y%m%dT%H%M%S')}"
+    branch="$ORBIT_BRANCH_PREFIX/task-${tid:-cycle-$(date '+%Y%m%dT%H%M%S')}"
     log "cycle committed $ahead change(s) ($sha) — pushing $branch"
-    if ! git -C "$WT" push origin "HEAD:refs/heads/$branch" >>"$LOGDIR/ratchet.log" 2>&1; then
+    if ! git -C "$WT" push origin "HEAD:refs/heads/$branch" >>"$LOGDIR/orbit.log" 2>&1; then
       branch="${branch}-$(date '+%Y%m%dT%H%M%S')"
-      git -C "$WT" push origin "HEAD:refs/heads/$branch" >>"$LOGDIR/ratchet.log" 2>&1 || branch=""
+      git -C "$WT" push origin "HEAD:refs/heads/$branch" >>"$LOGDIR/orbit.log" 2>&1 || branch=""
     fi
     if [ -n "$branch" ]; then
       log "pushed origin/$branch ($sha) — review, then Merge/Reject"
       [ -n "$tid" ] && { python3 "$ENGINE/ledger.py" pushed "$tid" "origin/$branch" 2>/dev/null || true
-        python3 "$ENGINE/review_packet.py" "$tid" "$WT" "$branch" "$RATCHET_BASE_BRANCH" >>"$LOGDIR/ratchet.log" 2>&1 || true; }
-      notify "🔧 Ratchet shipped" "task ${tid:-?} → $branch"
+        python3 "$ENGINE/review_packet.py" "$tid" "$WT" "$branch" "$ORBIT_BASE_BRANCH" >>"$LOGDIR/orbit.log" 2>&1 || true; }
+      notify "🔧 Orbit shipped" "task ${tid:-?} → $branch"
     else
       log "WARN: push failed twice — patch kept: ${patch:-none}"
     fi
   else
     log "cycle produced no commit (no-op / escalation)."
     if [ -n "$tid" ] && ! python3 "$ENGINE/ledger.py" worked-ids 2>/dev/null | tr ' ' '\n' | grep -qx "$tid"; then
-      python3 "$ENGINE/ledger.py" escalate "$tid" "wrapper: no commit (gate fail / too large / incomplete)" >>"$LOGDIR/ratchet.log" 2>&1 || true
+      python3 "$ENGINE/ledger.py" escalate "$tid" "wrapper: no commit (gate fail / too large / incomplete)" >>"$LOGDIR/orbit.log" 2>&1 || true
     fi
   fi
   rm -f "$marker" 2>/dev/null || true
@@ -190,7 +190,7 @@ one_iteration() {
   echo OK
 }
 
-log "==== ratchet up (pid $$) target=$TARGET model=$MODEL base=$RATCHET_BASE_BRANCH ===="
+log "==== orbit up (pid $$) target=$TARGET model=$MODEL base=$ORBIT_BASE_BRANCH ===="
 while true; do
   [ -f "$STOP_FILE" ] && { log "STOP present — idling."; sleep 60; continue; }
   count="$(cat "$STATE/.count-$(today)" 2>/dev/null || echo 0)"

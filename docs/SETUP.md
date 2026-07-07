@@ -1,18 +1,18 @@
-# Ratchet setup — full profile reference
+# Orbit setup — full profile reference
 
 ## 1. Install the engine (once per machine)
 ```bash
-git clone <ratchet-repo> ~/ratchet
+git clone <orbit-repo> ~/orbit
 # ensure `claude` is on PATH and `python3 -m pip install pyyaml`
 ```
 
 ## 2. Onboard a target repo
 ```bash
 cd <your-project>
-~/ratchet/install.sh .
+~/orbit/install.sh .
 ```
-This scaffolds `.autopilot/`, auto-detects your gates, installs the `/ratchet-cycle` command + agents
-into `.claude/`, links the `ratchet` convenience script, runs `doctor`, and offers to install the service.
+This scaffolds `.autopilot/`, auto-detects your gates, installs the `/orbit-cycle` command + agents
+into `.claude/`, links the `orbit` convenience script, runs `doctor`, and offers to install the service.
 
 ## 3. Review the profile (the two things auto-detection can't nail)
 Open `.autopilot/config.yaml`:
@@ -26,12 +26,12 @@ Open `.autopilot/config.yaml`:
 Other fields (all optional, sensible defaults): `model`, `permission_mode`, `interval_seconds`,
 `max_tasks_per_day`, `cycle_timeout_seconds`, `spec` (a standing doc the loop rereads),
 `workable_categories`, `sources`, `env.passthrough`, `branch_prefix`, `commit_trailer`.
-Full field docs: `<ratchet>/config/schema.yaml`.
+Full field docs: `<orbit>/config/schema.yaml`.
 
 ## 4. Fill in tracks (optional but high-value)
 `.autopilot/tracks/` seeds from the engine's generic templates. Replace the placeholder lines with
-YOUR repo's real gotchas and pattern-file pointers (see `<ratchet>/tracks/TEMPLATE.md` and the
-filled-in `<ratchet>/tracks/examples/`). Tracks are what make the maker write code that fits your repo.
+YOUR repo's real gotchas and pattern-file pointers (see `<orbit>/tracks/TEMPLATE.md` and the
+filled-in `<orbit>/tracks/examples/`). Tracks are what make the maker write code that fits your repo.
 
 ## 5. Add tasks
 `.autopilot/backlog.yaml` — each task:
@@ -52,14 +52,14 @@ Only `workable_categories` with `status: queued` and `autopilot: allow` are auto
 
 ## 6. Run
 ```bash
-ratchet doctor .      # validate everything, dry-run routing (read-only)
-ratchet run .         # one loop, foreground — watch it work a task
-ratchet install .     # background service (launchd/systemd)
-ratchet pause . / resume .   # kill switch
+orbit doctor .      # validate everything, dry-run routing (read-only)
+orbit run .         # one loop, foreground — watch it work a task
+orbit install .     # background service (launchd/systemd)
+orbit pause . / resume .   # kill switch
 ```
 
 ## Opt-in task sources (adapters)
-Beyond the native `backlog.yaml`, add source names to `sources:` and Ratchet runs the matching
-`<ratchet>/adapters/<name>_to_backlog.py` each cycle to convert an external source into proposed
+Beyond the native `backlog.yaml`, add source names to `sources:` and Orbit runs the matching
+`<orbit>/adapters/<name>_to_backlog.py` each cycle to convert an external source into proposed
 tasks. Shipped: `foundry` (maturity tasks), `logwatch` (prod log findings), `qa` (UI-test findings).
 These carry their own coupling to specific tools — treat them as examples to adapt.

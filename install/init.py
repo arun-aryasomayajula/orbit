@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Scaffold a target repo's .autopilot/ profile with auto-detected gates.
-Called by install.sh. Usage: init.py <target-repo> <ratchet-home>"""
+Called by install.sh. Usage: init.py <target-repo> <orbit-home>"""
 import sys, os, shutil
 
 TARGET = os.path.abspath(sys.argv[1])
-RATCHET_HOME = os.path.abspath(sys.argv[2])
+ORBIT_HOME = os.path.abspath(sys.argv[2])
 AP = os.path.join(TARGET, ".autopilot")
 
 def detect_gates():
@@ -63,7 +63,7 @@ def main():
         os.makedirs(os.path.join(AP, "state"), exist_ok=True)
         gates = detect_gates()
         base = detect_base_branch()
-        cfg = f"""# Ratchet profile for this repo. Full field reference: {RATCHET_HOME}/config/schema.yaml
+        cfg = f"""# Orbit profile for this repo. Full field reference: {ORBIT_HOME}/config/schema.yaml
 repo: "."
 base_branch: "{base}"
 model: "claude-opus-4-8"
@@ -92,24 +92,24 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
     # seed an empty backlog + state scaffolding
     bl = os.path.join(AP, "backlog.yaml")
     if not os.path.exists(bl):
-        open(bl, "w").write("# Ratchet backlog — human-curated tasks.\n# Each: {id, title, category, priority, status: proposed|queued, autopilot: allow|human, acceptance_criteria: [...]}\ntasks: []\n")
+        open(bl, "w").write("# Orbit backlog — human-curated tasks.\n# Each: {id, title, category, priority, status: proposed|queued, autopilot: allow|human, acceptance_criteria: [...]}\ntasks: []\n")
         print("  ✓ wrote empty .autopilot/backlog.yaml")
     # state gitignore
     gi = os.path.join(AP, "state", ".gitignore")
     if not os.path.exists(gi):
-        open(gi, "w").write("# Ratchet runtime state — do not commit\n*\n!.gitignore\n")
-    # copy the cycle command into the target's .claude/commands so `claude -p /ratchet-cycle` resolves
+        open(gi, "w").write("# Orbit runtime state — do not commit\n*\n!.gitignore\n")
+    # copy the cycle command into the target's .claude/commands so `claude -p /orbit-cycle` resolves
     cmd_dir = os.path.join(TARGET, ".claude", "commands")
     os.makedirs(cmd_dir, exist_ok=True)
-    shutil.copy(os.path.join(RATCHET_HOME, "skills", "ratchet-cycle.md"), os.path.join(cmd_dir, "ratchet-cycle.md"))
+    shutil.copy(os.path.join(ORBIT_HOME, "skills", "orbit-cycle.md"), os.path.join(cmd_dir, "orbit-cycle.md"))
     # copy agents into the target's .claude/agents
     ag_dir = os.path.join(TARGET, ".claude", "agents")
     os.makedirs(ag_dir, exist_ok=True)
-    for a in os.listdir(os.path.join(RATCHET_HOME, "agents")):
+    for a in os.listdir(os.path.join(ORBIT_HOME, "agents")):
         if a.endswith(".md"):
-            shutil.copy(os.path.join(RATCHET_HOME, "agents", a), os.path.join(ag_dir, a))
-    print("  ✓ installed /ratchet-cycle command + agents into .claude/")
-    print(f"\n  next: review {AP}/config.yaml (esp. gates), then `ratchet doctor` and `ratchet install`")
+            shutil.copy(os.path.join(ORBIT_HOME, "agents", a), os.path.join(ag_dir, a))
+    print("  ✓ installed /orbit-cycle command + agents into .claude/")
+    print(f"\n  next: review {AP}/config.yaml (esp. gates), then `orbit doctor` and `orbit install`")
 
 if __name__ == "__main__":
     main()

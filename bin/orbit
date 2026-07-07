@@ -1,0 +1,23 @@
+#!/bin/bash
+# orbit — thin dispatcher (plain script; routes to the engine). Not a packaged CLI.
+#   orbit init <target>      scaffold .autopilot/ (via install.sh)
+#   orbit doctor <target>    validate wiring (read-only, no cycle)
+#   orbit run <target>       run the loop in the foreground
+#   orbit install <target>   install the background service (launchd/systemd)
+#   orbit pause|resume <target>   touch/remove the STOP file
+#   orbit status <target>    queue + ledger + today's spend
+set -euo pipefail
+ORBIT_HOME="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/.." && pwd)"
+verb="${1:-}"; target="${2:-.}"; target="$(cd "$target" && pwd)"
+export ORBIT_HOME
+case "$verb" in
+  init)    "$ORBIT_HOME/install.sh" "$target" ;;
+  doctor)  python3 "$ORBIT_HOME/engine/doctor.py" "$target" "${3:-}" ;;
+  run)     "$ORBIT_HOME/engine/run.sh" "$target" ;;
+  install) "$ORBIT_HOME/install/install_service.sh" "$target" "$ORBIT_HOME" ;;
+  pause)   touch "$target/.autopilot/state/STOP"; echo "paused (STOP present)" ;;
+  resume)  rm -f "$target/.autopilot/state/STOP"; echo "resumed" ;;
+  status)  python3 "$ORBIT_HOME/engine/ledger.py" summary 2>/dev/null || echo "(no ledger yet)";
+           echo "today spend: \$$(cat "$target/.autopilot/state/.spend-$(date +%F)" 2>/dev/null || echo 0)" ;;
+  *) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

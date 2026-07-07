@@ -26,16 +26,16 @@ import yaml
 
 from backlog_lint import lint_task
 
-# RATCHET_HOME: the engine repo root (adapters live in $RATCHET_HOME/adapters/).
-# Fallback: two dirs up from this script ($RATCHET_HOME/engine/backlog_to_tasks.py).
-RATCHET_HOME = Path(os.environ.get("RATCHET_HOME") or Path(__file__).resolve().parent.parent)
+# ORBIT_HOME: the engine repo root (adapters live in $ORBIT_HOME/adapters/).
+# Fallback: two dirs up from this script ($ORBIT_HOME/engine/backlog_to_tasks.py).
+ORBIT_HOME = Path(os.environ.get("ORBIT_HOME") or Path(__file__).resolve().parent.parent)
 
 
 def _ap_home() -> Path:
     # AP_HOME = <target-repo>/.autopilot (config.yaml, backlog.yaml, router.yaml, tracks/).
     home = os.environ.get("AP_HOME")
     if not home:
-        sys.exit("AP_HOME unset — run inside a ratchet target repo (set AP_HOME=<repo>/.autopilot)")
+        sys.exit("AP_HOME unset — run inside a orbit target repo (set AP_HOME=<repo>/.autopilot)")
     return Path(home)
 
 
@@ -112,7 +112,7 @@ def run_source_adapters() -> None:
     """Fold each configured non-native source INTO backlog.yaml before the queue
     is built. `backlog` is native (always present, no adapter). For every OTHER
     name in the target config.yaml `sources:` list (e.g. foundry, logwatch, qa),
-    run $RATCHET_HOME/adapters/<name>_to_backlog.py if it exists; skip silently if
+    run $ORBIT_HOME/adapters/<name>_to_backlog.py if it exists; skip silently if
     not. If `sources` is just `[backlog]`, no adapters run.
     """
     cfg_path = AP_HOME / "config.yaml"
@@ -124,10 +124,10 @@ def run_source_adapters() -> None:
     for name in sources:
         if name == "backlog":
             continue
-        adapter = RATCHET_HOME / "adapters" / f"{name}_to_backlog.py"
+        adapter = ORBIT_HOME / "adapters" / f"{name}_to_backlog.py"
         if adapter.exists():
             print(f"folding source '{name}' → backlog.yaml ({adapter})")
-            subprocess.run([sys.executable, str(adapter)], cwd=str(RATCHET_HOME))
+            subprocess.run([sys.executable, str(adapter)], cwd=str(ORBIT_HOME))
 
 
 def main() -> int:

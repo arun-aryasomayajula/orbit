@@ -64,7 +64,7 @@ def main() -> int:
     # backlog.yaml lives under AP_HOME (<target-repo>/.autopilot).
     home = os.environ.get("AP_HOME")
     if not home:
-        sys.exit("AP_HOME unset — run inside a ratchet target repo (set AP_HOME=<repo>/.autopilot)")
+        sys.exit("AP_HOME unset — run inside a orbit target repo (set AP_HOME=<repo>/.autopilot)")
     backlog = yaml.safe_load((Path(home) / "backlog.yaml").read_text()) or {}
     tasks = backlog.get("tasks") or []
     n_hard = n_soft = 0

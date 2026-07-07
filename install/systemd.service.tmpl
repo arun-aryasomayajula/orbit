@@ -1,11 +1,11 @@
 [Unit]
-Description=Ratchet autonomous coding loop (__TARGET__)
+Description=Orbit autonomous coding loop (__TARGET__)
 After=network-online.target
 
 [Service]
 Type=simple
-Environment=RATCHET_HOME=__HOME__
-Environment=RATCHET_TARGET=__TARGET__
+Environment=ORBIT_HOME=__HOME__
+Environment=ORBIT_TARGET=__TARGET__
 ExecStart=/bin/bash __RUN__ __TARGET__
 Restart=always
 RestartSec=30

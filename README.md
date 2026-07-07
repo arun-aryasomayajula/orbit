@@ -1,4 +1,4 @@
-# Ratchet
+# Orbit
 
 **An autonomous coding loop for Claude Code — repo-agnostic.** Point it at any git repo and it
 works one task at a time from a backlog: pick → route → build → check → verify-spec → atomic
@@ -16,10 +16,10 @@ The **engine** (this repo) is generic and never names a project. Everything proj
 in the **target repo's `.autopilot/` profile**:
 
 ```
-ratchet/ (engine)                     <your-repo>/.autopilot/ (profile)
+orbit/ (engine)                     <your-repo>/.autopilot/ (profile)
 ├── engine/    loop + helpers         ├── config.yaml   ← repo, base_branch, GATES, model, sources
 ├── agents/    maker/checker/verifier ├── router.yaml   ← optional override of the engine default
-├── skills/    the /ratchet-cycle     ├── tracks/       ← this repo's playbooks
+├── skills/    the /orbit-cycle     ├── tracks/       ← this repo's playbooks
 ├── router/    default routing        ├── backlog.yaml  ← the task queue
 ├── tracks/    generic templates      └── state/        ← ledger, queue, reviews (gitignored)
 ├── adapters/  opt-in task sources
@@ -33,18 +33,18 @@ a starter set from your stack.
 ## Setup on any system
 
 ```bash
-git clone <ratchet-repo> ratchet
+git clone <orbit-repo> orbit
 cd <your-project>
-~/path/to/ratchet/install.sh .        # scaffolds .autopilot/, installs /ratchet-cycle, links `ratchet`, offers the service
-ratchet doctor .                       # validate wiring (read-only, no cycle)
-ratchet run .                          # run one loop in the foreground to try it
-ratchet install .                      # install the background service (launchd on macOS, systemd on Linux)
+~/path/to/orbit/install.sh .        # scaffolds .autopilot/, installs /orbit-cycle, links `orbit`, offers the service
+orbit doctor .                       # validate wiring (read-only, no cycle)
+orbit run .                          # run one loop in the foreground to try it
+orbit install .                      # install the background service (launchd on macOS, systemd on Linux)
 ```
 
 Two things to do by hand after `install.sh`: **review `.autopilot/config.yaml` gates** (auto-detection
 is a starting point) and **add tasks** to `.autopilot/backlog.yaml`.
 
-## Commands (`ratchet <verb> <target>`)
+## Commands (`orbit <verb> <target>`)
 
 | verb | does |
 |------|------|
@@ -57,13 +57,13 @@ is a starting point) and **add tasks** to `.autopilot/backlog.yaml`.
 
 ## Requirements
 
-- **Claude Code** (`claude`) on PATH — Ratchet drives it headless (`claude -p /ratchet-cycle`).
+- **Claude Code** (`claude`) on PATH — Orbit drives it headless (`claude -p /orbit-cycle`).
 - Python 3 + `pyyaml`. Git. A test/lint command for your repo (the gates).
-- Background service: launchd (macOS) or systemd-user (Linux). Windows: run `ratchet run` under a supervisor.
+- Background service: launchd (macOS) or systemd-user (Linux). Windows: run `orbit run` under a supervisor.
 
 ## Safety posture
 
-- The agent is **push-denied and destructive-git-denied** (`config/ratchet.settings.json`); only the
+- The agent is **push-denied and destructive-git-denied** (`config/orbit.settings.json`); only the
   wrapper pushes, always to `<branch_prefix>/task-<id>`, never `--force`, never the base branch.
 - Deletes require permission → denied unattended → the cycle escalates instead.
 - Refuses auth/payments/migrations/secrets/CI edits unless a task is explicitly `forced: true` and code-fixable.

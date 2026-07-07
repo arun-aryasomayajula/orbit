@@ -1,5 +1,5 @@
 # Example .autopilot/config.yaml for a FastAPI + React repo (modeled on cdp-metaql).
-# Copy to <your-repo>/.autopilot/config.yaml and edit. `ratchet init` generates this for you.
+# Copy to <your-repo>/.autopilot/config.yaml and edit. `orbit init` generates this for you.
 repo: "."
 base_branch: "main"
 model: "claude-opus-4-8"

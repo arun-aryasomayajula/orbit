@@ -1,6 +1,7 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Autopilot — Mission Control</title>
+<title>Orbit — Mission Control</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🪐</text></svg>">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='88'>🛰️</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -8,10 +9,11 @@
 <style>
 /* ── tokens ─────────────────────────────────────────────────────────────── */
 :root{
-  --void:#0B0E14; --panel:#131824; --card:#1A2130; --card2:#202940; --line:#232C3D; --line2:#2E3A52;
+  /* Orbit palette — blue-shifted deep space: ion-engine blue, aurora green, comet amber */
+  --void:#060913; --panel:#0D1424; --card:#131C32; --card2:#1A2542; --line:#1F2A44; --line2:#2B3A5C;
   --ink:#E8EDF7; --dim:#8B96AC; --faint:#5A6478;
-  --amber:#FFB454; --amber-dim:#4a3416; --green:#3DD68C; --green-dim:#0d3526;
-  --blue:#5EA2FF; --blue-dim:#16294a; --red:#FF6B6B; --red-dim:#43181d;
+  --amber:#FFB35C; --amber-dim:#4a3416; --green:#4ADE9C; --green-dim:#0d3526;
+  --blue:#7C9CFF; --blue-dim:#182a52; --red:#FF6B7A; --red-dim:#43181d;
   --violet:#A78BFA; --violet-dim:#2d2350;
   --disp:"Space Grotesk",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
   --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
@@ -21,8 +23,37 @@
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
 body{background:var(--void);color:var(--ink);font:13.5px/1.55 var(--body);
-  background-image:radial-gradient(1100px 500px at 85% -10%,rgba(94,162,255,.06),transparent 60%),
-                   radial-gradient(900px 420px at -10% 110%,rgba(255,180,84,.04),transparent 55%)}
+  background-image:radial-gradient(1100px 500px at 85% -10%,rgba(124,156,255,.07),transparent 60%),
+                   radial-gradient(900px 420px at -10% 110%,rgba(255,179,92,.04),transparent 55%)}
+
+/* ── starfield: two fixed 1px layers, star positions painted as box-shadows,
+     drifting a few vh back and forth — never a wrap gap, off under reduced motion */
+#stars,#stars2{position:fixed;top:0;left:0;width:1px;height:1px;border-radius:50%;
+  pointer-events:none;z-index:-1;background:transparent}
+#stars{animation:drift 90s ease-in-out infinite alternate}
+#stars2{animation:drift 140s ease-in-out infinite alternate;opacity:.6}
+@keyframes drift{to{transform:translate(1.5vw,-3vh)}}
+
+/* ── the orbit mark: a planet with a satellite tracing its orbit (the brand + live spinner) */
+.orbmark{position:relative;display:inline-block;width:22px;height:22px;vertical-align:-4px;flex:none}
+.orbmark::before{content:"";position:absolute;inset:5px;border-radius:50%;
+  background:radial-gradient(circle at 35% 30%,var(--blue),#2c4390 70%);
+  box-shadow:0 0 8px rgba(124,156,255,.5)}
+.orbmark::after{content:"";position:absolute;inset:0;border-radius:50%;
+  border:1px solid rgba(124,156,255,.35);
+  background:radial-gradient(circle,var(--ink) 1.6px,transparent 2px) no-repeat 50% -1px/4px 4px;
+  animation:orb 3.2s linear infinite}
+.orbmark-sm{width:15px;height:15px;vertical-align:-3px}
+.orbmark-sm::before{inset:3.5px}
+@keyframes orb{to{transform:rotate(360deg)}}
+
+/* ── touchdown: a freshly landed ship settles in with an aurora pulse (plays once) */
+.card.touchdown{animation:touchdown .9s cubic-bezier(.2,.8,.3,1)}
+@keyframes touchdown{
+  0%{transform:translateY(-14px);opacity:0;box-shadow:0 0 0 0 rgba(74,222,156,0)}
+  55%{transform:translateY(2px);opacity:1;box-shadow:0 0 18px 2px rgba(74,222,156,.35)}
+  100%{transform:translateY(0);box-shadow:0 0 0 0 rgba(74,222,156,0)}
+}
 ::selection{background:var(--blue-dim);color:var(--ink)}
 :focus-visible{outline:2px solid var(--blue);outline-offset:2px;border-radius:4px}
 a{color:var(--blue)}
@@ -272,10 +303,23 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
 }
 </style></head><body>
 
+<div id="stars" aria-hidden="true"></div><div id="stars2" aria-hidden="true"></div>
+<script>
+// Deterministic starfield: golden-angle scatter painted as box-shadows on two 1px layers.
+(function(){
+  function field(n,size,alpha){var sh=[];
+    for(var i=1;i<=n;i++){var x=(i*61.803)%100,y=(i*38.196+7)%100;
+      sh.push(x.toFixed(1)+'vw '+y.toFixed(1)+'vh 0 '+size+'px rgba(232,237,247,'+(alpha+(i%3)*.12).toFixed(2)+')');}
+    return sh.join(',');}
+  document.getElementById('stars').style.boxShadow=field(70,0,.22);
+  document.getElementById('stars2').style.boxShadow=field(40,.7,.10);
+})();
+</script>
+
 <aside id="rail">
   <div class="brand">
-    <div class="sat"><span style="font-size:20px">🛰️</span><h1>Autopilot</h1></div>
-    <div class="base">flying <b>__BRANCH__</b></div>
+    <div class="sat"><span class="orbmark" aria-hidden="true"></span><h1>Orbit</h1></div>
+    <div class="base">orbiting <b>__BRANCH__</b></div>
   </div>
   <nav aria-label="Views">
     <div class="navlbl">Console</div>
@@ -462,7 +506,7 @@ function card(t,kind){
   const src=t.source?badge(t.source,'muted'):'';
   let live='',timer='',btns='';
   if(kind==='run'){live='live';
-    timer=`<div class="meta">in flight <span class="timer" data-start="${t._start||''}">…</span>`+
+    timer=`<div class="meta"><span class="orbmark orbmark-sm" aria-hidden="true"></span> in orbit <span class="timer" data-start="${t._start||''}">…</span>`+
       `<div class="wd"><i data-wd="${t._start||''}" style="width:0%"></i></div></div>`;
     btns=`<button class="btn btn-stop btn-mini" onclick="if(confirm('Abort the running cycle and set ${esc(t.id)} aside?'))post('/killtask',{})">Abort &amp; skip</button>`;
   }else if(kind==='next'){
@@ -470,7 +514,7 @@ function card(t,kind){
       <button class="btn btn-mini" title="move up in the queue" onclick="post('/move',{id:'${esc(t.id)}',dir:'up'})">▲</button>
       <button class="btn btn-mini" title="move down" onclick="post('/move',{id:'${esc(t.id)}',dir:'down'})">▼</button>
       <button class="btn btn-mini" title="raise priority" onclick="post('/priority',{id:'${esc(t.id)}',dir:'up'})">Pri +</button>
-      <button class="btn btn-ghost btn-mini" onclick="post('/skip',{id:'${esc(t.id)}'})">Set aside</button>`;
+      <button class="btn btn-ghost btn-mini" title="park it in the graveyard orbit" onclick="post('/skip',{id:'${esc(t.id)}'})">Park</button>`;
   }else if(kind==='board'){
     if(t.promotable){
       btns+=`<button class="btn btn-go btn-mini" title="queue it — the loop will build it on its own branch" onclick="post('/promote',{id:'${esc(t.id)}'})">Queue it</button>`;
@@ -481,12 +525,12 @@ function card(t,kind){
       btns+=`<button class="btn btn-mini" title="let it through despite the thin contract" onclick="post('/lintok',{id:'${esc(t.id)}'})">Waive lint</button>`;
     }
     btns+=`<button class="btn btn-mini" title="raise priority" onclick="post('/priority',{id:'${esc(t.id)}',dir:'up'})">Pri +</button>
-      <button class="btn btn-ghost btn-mini" onclick="post('/skip',{id:'${esc(t.id)}'})">Set aside</button>`;
+      <button class="btn btn-ghost btn-mini" title="park it in the graveyard orbit" onclick="post('/skip',{id:'${esc(t.id)}'})">Park</button>`;
   }else if(kind==='skipped'){
     btns=`<button class="btn btn-go btn-mini" onclick="post('/unskip',{id:'${esc(t.id)}'})">Bring back</button>`;
   }else if(kind==='esc'){
     btns=`<button class="btn btn-go btn-mini" title="your answer joins the contract and the task re-queues" onclick="answerTask('${esc(t.id)}')">Answer &amp; re-queue</button>
-      <button class="btn btn-ghost btn-mini" onclick="post('/skip',{id:'${esc(t.id)}'})">Set aside</button>`;
+      <button class="btn btn-ghost btn-mini" title="park it in the graveyard orbit" onclick="post('/skip',{id:'${esc(t.id)}'})">Park</button>`;
   }else if(kind==='done'){
     const ref=`${(t.sha||'').slice(0,8)} → ${esc(t.branch||t.remote_ref||'')}`;
     const when=t.committed_at?` · ${t.committed_at} (${relDays(t.committed_at)})`:'';
@@ -530,7 +574,7 @@ function renderTop(){
   const money=`$${(r.daily_spend||0).toFixed(2)} est.`;
   let s;
   if(r.stopped)s=`⏸ <b>Paused.</b> Nothing runs or spends until you resume · ${r.counts.next} queued · ${money} today`;
-  else if(r.cycle_running&&r.cycle_start)s=`<b>In flight: ${esc(r.current_task||'claiming a task…')}</b> · ${fmt(t-r.cycle_start)} elapsed · ${r.daily_count}/${r.max_tasks} tasks + ${money} today · ${r.counts.next} queued behind it`;
+  else if(r.cycle_running&&r.cycle_start)s=`<b>In orbit: ${esc(r.current_task||'claiming a task…')}</b> · ${fmt(t-r.cycle_start)} elapsed · ${r.daily_count}/${r.max_tasks} tasks + ${money} today · ${r.counts.next} queued behind it`;
   else s=`<b>Armed.</b> Watching the queue — next pick within ~${r.interval}s · ${r.daily_count}/${r.max_tasks} tasks + ${money} today · ${r.counts.next} queued`;
   if(ib.n)s+=` · <span class=hot>${ib.n} item${ib.n===1?'':'s'} need you</span>`;
   document.getElementById('statusText').innerHTML=s;
@@ -544,13 +588,13 @@ function renderTop(){
     const p=Math.min(1,(t-r.cycle_start)/r.cycle_timeout);
     orbit.className='orbit';arc.style.strokeDashoffset=ORBIT_C*(1-p);
     arc.style.stroke=p>.8?'var(--amber)':'var(--blue)';
-    hs.innerHTML=`In flight <span class=mut>· ${esc(r.current_task||'claiming a task…')}</span>`;
+    hs.innerHTML=`In orbit <span class=mut>· ${esc(r.current_task||'claiming a task…')}</span>`;
     hsub.innerHTML=`<b>${fmt(t-r.cycle_start)}</b> elapsed of a ${Math.floor(r.cycle_timeout/60)}m watchdog window · one atomic commit per cycle, pushed to its own branch.`;}
   else{orbit.className='orbit idle';arc.style.strokeDashoffset=ORBIT_C*0.25;arc.style.stroke='var(--green)';
     hs.innerHTML=`Armed <span class=mut>— watching the queue</span>`;
     hsub.innerHTML=r.counts.next?`Next pick within ~<b>${r.interval}s</b> · <b>${r.counts.next}</b> task(s) ready.`
-      :(r.auto_feed?`Queue is dry and Auto-feed found nothing safe to promote — queue something from <b>Triage</b>.`
-                   :`Queue is dry — queue something from <b>Triage</b>, or switch on Auto-feed.`);}
+      :(r.auto_feed?`Launch pad is dry and Auto-feed found nothing safe to promote — queue something from <b>Deep space</b>.`
+                   :`Launch pad is dry — queue something from <b>Deep space</b>, or switch on Auto-feed.`);}
   // hero buttons
   document.getElementById('heroBtns').innerHTML=
     (r.stopped?`<button class="btn btn-go" onclick="post('/resume',{})">Resume loop</button>`
@@ -575,7 +619,7 @@ function renderTop(){
   nb('nb-ships',(r.done||[]).filter(x=>!x.merged&&!x.rejected).length,false);
   if(!r.loop_loaded)document.getElementById('statusText').innerHTML+=' · <span class=hot>daemon not loaded</span>';
   // pinned-tab notifier: title count + amber-dotted favicon while items wait
-  const wantTitle=(ib.n?`(${ib.n}) `:'')+'Autopilot — Mission Control';
+  const wantTitle=(ib.n?`(${ib.n}) `:'')+'Orbit — Mission Control';
   if(document.title!==wantTitle)document.title=wantTitle;
   const fav=document.querySelector('link[rel=icon]');
   const want=ib.n?FAV_HOT:FAV_BASE;
@@ -592,7 +636,7 @@ function renderStats(){
   const wait=(r.done||[]).filter(t=>!t.merged&&!t.rejected).length;
   document.getElementById('stats').innerHTML=
     stat('Queued',r.counts.next,`${r.counts.board} in triage · ${r.counts.skipped} set aside`)+
-    stat('Shipped',mx.pushed||0,`${merged} merged · ${wait} need review`)+
+    stat('Landed',mx.pushed||0,`${merged} merged · ${wait} need review`)+
     stat('Turnaround',r.avg_cycle_sec!=null?fmt(r.avg_cycle_sec):'—',`per task · last ${r.cycle_samples||0} cycle${(r.cycle_samples||0)===1?'':'s'}`)+
     stat('Code churn · 7d',`${mx.changes_7d||0}`,`+${mx.loc_added_7d||0} / −${mx.loc_removed_7d||0} lines`)+
     stat('Heartbeat',r.heartbeat?fmt(srvClock()-r.heartbeat)+`<span class=u> ago</span>`:'—','last sign of life in the log')+
@@ -612,7 +656,7 @@ function renderInboxAll(){
   const proposed=(S.board||[]).filter(t=>t.status==='proposed').length;
   if(!ib.n){
     aside.textContent='';
-    prev.innerHTML=`<div class="inbox-zero">✓ Inbox zero. ${proposed?`<b>${proposed}</b>&nbsp;proposed task(s) wait in Triage.`:'Nothing waits on you.'}</div>`;
+    prev.innerHTML=`<div class="inbox-zero">✓ All quiet at mission control. ${proposed?`<b>${proposed}</b>&nbsp;proposed task(s) wait in Deep space.`:'Nothing waits on you.'}</div>`;
   }else{
     aside.textContent=`${ib.esc.length} escalation(s) · ${ib.ships.length} ship(s) to review`;
     const items=[...ib.esc.map(t=>card(t,'esc')),...ib.ships.map(t=>card(t,'done'))];
@@ -657,12 +701,12 @@ function promoteAllShown(){
 function renderQueue(){
   const r=S;
   document.getElementById('queueCols').innerHTML=
-    col('In flight','hl-run',r.running.map(x=>({...x,_start:r.cycle_start})),'run','Nothing in flight.')+
-    col('Up next','hl-next',r.next_up,'next',r.auto_feed
-      ?'Queue is dry — Auto-feed found nothing safe to promote.<br><b>Queue something from Triage.</b>'
-      :'Queue is dry.<br><b>Queue something from Triage, or switch on Auto-feed.</b>')+
-    col('Triage'+(activeFilter!=='all'?' · '+esc(activeFilter):''),'',filtered(r.board),'board','Nothing to triage — discovery sources will refill this.')+
-    col('Set aside','hl-skip',r.skipped,'skipped','Nothing set aside.');
+    col('In orbit','hl-run',r.running.map(x=>({...x,_start:r.cycle_start})),'run','Nothing in orbit.')+
+    col('Launch pad','hl-next',r.next_up,'next',r.auto_feed
+      ?'Launch pad is dry — Auto-feed found nothing safe to promote.<br><b>Queue something from Deep space.</b>'
+      :'Launch pad is dry.<br><b>Queue something from Deep space, or switch on Auto-feed.</b>')+
+    col('Deep space'+(activeFilter!=='all'?' · '+esc(activeFilter):''),'',filtered(r.board),'board','Deep space is empty — discovery sources will refill it.')+
+    col('Graveyard orbit','hl-skip',r.skipped,'skipped','Graveyard orbit is empty.');
 }
 
 /* ── ships view ─────────────────────────────────────────────────────────── */
@@ -797,7 +841,7 @@ function buildDigest(){
   const disc=Object.entries(fn).filter(([s,x])=>ftot(x)>0).map(([s,x])=>`  ${s}: ${x.merged||0} merged, ${x.shipped||0} awaiting review, ${x.rejected||0} rejected, ${(x.proposed||0)+(x.queued||0)} open`).join('\n');
   const awaiting=(S.done||[]).filter(t=>!t.merged&&!t.rejected).length;
   const mergedN=(S.done||[]).filter(t=>t.merged).length;
-  const txt=`📊 Autopilot — last 7 days (as of ${new Date().toISOString().slice(0,10)})
+  const txt=`🪐 Orbit — last 7 days (as of ${new Date().toISOString().slice(0,10)})
 Shipped: ${c} commits, +${a} / −${r} LOC · ${mergedN} merged, ${awaiting} awaiting review
 By type: ${Object.entries(types).map(([t,n])=>t+' '+n).join(', ')||'—'}
 Avg turnaround: ${S.avg_cycle_sec?fmt(S.avg_cycle_sec):'—'} per task
@@ -973,9 +1017,21 @@ function tick(){
   document.querySelectorAll('.wd > i[data-wd]').forEach(e=>{const s=parseFloat(e.dataset.wd);if(s)e.style.width=Math.min(100,(t-s)/S.cycle_timeout*100)+'%';});
   renderTop();
 }
+// Touchdown tracking: ships seen before this refresh don't animate; new ones do (once).
+let seenDone=new Set(),donePrimed=false;
+function trackTouchdowns(j){
+  const ids=((j&&j.done)||[]).map(t=>t.id);
+  if(!donePrimed){ids.forEach(i=>seenDone.add(i));donePrimed=true;return;}
+  const fresh=ids.filter(i=>!seenDone.has(i));
+  ids.forEach(i=>seenDone.add(i));
+  if(fresh.length)requestAnimationFrame(()=>fresh.forEach(i=>{
+    document.querySelectorAll(`.card[data-tid="${CSS.escape(i)}"]`).forEach(el=>el.classList.add('touchdown'));
+  }));
+}
 function refresh(){
   fetch('/api/state').then(r=>r.json()).then(j=>{
     S=j;serverNow=j.now;fetchedAt=Date.now();
+    trackTouchdowns(j);
     document.getElementById('stalePill').style.display='none';
     renderTop();
     const s2=sig(j);

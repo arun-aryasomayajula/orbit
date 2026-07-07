@@ -1,5 +1,5 @@
-# Ratchet project profile — the contract for `<target-repo>/.autopilot/config.yaml`.
-# This file documents every field. `ratchet doctor` validates a real config against it.
+# Orbit project profile — the contract for `<target-repo>/.autopilot/config.yaml`.
+# This file documents every field. `orbit doctor` validates a real config against it.
 # The ENGINE is generic; ALL project-specific knowledge lives in the target's .autopilot/.
 #
 # Required: repo, base_branch, gates. Everything else has a default.
@@ -26,7 +26,7 @@ spec: null                   # e.g. "docs/VISION.md" — a standing spec the orc
 # (built-in checks: postgres, mysql, redis, docker, node, python). An unknown `needs`
 # value is treated as a shell test: `<value>` must exit 0.
 gates:
-  # example — replace with your repo's real gates (ratchet init auto-detects these):
+  # example — replace with your repo's real gates (orbit init auto-detects these):
   test:
     cmd: "pytest -q"
     cwd: "."

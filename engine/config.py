@@ -3,7 +3,7 @@
 Keeps run.sh clean: `eval "$(config.py shellenv <target>)"` exports the loop's vars.
 
 Subcommands:
-  shellenv <target>   emit `export RATCHET_*=...` lines for run.sh to eval
+  shellenv <target>   emit `export ORBIT_*=...` lines for run.sh to eval
   gates <target>      print each gate as `name<TAB>cwd<TAB>cmd` (one per line)
   needs <target>      print the union of all gates' `needs` (one per line)
   validate <target>   exit 0 if config is well-formed, else print errors + exit 1
@@ -22,7 +22,7 @@ def load(target):
     import yaml
     cfg_path = os.path.join(target, ".autopilot", "config.yaml")
     if not os.path.exists(cfg_path):
-        sys.exit(f"no config at {cfg_path} — run `ratchet init` in the target repo first")
+        sys.exit(f"no config at {cfg_path} — run `orbit init` in the target repo first")
     cfg = yaml.safe_load(open(cfg_path)) or {}
     out = dict(DEFAULTS)
     out.update({k: v for k, v in cfg.items() if v is not None})
@@ -38,20 +38,20 @@ def shellenv(target):
     cfg, raw = load(target)
     ap_home = os.path.join(os.path.abspath(target), ".autopilot")
     lines = [
-        f"export RATCHET_REPO={sh(cfg['repo'])}",
-        f"export RATCHET_BASE_BRANCH={sh(cfg['base_branch'])}",
-        f"export RATCHET_MODEL={sh(cfg['model'])}",
-        f"export RATCHET_PERM={sh(cfg['permission_mode'])}",
-        f"export RATCHET_INTERVAL={sh(cfg['interval_seconds'])}",
-        f"export RATCHET_MAX_TASKS={sh(cfg['max_tasks_per_day'])}",
-        f"export RATCHET_CYCLE_TIMEOUT={sh(cfg['cycle_timeout_seconds'])}",
-        f"export RATCHET_BRANCH_PREFIX={sh(cfg['branch_prefix'])}",
+        f"export ORBIT_REPO={sh(cfg['repo'])}",
+        f"export ORBIT_BASE_BRANCH={sh(cfg['base_branch'])}",
+        f"export ORBIT_MODEL={sh(cfg['model'])}",
+        f"export ORBIT_PERM={sh(cfg['permission_mode'])}",
+        f"export ORBIT_INTERVAL={sh(cfg['interval_seconds'])}",
+        f"export ORBIT_MAX_TASKS={sh(cfg['max_tasks_per_day'])}",
+        f"export ORBIT_CYCLE_TIMEOUT={sh(cfg['cycle_timeout_seconds'])}",
+        f"export ORBIT_BRANCH_PREFIX={sh(cfg['branch_prefix'])}",
         f"export AP_HOME={sh(ap_home)}",
         f"export AP_STATE={sh(os.path.join(ap_home, 'state'))}",
     ]
     env = raw.get("env", {}) or {}
     cb = env.get("CLAUDE_BIN", "auto")
-    lines.append(f"export RATCHET_CLAUDE_BIN={sh(cb)}")
+    lines.append(f"export ORBIT_CLAUDE_BIN={sh(cb)}")
     if env.get("extra_ca_certs"):
         lines.append(f"export NODE_EXTRA_CA_CERTS={sh(env['extra_ca_certs'])}")
     print("\n".join(lines))

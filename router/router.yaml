@@ -1,4 +1,4 @@
-# Ratchet ROUTER (ENGINE DEFAULT) — "which maker + model + effort + skill + context
+# Orbit ROUTER (ENGINE DEFAULT) — "which maker + model + effort + skill + context
 # does this task get?". The orchestrator reads the TARGET's `.autopilot/router.yaml`
 # if present, else this default. The category→maker/model/skill mapping is repo-agnostic
 # and a good starting point; a target repo overrides `path_tracks` needles and `tracks`

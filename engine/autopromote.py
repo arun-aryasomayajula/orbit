@@ -29,7 +29,7 @@ def _ap_home() -> Path:
     # AP_HOME = <target-repo>/.autopilot (holds backlog.yaml, config.yaml, ...).
     home = os.environ.get("AP_HOME")
     if not home:
-        sys.exit("AP_HOME unset — run inside a ratchet target repo (set AP_HOME=<repo>/.autopilot)")
+        sys.exit("AP_HOME unset — run inside a orbit target repo (set AP_HOME=<repo>/.autopilot)")
     return Path(home)
 
 

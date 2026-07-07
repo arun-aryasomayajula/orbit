@@ -1,4 +1,4 @@
-# Ratchet architecture
+# Orbit architecture
 
 ## The boundary
 One line splits everything: **engine (generic) vs profile (per-repo)**. The engine never names a
@@ -10,7 +10,7 @@ the service's KeepAlive + backoff). Each iteration:
 
 1. **Preflight** — `config.py needs` lists the gate dependencies (postgres, docker, …); skip the cycle if any is down.
 2. **Refresh queue** — `backlog_to_tasks.py` reads `.autopilot/backlog.yaml` (+ any opt-in adapters in `sources:`) → `state/queue.json`.
-3. **Run one task** — `claude -p /ratchet-cycle` (opus orchestrator) in a detached worktree at `origin/<base_branch>`:
+3. **Run one task** — `claude -p /orbit-cycle` (opus orchestrator) in a detached worktree at `origin/<base_branch>`:
    - pick the top workable task (ledger excludes worked ids);
    - **route** via `router.yaml`: category → maker `{agent, model, effort}`, `skill` (invoked + briefed), `tracks` (category ∪ path-triggered);
    - **build ⇄ check** (max 5): maker (builder/qa-writer/doc-writer) then checker (runs `config.gates`);
@@ -46,7 +46,7 @@ fully describes its own autopilot — clone it and the state comes along (or sta
 | `engine/backlog_to_tasks.py` | backlog + adapters → queue.json |
 | `engine/{review_packet,notify,autopromote,backlog_lint,command_center}.py` | packets, notifications, auto-feed, lint gate, dashboard |
 | `agents/*.md` | builder, checker, verifier, qa-writer, doc-writer (generic) |
-| `skills/ratchet-cycle.md` | the orchestrator command |
+| `skills/orbit-cycle.md` | the orchestrator command |
 | `router/router.yaml` | default routing (category → maker/model/skill/tracks) |
 | `tracks/*.md` | generic track templates (+ `examples/` filled-in references) |
 | `adapters/*_to_backlog.py` | opt-in task sources (foundry, logwatch, qa) |

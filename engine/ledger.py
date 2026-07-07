@@ -40,7 +40,7 @@ def _ap_state():
     home = os.environ.get("AP_HOME")
     if home:
         return os.path.join(home, "state")
-    sys.exit("AP_STATE (and AP_HOME) unset — run inside a ratchet target repo "
+    sys.exit("AP_STATE (and AP_HOME) unset — run inside a orbit target repo "
              "(set AP_HOME=<repo>/.autopilot, or AP_STATE explicitly)")
 
 

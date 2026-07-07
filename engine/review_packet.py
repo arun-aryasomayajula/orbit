@@ -31,7 +31,7 @@ def _ap_state() -> Path:
         return Path(st)
     home = os.environ.get("AP_HOME")
     if not home:
-        sys.exit("AP_STATE (and AP_HOME) unset — run inside a ratchet target repo "
+        sys.exit("AP_STATE (and AP_HOME) unset — run inside a orbit target repo "
                  "(set AP_HOME=<repo>/.autopilot, or AP_STATE explicitly)")
     return Path(home) / "state"
 
@@ -39,7 +39,7 @@ def _ap_state() -> Path:
 AP_STATE = _ap_state()
 REVIEWS = AP_STATE / "reviews"
 # Bitbucket "org/repo" for the prefilled PR-create URL; empty → URL omitted.
-BB_REPO = os.environ.get("RATCHET_BB_REPO", "")
+BB_REPO = os.environ.get("ORBIT_BB_REPO", "")
 
 
 def _git(gitdir: str, *args) -> str:
@@ -131,7 +131,7 @@ def main(argv: list[str]) -> int:
     if not re.match(r"^[A-Za-z0-9._-]{1,80}$", tid):
         print(f"invalid task id: {tid}", file=sys.stderr)
         return 2
-    dest = argv[3] if len(argv) > 3 else os.environ.get("RATCHET_BASE_BRANCH", "main")
+    dest = argv[3] if len(argv) > 3 else os.environ.get("ORBIT_BASE_BRANCH", "main")
     out = build(tid, argv[1], argv[2], dest)
     print(f"review packet → {out}")
     return 0

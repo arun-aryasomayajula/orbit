@@ -6,8 +6,8 @@ polls /api/state every 3s and ticks timers client-side every 1s, so it stays
 live WITHOUT disrupting the loop (the launchd daemon runs in parallel; this only
 reads state + edits backlog.yaml/skips/STOP, which the loop re-reads each cycle).
 
-Run:    python3 $RATCHET_HOME/engine/command_center.py    # http://127.0.0.1:8787
-        PORT=9000 python3 $RATCHET_HOME/engine/command_center.py
+Run:    python3 $ORBIT_HOME/engine/command_center.py    # http://127.0.0.1:8787
+        PORT=9000 python3 $ORBIT_HOME/engine/command_center.py
         (AP_HOME / AP_STATE must be set — see config.py shellenv.)
 
 Controls (the loop honors these on its next cycle):
@@ -42,25 +42,25 @@ from backlog_lint import lint_task
 
 # ── path model ───────────────────────────────────────────────────────────────
 # ENGINE       : this repo's engine dir (ships command_center.py, its converter,
-#                and the SPA shell). RATCHET_HOME falls back to two dirs up.
+#                and the SPA shell). ORBIT_HOME falls back to two dirs up.
 # AP_HOME      : <target-repo>/.autopilot — config.yaml, backlog.yaml, router.yaml, tracks/.
 # AP_STATE     : <target-repo>/.autopilot/state — ALL runtime state.
 # REPO         : the target repo working tree (where the loop's git ops run).
 ENGINE = Path(__file__).resolve().parent
-RATCHET_HOME = Path(os.environ.get("RATCHET_HOME") or ENGINE.parent)
+ORBIT_HOME = Path(os.environ.get("ORBIT_HOME") or ENGINE.parent)
 
 
 def _ap_home() -> Path:
     # AP_HOME must be set (or derivable) — the dashboard reads/edits its config there.
     home = os.environ.get("AP_HOME")
     if not home:
-        raise SystemExit("AP_HOME unset — run inside a ratchet target repo (set AP_HOME=<repo>/.autopilot)")
+        raise SystemExit("AP_HOME unset — run inside a orbit target repo (set AP_HOME=<repo>/.autopilot)")
     return Path(home)
 
 
 AP_HOME = _ap_home()
 AP_STATE = Path(os.environ.get("AP_STATE") or AP_HOME / "state")
-REPO = Path(os.environ.get("RATCHET_REPO") or AP_HOME.parent)
+REPO = Path(os.environ.get("ORBIT_REPO") or AP_HOME.parent)
 
 BACKLOG = AP_HOME / "backlog.yaml"
 QUEUE = AP_STATE / "queue.json"
@@ -74,17 +74,17 @@ AUTO_PROMOTE = AP_STATE / "AUTO_PROMOTE"   # presence = auto-feed ON (wrapper re
 LOGDIR = AP_STATE / "logs"
 APLOG = LOGDIR / "autopilot.log"
 CONVERTER = ENGINE / "backlog_to_tasks.py"
-BASE_BRANCH = os.environ.get("RATCHET_BASE_BRANCH") or os.environ.get("AP_BASE_BRANCH", "main")
+BASE_BRANCH = os.environ.get("ORBIT_BASE_BRANCH") or os.environ.get("AP_BASE_BRANCH", "main")
 PORT = int(os.environ.get("PORT", "8787"))
 SHELL_FILE = ENGINE / "cc_shell.html"         # the SPA shell — read per request so design edits go live on refresh
 REVIEWS = AP_STATE / "reviews"                # per-ship review packets (review_packet.py)
 DIFFDIR = AP_STATE / "diffs"                  # wrapper backup patches
 # launchd job label (used only to detect whether the daemon is loaded).
-LAUNCHD_LABEL = os.environ.get("RATCHET_LAUNCHD_LABEL", "com.ratchet.autopilot")
+LAUNCHD_LABEL = os.environ.get("ORBIT_LAUNCHD_LABEL", "com.orbit.autopilot")
 # Dollar spend is informational only — displayed, never a cap (the wrapper's
 # only hard daily limit is the task count).
 # Bitbucket "org/repo" for the prefilled PR-create URL; empty → URL omitted.
-BB_REPO = os.environ.get("RATCHET_BB_REPO", "")
+BB_REPO = os.environ.get("ORBIT_BB_REPO", "")
 BB_PR_NEW = f"https://bitbucket.org/{BB_REPO}/pull-requests/new" if BB_REPO else ""
 
 # CSRF / DNS-rebinding defense for the state-changing control plane:
@@ -97,10 +97,10 @@ _ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}", f"[::1]:{PORT}"}
 _TID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 
 # Mirror run.sh tunables so the timers/budget match reality. Accept the
-# RATCHET_* names (what engine/config.py exports) with AP_* as legacy fallback.
-INTERVAL = int(os.environ.get("RATCHET_INTERVAL") or os.environ.get("AP_INTERVAL", "180"))
-MAX_TASKS = int(os.environ.get("RATCHET_MAX_TASKS") or os.environ.get("AP_MAX_TASKS", "12"))
-CYCLE_TIMEOUT = int(os.environ.get("RATCHET_CYCLE_TIMEOUT") or os.environ.get("AP_CYCLE_TIMEOUT", "3600"))
+# ORBIT_* names (what engine/config.py exports) with AP_* as legacy fallback.
+INTERVAL = int(os.environ.get("ORBIT_INTERVAL") or os.environ.get("AP_INTERVAL", "180"))
+MAX_TASKS = int(os.environ.get("ORBIT_MAX_TASKS") or os.environ.get("AP_MAX_TASKS", "12"))
+CYCLE_TIMEOUT = int(os.environ.get("ORBIT_CYCLE_TIMEOUT") or os.environ.get("AP_CYCLE_TIMEOUT", "3600"))
 
 PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}
 PRIORITY_LADDER = ["low", "medium", "high"]
