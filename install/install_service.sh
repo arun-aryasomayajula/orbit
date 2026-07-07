@@ -4,7 +4,8 @@
 #   install_service.sh <target-repo> <ratchet-home>
 set -euo pipefail
 TARGET="$(cd "$1" && pwd)"; RATCHET_HOME="$(cd "$2" && pwd)"
-SLUG="ratchet-$(basename "$TARGET" | tr -c 'a-zA-Z0-9' '-')"
+# tr -c would also translate the trailing newline into a dash — strip non-alnum then trim
+SLUG="ratchet-$(basename "$TARGET" | tr -c 'a-zA-Z0-9' '-' | sed 's/-*$//')"
 RUN="$RATCHET_HOME/engine/run.sh"
 LOG="$TARGET/.autopilot/state/logs"
 mkdir -p "$LOG"
@@ -15,6 +16,7 @@ case "$(uname -s)" in
     sed -e "s|__LABEL__|com.ratchet.$SLUG|g" \
         -e "s|__RUN__|$RUN|g" -e "s|__TARGET__|$TARGET|g" \
         -e "s|__HOME__|$RATCHET_HOME|g" -e "s|__LOG__|$LOG|g" \
+        -e "s|__USERHOME__|$HOME|g" \
         "$RATCHET_HOME/install/launchd.plist.tmpl" > "$PLIST"
     launchctl unload "$PLIST" 2>/dev/null || true
     launchctl load "$PLIST"
