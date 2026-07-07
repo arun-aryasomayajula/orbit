@@ -238,11 +238,13 @@ def probe_runtime() -> dict:
 # ── backlog block editing (comment-preserving) ───────────────────────────────
 def _read_blocks() -> tuple[str, list[str], list[str]]:
     text = BACKLOG.read_text()
-    parts = re.split(r"(?m)(?=^  - id: )", text)
+    # Tolerate both list indents: legacy "  - id:" and flat "- id:" (yaml.dump /
+    # the backlog lint pass canonicalizes to flat — the dashboard must not care).
+    parts = re.split(r"(?m)(?=^(?:  )?- id: )", text)
     header, blocks = parts[0], parts[1:]
     ids = []
     for b in blocks:
-        m = re.match(r"^  - id: (\S+)", b)
+        m = re.match(r"^(?:  )?- id: (\S+)", b)
         ids.append(m.group(1) if m else "")
     return header, blocks, ids
 
@@ -256,13 +258,13 @@ def _run_converter():
 
 
 def _set_field(block: str, field: str, value: str) -> str:
-    if re.search(rf"(?m)^    {field}: ", block):
-        return re.sub(rf"(?m)^(    {field}: ).*$", lambda m: m.group(1) + value, block, count=1)
+    if re.search(rf"(?m)^  (?:  )?{field}: ", block):
+        return re.sub(rf"(?m)^(  (?:  )?{field}: ).*$", lambda m: m.group(1) + value, block, count=1)
     return block  # field absent — leave untouched
 
 
 def _get_field(block: str, field: str) -> str | None:
-    m = re.search(rf"(?m)^    {field}: (.*)$", block)
+    m = re.search(rf"(?m)^  (?:  )?{field}: (.*)$", block)
     return m.group(1).strip() if m else None
 
 
@@ -368,10 +370,12 @@ def do_force(tid: str) -> str:
     cat = _get_field(blocks[i], "category")
     blocks[i] = _set_field(blocks[i], "status", "queued")
     blocks[i] = _set_field(blocks[i], "autopilot", "allow")
-    if re.search(r"(?m)^    forced: ", blocks[i]):
+    if re.search(r"(?m)^  (?:  )?forced: ", blocks[i]):
         blocks[i] = _set_field(blocks[i], "forced", "true")
-    else:   # insert the field right after the autopilot line
-        blocks[i] = re.sub(r"(?m)^(    autopilot: .*)$", r"\1\n    forced: true", blocks[i], count=1)
+    else:   # insert the field right after the autopilot line, matching its indent
+        blocks[i] = re.sub(r"(?m)^(\s{2,4})(autopilot: .*)$",
+                           lambda m: f"{m.group(1)}{m.group(2)}\n{m.group(1)}forced: true",
+                           blocks[i], count=1)
     _write_blocks(header, blocks)
     _run_converter()
     return (f"⚠ Forced {tid} ({cat}) to the agent → now in ⏭ Next up. The loop will attempt a "
@@ -515,19 +519,19 @@ def do_answer(tid: str, text: str) -> str:
         ctx = "Re-queued from an answered escalation that had no backlog block."
         if reason:
             ctx += f" Original stop reason: {reason}"
-        new_block = (
-            f"  - id: {tid}\n"
-            f'    title: "{title}"\n'
-            f"    category: bug\n"
-            f"    autopilot: allow\n"
-            f"    status: queued\n"
-            f"    priority: medium\n"
-            f"    source: escalation-answer\n"
-            f"    context: |\n"
-            f"      {ctx}\n"
-            f"    operator_answer: {json.dumps(text)}\n"
-            f"    acceptance_criteria:\n"
-            f"      - {json.dumps(text)}\n"
+        new_block = (   # write in the FLAT format the file actually uses
+            f"- id: {tid}\n"
+            f'  title: "{title}"\n'
+            f"  category: bug\n"
+            f"  autopilot: allow\n"
+            f"  status: queued\n"
+            f"  priority: medium\n"
+            f"  source: escalation-answer\n"
+            f"  context: |\n"
+            f"    {ctx}\n"
+            f"  operator_answer: {json.dumps(text)}\n"
+            f"  acceptance_criteria:\n"
+            f"    - {json.dumps(text)}\n"
         )
         blocks.append(new_block)
         ids.append(tid)
@@ -538,12 +542,13 @@ def do_answer(tid: str, text: str) -> str:
     if cat in EMITTABLE:
         blocks[i] = _set_field(blocks[i], "autopilot", "allow")
     quoted = json.dumps(text)   # safe one-line double-quoted YAML scalar
-    if re.search(r"(?m)^    operator_answer: ", blocks[i]):
-        blocks[i] = re.sub(r"(?m)^    operator_answer: .*$",
-                           f"    operator_answer: {quoted}", blocks[i], count=1)
+    if re.search(r"(?m)^\s{2,4}operator_answer: ", blocks[i]):
+        blocks[i] = re.sub(r"(?m)^(\s{2,4})operator_answer: .*$",
+                           lambda m: f"{m.group(1)}operator_answer: {quoted}", blocks[i], count=1)
     else:
-        blocks[i] = re.sub(r"(?m)^(    autopilot: .*)$",
-                           rf"\1\n    operator_answer: {quoted}", blocks[i], count=1)
+        blocks[i] = re.sub(r"(?m)^(\s{2,4})(autopilot: .*)$",
+                           lambda m: f"{m.group(1)}{m.group(2)}\n{m.group(1)}operator_answer: {quoted}",
+                           blocks[i], count=1)
     _write_blocks(header, blocks)
     subprocess.run(["python3", str(AP / "ledger.py"), "clear", tid], capture_output=True)
     if tid in load_skips():
