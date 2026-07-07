@@ -1,0 +1,134 @@
+# Ratchet ROUTER (ENGINE DEFAULT) — "which maker + model + effort + skill + context
+# does this task get?". The orchestrator reads the TARGET's `.autopilot/router.yaml`
+# if present, else this default. The category→maker/model/skill mapping is repo-agnostic
+# and a good starting point; a target repo overrides `path_tracks` needles and `tracks`
+# to point at ITS own track files. Tracks referenced here ship as GENERIC templates in
+# the engine's tracks/ — a target replaces them with repo-specific playbooks in
+# `.autopilot/tracks/`. Skills carry general method; tracks carry repo facts.
+#
+# Model tiering is grounded in the 2026-07-07 golden baselines (ops/goldens/SCORECARD.md):
+#   - directed, well-scoped work (docs, deps, tests) → sonnet is at parity, use it (cheaper)
+#   - hard judgment (bug root-cause, feature, refactor, forced-security) → opus
+#   - verification-before-completion is MANDATORY on every task: execute the gate,
+#     never trust a model's "all green / no issues" — both Fable and Opus emitted
+#     confident falsehoods (a non-executable test; a false "no injection path").
+#
+# `skill` names the BEST existing skill for this category's methodology — the orchestrator
+# (which holds the Skill tool) INVOKES it and folds its guidance into the maker brief, so we
+# reuse a proven method instead of re-deriving it. The maker subagents have no Skill tool, so
+# they receive the distilled guidance in their prompt. `discipline` is the plain-language
+# fallback/summary that always applies even if skill-invocation isn't available this run.
+#
+# DIVISION OF LABOUR: skills = GENERAL methodology (reused, never rewritten here).
+# tracks = REPO-SPECIFIC facts only (things no general skill knows). No overlap.
+#
+# Skill names are invoked verbatim via the Skill tool:
+skills:
+  systematic-debugging:        superpowers:systematic-debugging      # root-cause a bug before fixing
+  test-driven-development:      superpowers:test-driven-development    # pin behavior; fail-before/pass-after
+  writing-plans:               superpowers:writing-plans              # slice a multi-step feature first
+  verification-before-completion: superpowers:verification-before-completion  # execute the gate, evidence before "done"
+  simplify:                     simplify                               # behavior-preserving cleanup (built-in)
+  security-review:              security-review                        # audit the pending diff (built-in)
+  write-docs:                   write-docs                             # doc = glossary of principles, not a code mirror
+
+defaults:
+  checker: { agent: checker, model: sonnet }      # the gate — always runs
+  verifier: { agent: verifier, model: sonnet }    # spec-conformance — always runs
+  always_discipline: verification-before-completion   # execute the gate, evidence before "done"
+  max_build_cycles: 5
+
+# category → routing. `policy`: allow = auto-pickable; human = only if forced:true
+# (surfaced for review, never auto-shipped); escalate = never auto-pick, escalate unless forced.
+categories:
+  bug:
+    policy: allow
+    maker: { agent: builder, model: opus, effort: high }
+    skill: superpowers:systematic-debugging   # orchestrator invokes, briefs the maker
+    tracks: [debug]                # + path-triggered tracks (see path_tracks)
+    discipline: root cause before fix; regression test that fails-before/passes-after
+
+  feature:
+    policy: allow
+    maker: { agent: builder, model: opus, effort: high }
+    skill: superpowers:writing-plans   # invoke only if the feature spans files/seams
+    tracks: []
+    discipline: slice a multi-step feature first
+
+  refactor:
+    policy: allow
+    maker: { agent: builder, model: opus, effort: medium }
+    skill: simplify
+    tracks: [refactor]
+    discipline: no behavior change; existing tests are the contract
+
+  code_quality:
+    policy: allow
+    maker: { agent: builder, model: opus, effort: medium }
+    skill: simplify
+    tracks: [refactor]
+    discipline: no behavior change; existing tests are the contract
+
+  testing:
+    policy: allow
+    maker: { agent: qa-writer, model: sonnet, effort: medium }
+    skill: superpowers:test-driven-development
+    tracks: [testing]
+    discipline: pin real behavior; if a test surfaces a prod bug, hand to builder
+    escalate_to: { on: "production bug", agent: builder, model: opus }
+
+  documentation:
+    policy: allow
+    maker: { agent: doc-writer, model: sonnet, effort: low }
+    skill: write-docs   # method: doc = glossary of principles, not a code mirror; repo /docs rules live in the docs track
+    tracks: [docs]
+    discipline: verify claims against code; never invent behavior; point don't transcribe
+
+  dependencies:
+    policy: allow
+    maker: { agent: builder, model: sonnet, effort: low }
+    skill: superpowers:verification-before-completion
+    tracks: [deps]
+    discipline: bump → full gate green, no API drift
+
+  developer_experience:
+    policy: allow
+    maker: { agent: builder, model: sonnet, effort: medium }
+    skill: superpowers:verification-before-completion
+    tracks: []
+    discipline: verification-before-completion
+
+  # ---- escalate-unless-forced (operator-excluded from auto-pick) ----
+  observability:
+    policy: escalate            # forced:true → workable
+    maker: { agent: builder, model: opus, effort: medium }
+    skill: superpowers:verification-before-completion
+    tracks: [observability, async-backend]
+    discipline: no PII; correct levels; metrics via actuator
+
+  security:
+    policy: human               # never auto-ship; forced:true → work it, opus/high
+    maker: { agent: builder, model: opus, effort: high }
+    skill: security-review      # invoke to audit the diff; ALSO add regression proving the exploit is dead
+    tracks: [security-sql]
+    discipline: add regression proving the exploit is neutralized (fails-before/passes-after); never fake an infra fix
+    refuse_paths: [backend/middleware/auth*, backend/auth.py, "*payment*", "*billing*", migrations/, "*.env*", secrets]
+
+  infrastructure:
+    policy: escalate            # forced:true + code-fixable → work; else escalate (not code-fixable)
+    maker: { agent: builder, model: opus, effort: medium }
+    skill: superpowers:verification-before-completion
+    tracks: []
+    discipline: verification-before-completion
+
+  release_management: { policy: escalate }   # wrapper/human only
+  git_practices:      { policy: escalate }   # wrapper/human only
+
+# Path-triggered tracks — loaded IN ADDITION to the category's tracks whenever the
+# task text or the files it will touch match. (A bug editing a SQL builder gets debug + security-sql.)
+path_tracks:
+  security-sql:   ["query_builder/", "sql_builder", "predicates", "filter_translator", "predicate_compiler", "dialects/"]
+  async-backend:  ["async def", "dispatcher", "lane_runners", "executor", "backend/routes/", "cache", "to_thread"]
+  frontend-react: ["frontend/src", ".jsx", ".tsx"]
+  testing:        ["tests/", ".test.js", ".test.jsx", "pytest", "vitest", "jest"]
+  observability:  ["logging", "logger", "metrics", "actuator", "prometheus", "logs/"]

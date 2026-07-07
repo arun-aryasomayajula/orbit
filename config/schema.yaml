@@ -1,0 +1,59 @@
+# Ratchet project profile — the contract for `<target-repo>/.autopilot/config.yaml`.
+# This file documents every field. `ratchet doctor` validates a real config against it.
+# The ENGINE is generic; ALL project-specific knowledge lives in the target's .autopilot/.
+#
+# Required: repo, base_branch, gates. Everything else has a default.
+
+# --- identity -----------------------------------------------------------------
+repo: "."                    # target repo path. "." = the dir containing .autopilot/. Absolute also fine.
+base_branch: "main"          # the loop resets a worktree to origin/<base_branch> each cycle and
+                             # forks per-task branches from it. NEVER pushed to directly.
+
+# --- the model + posture ------------------------------------------------------
+model: "claude-opus-4-8"     # orchestrator model (env AP_MODEL overrides). Makers may downgrade per router.
+permission_mode: "acceptEdits"   # claude --permission-mode. Deletes/push stay denied via the settings file.
+interval_seconds: 180        # sleep between cycles
+max_tasks_per_day: 12        # hard daily cap (failed cycles count too)
+cycle_timeout_seconds: 3600  # watchdog kill per cycle
+
+# --- the spec the cycle re-reads each run (optional) --------------------------
+spec: null                   # e.g. "docs/VISION.md" — a standing spec the orchestrator rereads so it
+                             # doesn't drift. null = no standing spec (task contracts alone govern).
+
+# --- GATES: the whole decoupling. How the checker verifies THIS repo. ---------
+# The checker runs each gate's `cmd` in `cwd` (relative to repo) and must see it pass
+# before a task is committed. `needs` lists preflight deps the loop checks are up first
+# (built-in checks: postgres, mysql, redis, docker, node, python). An unknown `needs`
+# value is treated as a shell test: `<value>` must exit 0.
+gates:
+  # example — replace with your repo's real gates (ratchet init auto-detects these):
+  test:
+    cmd: "pytest -q"
+    cwd: "."
+    needs: []              # e.g. [postgres]
+  # frontend:
+  #   cmd: "npm test -- --watchAll=false"
+  #   cwd: "frontend"
+  # typecheck:
+  #   cmd: "npm run typecheck"
+  #   cwd: "frontend"
+
+# --- WORKABLE categories (auto-pickable). Others escalate unless forced. -------
+# The router (router.yaml, engine default overridable per-repo) maps each category to
+# maker/model/skill/tracks. This just says which the loop may AUTO-pick.
+workable_categories: [bug, feature, refactor, code_quality, testing, documentation, dependencies, developer_experience]
+
+# --- task sources feeding the backlog -----------------------------------------
+# `backlog` is native (a human-curated backlog.yaml). Others are opt-in adapters in engine's
+# adapters/ that convert an external source into proposed backlog tasks.
+sources: [backlog]           # + optional: foundry, logwatch, qa
+
+# --- environment passthrough (NEVER commit secrets; reference env only) -------
+env:
+  # CLAUDE_BIN: "auto"       # "auto" = command -v claude. Or an absolute path.
+  # extra_ca_certs: null     # path to a corporate root CA (Zscaler etc.) if outbound TLS needs it
+  # passthrough: []          # names of env vars to export into the cycle (e.g. TRINO_HOST) — values from your shell, not here
+
+# --- git identity for the wrapper's per-task branches -------------------------
+branch_prefix: "autopilot"   # ships push to origin/<branch_prefix>/task-<id>
+commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"

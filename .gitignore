@@ -1,0 +1,6 @@
+# Ratchet engine repo — ignore local runtime, never target state (that lives in each target's .autopilot/state/)
+__pycache__/
+*.pyc
+engine/logs/
+*.local
+.DS_Store
