@@ -1,0 +1,1 @@
+Queued. Small real trino_sql_builder.py enhancement + tests at a pinned ref; allowedTools += Edit,Write,Bash; score = pytest green + guardrails followed unprompted (per-call state, identifier validation, regex guard).

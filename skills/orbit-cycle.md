@@ -40,16 +40,19 @@ Claim it (do NOT edit queue.json): `python3 "$ORBIT_HOME/engine/ledger.py" claim
 ## 2.5. Load TRACK knowledge (router tracks + path_tracks)
 From the router, load the category's `tracks:` ∪ every `path_tracks:` entry whose match-strings appear in the task text or files it will touch. Tracks live in `$AP_HOME/tracks/` (target) with `$ORBIT_HOME/tracks/` as fallback. Read the matched track(s), and START every maker AND checker brief with: "Before anything else, Read <track path> and obey its Hard rules." Remember them for step 3.6.
 
+## 2.6. Load GOLDEN calibration (graded exemplars of good output)
+The router's `goldens:` block points at `goldens/CALIBRATION.md` (target `.autopilot/goldens/` overrides `$ORBIT_HOME/goldens/`). Read it and pull the **`always` card** (applies to every task) PLUS the card named by `goldens.by_category[<category>]`. Fold these into the maker, checker, AND verifier briefs: "Match this graded exemplar of a strong <category> output; avoid the flaws it lists." If the card names an exemplar file, tell the maker it MAY Read `$ORBIT_HOME/goldens/<exemplar>` for a concrete model. The golden calibration is what "good" looks like; skills are how, tracks are repo facts. Record the card(s) used for step 3.6.
+
 ## 3. Build → Check loop (max 5 cycles)
-1. Dispatch the chosen **maker** (Task) with the brief (cycle 1) or the checker's failure report. Brief it with the router `skill` method + track Read-instruction + the **gate commands** (run `python3 "$ORBIT_HOME/engine/config.py" gates "$(dirname "$AP_HOME")"` — each line is `name<TAB>cwd<TAB>cmd`).
+1. Dispatch the chosen **maker** (Task) with the brief (cycle 1) or the checker's failure report. Brief it with the router `skill` method + track Read-instruction + the **golden calibration** (step 2.6) + the **gate commands** (run `python3 "$ORBIT_HOME/engine/config.py" gates "$(dirname "$AP_HOME")"` — each line is `name<TAB>cwd<TAB>cmd`).
 2. Dispatch the **checker** (Task, `checker`, sonnet) — it runs the config gates and reports pass/fail with real output.
 3. STOP RULES: ALL GREEN → step 3.5. Same failure twice / a fix breaks a passing gate / maker STOPPED / checker INFRA / 5 cycles → STOP + escalate. Never weaken a gate to pass.
 
 ## 3.5. Spec-conformance gate
-Stage exactly the files to ship (never `git add -A`, never state/secrets). Dispatch the **verifier** (Task, `verifier`, sonnet) with the task id + description; it reads `git diff --cached HEAD` and judges intent-vs-implementation. CONFORMS → step 3.6. NONCONFORMING → feed the gap back to the maker (counts as a cycle); second NONCONFORMING → escalate. Never skip/weaken this.
+Stage exactly the files to ship (never `git add -A`, never state/secrets). Dispatch the **verifier** (Task, `verifier`, sonnet) with the task id + description + the golden calibration card (step 2.6) as the quality bar; it reads `git diff --cached HEAD` and judges intent-vs-implementation AND whether the output matches the strong-exemplar shape (e.g. tests are executable & fail-before/pass-after, no unverified "all clear"). CONFORMS → step 3.6. NONCONFORMING → feed the gap back to the maker (counts as a cycle); second NONCONFORMING → escalate. Never skip/weaken this.
 
 ## 3.6. Review notes
-Write `$AP_STATE/reviews/task-<id>-notes.md`: verifier verdict (per criterion), checker evidence (real gate output), risk notes, and `tracks: <names>` + `skill: <invoked>` + `model: <effective>`.
+Write `$AP_STATE/reviews/task-<id>-notes.md`: verifier verdict (per criterion), checker evidence (real gate output), risk notes, and `tracks: <names>` + `skill: <invoked>` + `golden: <calibration cards used>` + `model: <effective>`.
 
 ## 4. Finish (CONFORMS) — atomic commit on the detached base HEAD
 Files already staged. ONE atomic commit on the detached HEAD (no branch), message `<type>: <what changed>` (<72 chars) ending with the config `commit_trailer`. Do NOT push. Record: `python3 "$ORBIT_HOME/engine/ledger.py" committed <id> "<branch_prefix>/task-<id>" "$(git rev-parse HEAD)"`.

@@ -85,6 +85,12 @@ used = {v.get("skill") for v in cats.values() if isinstance(v, dict) and v.get("
 bad = sorted(s for s in used if not skill_ok(s))
 check("every referenced skill resolves", not bad, "" if not bad else "UNRESOLVED: " + ", ".join(bad))
 
+# 5b. golden calibration resolves (graded exemplars — a third reference type)
+g = router.get("goldens") or {}
+gfile = g.get("file", "goldens/CALIBRATION.md")
+gpath = find(gfile) or (os.path.join(RATCHET_HOME, gfile) if os.path.exists(os.path.join(RATCHET_HOME, gfile)) else None)
+check("golden calibration resolves", bool(gpath), gpath or f"missing ({gfile})")
+
 # 6. dry-run routing over the queue (if present)
 qf = os.path.join(AP, "state", "queue.json")
 if os.path.exists(qf):

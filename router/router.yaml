@@ -38,6 +38,27 @@ defaults:
   always_discipline: verification-before-completion   # execute the gate, evidence before "done"
   max_build_cycles: 5
 
+# GOLDENS — graded exemplars of good coding output ("what good looks like"), a third
+# reference type alongside skills (method) and tracks (repo facts). The orchestrator loads
+# the relevant card from goldens/CALIBRATION.md and briefs it into the maker/checker/verifier,
+# same as a track. The `always` card applies to EVERY task; the per-category value below names
+# the extra card (a section in CALIBRATION.md). Full corpus + blind-judge scores live in goldens/.
+# A maker may Read the named exemplar file for a concrete model to match. Repo may add its own
+# graded exemplars under `.autopilot/goldens/` later; the calibration lessons here are general.
+goldens:
+  file: goldens/CALIBRATION.md
+  always: always                 # verify-before-done; never trust a self-assessed "all clear"
+  by_category:
+    bug: bug
+    feature: feature
+    refactor: refactor
+    code_quality: refactor
+    testing: testing
+    documentation: documentation
+    frontend: frontend           # path-triggered (frontend-react track)
+    security: code-review        # security fixes use the review-lens card
+    # dependencies / developer_experience / observability / infrastructure → `always` card only
+
 # category → routing. `policy`: allow = auto-pickable; human = only if forced:true
 # (surfaced for review, never auto-shipped); escalate = never auto-pick, escalate unless forced.
 categories:

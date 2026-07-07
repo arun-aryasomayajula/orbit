@@ -1,0 +1,1 @@
+Queued. One Mantine UI slice in usergrowth-campaign-automation at demo-v11 (fbe47d9); score = typecheck+lint+vitest green + AGENTS.md conventions (CopyId, log_event refetch, toasts) followed unprompted + /design-review verdict.
