@@ -190,15 +190,17 @@ one_iteration() {
   echo OK
 }
 
+# Marker the dashboard reads to explain WHY the loop is idle (backoff / idle reason + when it resumes).
+# Format: "<reason> <resume-epoch>". Defined BEFORE the loop so the STOP and daily-cap branches can set
+# it too — otherwise a paused/capped loop keeps a stale marker and the dashboard shows "between-cycles"
+# (or a false "next pick ~Ns") while the loop is actually STOPPED and picking nothing.
+set_idle_reason(){ echo "$1 $(( $(date +%s) + ${2:-0} ))" > "$STATE/.idle-reason"; }
 log "==== orbit up (pid $$) target=$TARGET model=$MODEL base=$ORBIT_BASE_BRANCH ===="
 while true; do
-  [ -f "$STOP_FILE" ] && { log "STOP present — idling."; sleep 60; continue; }
+  [ -f "$STOP_FILE" ] && { log "STOP present — idling."; set_idle_reason "stopped" 60; sleep 60; continue; }
   count="$(cat "$STATE/.count-$(today)" 2>/dev/null || echo 0)"
-  if [ "$count" -ge "$MAX_TASKS_PER_DAY" ]; then log "daily cap $MAX_TASKS_PER_DAY reached — idling."; sleep 600; continue; fi
+  if [ "$count" -ge "$MAX_TASKS_PER_DAY" ]; then log "daily cap $MAX_TASKS_PER_DAY reached — idling."; set_idle_reason "daily-cap" 600; sleep 600; continue; fi
   status="$(one_iteration)"
-  # Marker the dashboard reads to explain WHY the loop is idle (backoff / idle reason + when it resumes).
-  # Format: "<reason> <resume-epoch>". Cleared to a plain reason on normal iterations.
-  set_idle_reason(){ echo "$1 $(( $(date +%s) + ${2:-0} ))" > "$STATE/.idle-reason"; }
   case "$status" in
     OK)    echo $((count+1)) > "$STATE/.count-$(today)"; set_idle_reason "between-cycles" "$INTERVAL"; sleep "$INTERVAL" ;;
     FAIL)  echo $((count+1)) > "$STATE/.count-$(today)"; set_idle_reason "recovering" 120; sleep 120 ;;

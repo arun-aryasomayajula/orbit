@@ -229,6 +229,7 @@ def probe_runtime() -> dict:
         "now": time.time(),
         "loop_loaded": loop_loaded(),
         "stopped": STOP.exists(),
+        "stop_note": (STOP.read_text().strip() if STOP.exists() else None),
         "cycle_running": running,
         "cycle_start": start if running else None,
         "current_task": (MARKER.read_text().strip() if MARKER.exists() else None),
