@@ -173,6 +173,16 @@ ul.acc{margin:6px 0 0 16px;padding:0;font-size:11.5px;color:var(--dim)}
 .wd{height:3px;border-radius:2px;background:var(--card2);margin-top:6px;overflow:hidden}.wd>i{display:block;height:100%;background:var(--blue)}
 .btns{display:flex;gap:5px;margin-top:9px;flex-wrap:wrap}
 .reason{font:500 11.5px/1.5 var(--mono);color:var(--red);margin-top:5px}
+/* plain-language layer: summary line, recommendation callout, expandable why */
+.plain{font:500 12.5px/1.55 var(--disp);color:var(--ink);margin-top:6px}
+.rec{font:600 12px/1.5 var(--disp);color:var(--green);margin-top:5px}
+.why{margin-top:6px;font:500 11.5px/1.55 var(--disp);color:var(--muted)}
+.why summary{cursor:pointer;color:var(--blue);font-weight:600}
+.why div{margin-top:4px} .why b{color:var(--ink)}
+.why a{color:var(--blue)}
+.rawreason{margin-top:5px}
+.rawreason summary{cursor:pointer;font:500 11px var(--mono);color:var(--faint)}
+.colsub{font:500 11.5px/1.5 var(--disp);color:var(--faint);margin:-4px 0 10px}
 .lint{font:500 11px/1.5 var(--mono);color:var(--amber);margin-top:4px}
 .empty{color:var(--faint);font-size:12px;padding:16px 6px;text-align:center;line-height:1.6}
 .empty b{color:var(--dim)}
@@ -330,6 +340,8 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
     <div class="navlbl">Fleet</div>
     <button class="nav" data-view="agents" onclick="go('agents')"><span class="ico">🚧</span>Feature agents<span class="key">5</span></button>
     <button class="nav" data-view="insights" onclick="go('insights')"><span class="ico">📈</span>Insights<span class="key">6</span></button>
+    <div class="navlbl">Help</div>
+    <button class="nav" onclick="openText('📖 Operator guide — what everything means','/guide',false)"><span class="ico">📖</span>Guide</button>
   </nav>
   <div class="railfoot">
     <button class="btn" id="loopBtn" onclick="toggleLoop()">…</button>
@@ -547,19 +559,46 @@ function card(t,kind){
   }
   const pri=(kind==='next'||kind==='board')?badge((t.priority||'medium')+' priority',t.priority==='high'?'warn':'acc'):'';
   const rev=(kind==='done')?(t.merged?badge('merged','ok'):t.rejected?badge('rejected','stop'):badge('needs review','warn')):'';
-  const reason=t.reason?`<div class=reason title="click to expand" onclick="this.classList.toggle('open')">⚠ ${esc(t.reason)}</div>`:'';
+  // Escalations: lead with the plain-language brief + recommendation (the raw
+  // engineer reason stays available, collapsed). Cards without a brief fall
+  // back to the reason as before.
+  const brief=(kind==='esc'&&t.operator_brief)?`<div class=plain>${esc(t.operator_brief)}</div>`:'';
+  const rec=(kind==='esc'&&t.recommendation)?`<div class=rec>👉 ${esc(t.recommendation)}</div>`:'';
+  const reason=t.reason?(brief
+    ?`<details class=rawreason><summary>engineer detail</summary><div class=reason>⚠ ${esc(t.reason)}</div></details>`
+    :`<div class=reason title="click to expand" onclick="this.classList.toggle('open')">⚠ ${esc(t.reason)}</div>`):'';
+  // Plain-language enrichment (queued/proposed cards): one-line summary always
+  // visible; impact/risk/hint/docs behind one tap.
+  const plain=(kind!=='esc'&&t.plain)?`<div class=plain>${esc(t.plain)}</div>`:'';
+  const eff=t.effort?badge({S:'small · hours',M:'medium · 1–2 days',L:'large · multi-day'}[t.effort]||t.effort, t.effort==='L'?'warn':'muted'):'';
+  const hint=t.decision_hint?`<div class=rec>👉 ${esc(t.decision_hint)}</div>`:'';
+  const why=(t.impact||t.risk_if_skipped||(t.docs&&t.docs.length))?
+    `<details class=why><summary>why it matters</summary>
+      ${t.impact?`<div><b>Impact:</b> ${esc(t.impact)}</div>`:''}
+      ${t.risk_if_skipped?`<div><b>If we skip it:</b> ${esc(t.risk_if_skipped)}</div>`:''}
+      ${(t.docs&&t.docs.length)?`<div><b>Background:</b> ${t.docs.map(d=>S&&S.bb_src?`<a href="${esc(S.bb_src+d)}" target="_blank" rel="noopener">${esc(d)}</a>`:esc(d)).join(' · ')}</div>`:''}
+    </details>`:'';
   const lint=(kind==='board'&&((t.lint_hard&&t.lint_hard.length)||(t.lint_soft&&t.lint_soft.length)))?
     `<div class=lint>contract: ${esc([...(t.lint_hard||[]).map(x=>'HELD — '+x),...(t.lint_soft||[])].join(' · '))}</div>`:'';
   const note=t.review_note?`<div class=lint>rejected: ${esc(t.review_note)}</div>`:'';
   return `<div class="card ${live}" data-tid="${esc(t.id)}">
-    <div class="card-h"><span class="tid">${esc(t.id)}</span> ${cat} ${gate} ${pri} ${rev} ${src}</div>
+    <div class="card-h"><span class="tid">${esc(t.id)}</span> ${cat} ${gate} ${pri} ${eff} ${rev} ${src}</div>
     <div class="title">${esc(t.title)}</div>
-    ${timer}${reason}${lint}${note}${accList(t.acceptance_criteria)}
+    ${plain}${brief}${rec}${hint}${timer}${reason}${lint}${note}${why}${accList(t.acceptance_criteria)}
     <div class="btns">${btns}</div></div>`;
 }
+// One-line plain-language explainer per section, shown under the heading so a
+// non-engineer always knows what a column IS and what's expected of them.
+const COL_HELP={
+  'In orbit':'The task the robot is building right now. Nothing for you to do — watch or abort.',
+  'Launch pad':'Approved work, in pick order. The robot takes the top one next. Reorder or park anything you disagree with.',
+  'Deep space':'Proposals only — NOTHING here happens until you press "Queue it". Read the plain line + 👉 hint on each card to decide.',
+  'Graveyard orbit':'Parked tasks. The robot never touches them; bring one back anytime.',
+};
 function col(title,cls,items,kind,emptyMsg){
   const body=items.length?items.map(t=>card(t,kind)).join(''):`<div class=empty>${emptyMsg||'—'}</div>`;
-  return `<section class="col ${cls}"><h2>${title}<span class=cnt>${items.length}</span></h2>${body}</section>`;
+  const help=COL_HELP[title.split(' · ')[0]];
+  return `<section class="col ${cls}"><h2>${title}<span class=cnt>${items.length}</span></h2>${help?`<div class=colsub>${help}</div>`:''}${body}</section>`;
 }
 
 /* ── topbar + orbit + rail ──────────────────────────────────────────────── */

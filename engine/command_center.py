@@ -86,6 +86,11 @@ LAUNCHD_LABEL = os.environ.get("ORBIT_LAUNCHD_LABEL", "com.orbit.autopilot")
 # Bitbucket "org/repo" for the prefilled PR-create URL; empty → URL omitted.
 BB_REPO = os.environ.get("ORBIT_BB_REPO", "")
 BB_PR_NEW = f"https://bitbucket.org/{BB_REPO}/pull-requests/new" if BB_REPO else ""
+# Source-browse base for task doc links (docs: paths in backlog tasks render as
+# clickable Bitbucket links); empty → docs render as plain paths.
+BB_SRC = f"https://bitbucket.org/{BB_REPO}/src/{BASE_BRANCH}/" if BB_REPO else ""
+# Operator guide served at /guide (project copy wins so operators can localize).
+GUIDE_FILES = [AP_HOME / "GUIDE.md", ORBIT_HOME / "docs" / "OPERATOR-GUIDE.md"]
 
 # CSRF / DNS-rebinding defense for the state-changing control plane:
 #  - Host must be exactly localhost:<PORT> (a rebound DNS name won't match).
@@ -245,6 +250,7 @@ def probe_runtime() -> dict:
         "interval": INTERVAL,
         "cycle_timeout": CYCLE_TIMEOUT,
         "base_branch": BASE_BRANCH,
+        "bb_src": BB_SRC,
     }
 
 
@@ -872,6 +878,12 @@ def build_state() -> dict:
                 "category": meta.get("category", ""), "autopilot": meta.get("autopilot", ""),
                 "source": meta.get("source", ""), "priority": meta.get("priority", "medium"),
                 "status": meta.get("status", ""),
+                # Plain-language enrichment (optional backlog fields) — lets a
+                # non-engineer owner judge each card without reading code.
+                "plain": meta.get("plain", ""), "impact": meta.get("impact", ""),
+                "risk_if_skipped": meta.get("risk_if_skipped", ""),
+                "effort": meta.get("effort", ""), "decision_hint": meta.get("decision_hint", ""),
+                "docs": [d for d in (meta.get("docs") or []) if isinstance(d, str)],
                 "acceptance_criteria": [a for a in (meta.get("acceptance_criteria") or [])
                                         if isinstance(a, str)]}
 
@@ -888,6 +900,10 @@ def build_state() -> dict:
                         or (f"Foundry task #{tid} (legacy)" if tid.isdigit() else tid))
         row.update({"sha": e.get("sha"), "remote_ref": e.get("remote_ref"),
                     "reason": e.get("reason", ""), "updated": e.get("updated_at", ""),
+                    # Escalation decision support (written by the operator/reconcile):
+                    # a plain-language brief + a concrete recommended action.
+                    "operator_brief": e.get("operator_brief", ""),
+                    "recommendation": e.get("recommendation", ""),
                     "committed_at": commit_map.get(e.get("sha", ""), {}).get("date", "")})
         st = e.get("state")
         # "Set aside" on an escalated/orphaned card writes skips.txt; drop those
@@ -937,10 +953,17 @@ def build_state() -> dict:
             continue
         if q.get("category") not in EMITTABLE and not q.get("forced"):
             continue  # human-only category only reaches Next up when explicitly forced
+        # Join the backlog block for the plain-language fields (queue.json only
+        # carries the loop contract, not the operator enrichment).
+        bmeta = by_id.get(tid, {})
         next_up.append({"id": tid, "title": (q.get("task") or tid).split("\n", 1)[0],
                         "category": q.get("category", ""), "autopilot": q.get("autopilot", "allow"),
                         "source": q.get("source", ""), "priority": q.get("priority", "medium"),
                         "status": "queued",
+                        "plain": bmeta.get("plain", ""), "impact": bmeta.get("impact", ""),
+                        "risk_if_skipped": bmeta.get("risk_if_skipped", ""),
+                        "effort": bmeta.get("effort", ""), "decision_hint": bmeta.get("decision_hint", ""),
+                        "docs": [d for d in (bmeta.get("docs") or []) if isinstance(d, str)],
                         "acceptance_criteria": [a for a in (q.get("acceptance_criteria") or [])
                                                 if isinstance(a, str)]})
     next_up.sort(key=lambda t: PRIORITY_RANK.get(t.get("priority", "medium"), 1))
@@ -1627,6 +1650,13 @@ class Handler(BaseHTTPRequestHandler):
             if body is None:
                 self._send(b"not found for this task", "text/plain", 404); return
             self._send(body.encode(), "text/plain; charset=utf-8")
+        elif path == "/guide":
+            # Operator guide: what each section means and how to decide.
+            for gf in GUIDE_FILES:
+                if gf.exists():
+                    self._send(gf.read_text().encode(), "text/plain; charset=utf-8"); return
+            self._send(b"No guide found. Create GUIDE.md in your .autopilot/ directory.",
+                       "text/plain; charset=utf-8")
         else:
             self._send(b"not found", "text/plain", 404)
 
