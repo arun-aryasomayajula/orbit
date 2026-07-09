@@ -69,6 +69,7 @@ def main() -> int:
     cands = [t for t in backlog
              if t.get("status") == "proposed"
              and t.get("category") in AUTOPROMOTE_CATEGORIES
+             and t.get("autopilot") != "human"   # operator-gated tasks are never auto-fed
              and str(t.get("id")) not in worked
              and str(t.get("id")) not in skips]
     if not cands:
@@ -78,15 +79,23 @@ def main() -> int:
     pick = str(cands[0]["id"])
 
     # Block-level edit (preserve comments): set status queued + autopilot allow.
+    # Indent-tolerant: real backlogs use both `- id:` at column 0 (block style)
+    # and `  - id:` nested under `tasks:` — match either, and flip the key lines
+    # at whatever indent the block uses.
     text = BACKLOG.read_text()
-    parts = re.split(r"(?m)(?=^  - id: )", text)
+    parts = re.split(r"(?m)(?=^\s*- id: )", text)
+    edited = False
     for i, blk in enumerate(parts):
-        m = re.match(r"^  - id: (\S+)", blk)
+        m = re.match(r"^\s*- id: (\S+)", blk)
         if m and m.group(1) == pick:
-            blk = re.sub(r"(?m)^(    status: ).*$", r"\1queued", blk, count=1)
-            blk = re.sub(r"(?m)^(    autopilot: ).*$", r"\1allow", blk, count=1)
+            blk, n_status = re.subn(r"(?m)^(\s*status: ).*$", r"\1queued", blk, count=1)
+            blk = re.sub(r"(?m)^(\s*autopilot: ).*$", r"\1allow", blk, count=1)
             parts[i] = blk
+            edited = n_status == 1
             break
+    if not edited:
+        print(f"autopromote: could not rewrite block for '{pick}' — backlog left unchanged.")
+        return 1
     BACKLOG.write_text("".join(parts))
     subprocess.run([sys.executable, str(CONVERTER)], cwd=str(ENGINE), capture_output=True)
     print(f"autopromote: promoted '{pick}' ({cands[0].get('category')}, "
