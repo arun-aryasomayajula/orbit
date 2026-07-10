@@ -922,8 +922,7 @@ def do_delete_branches_bulk(kind: str) -> str:
     # touched here — those are per-branch, confirmed deletes only.
     if kind not in ("merged", "rejected"):
         return f"Refused: bulk delete only supports merged|rejected (got '{kind}')."
-    import time as _t
-    rows = branch_reconcile(remote_branches(), trunk_ancestry(), load_ledger(), int(_t.time()))
+    rows = branch_reconcile(remote_branches(), trunk_ancestry(), load_ledger(), int(time.time()))
     targets = [r["branch"] for r in rows
                if r["category"] == kind and r["branch"].startswith(PREFIX + "/")]
     deleted, failed = [], []
@@ -1238,9 +1237,8 @@ def build_state() -> dict:
 
     # Reconciled autopilot/* branches for the Branches tab. Decorate the pure
     # rows with filesystem/URL facts build_state owns.
-    import time as _t
-    _now = int(_t.time())
-    _branch_rows = branch_reconcile(remote_branches(), trunk_ancestry(), load_ledger(), _now)
+    _now = int(time.time())
+    _branch_rows = branch_reconcile(remote_branches(), trunk_ancestry(), ledger, _now)
     for _b in _branch_rows:
         _b["has_packet"] = (REVIEWS / f"task-{_b['task_id']}.md").exists()
         _b["pr_url"] = (

@@ -1131,7 +1131,7 @@ function toggleLoop(){if(!S)return;post(S.stopped?'/resume':'/stop',{});}
 function toggleFeed(){if(!S)return;post('/autofeed',{on:S.auto_feed?'0':'1'});}
 
 /* ── render pipeline ────────────────────────────────────────────────────── */
-function sig(r){return JSON.stringify([r.running,r.next_up,r.done,r.board,r.skipped,r.escalated,r.runlog,r.history,r.funnel,r.feature_builds,r.spend_history]);}
+function sig(r){return JSON.stringify([r.running,r.next_up,r.done,r.board,r.skipped,r.escalated,r.runlog,r.history,r.funnel,r.feature_builds,r.spend_history,r.branches]);}
 function renderViews(){
   // Preserve column scroll positions across rebuilds.
   const colsEl=document.getElementById('queueCols');
