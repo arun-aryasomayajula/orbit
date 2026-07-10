@@ -78,6 +78,8 @@ nav{padding:12px 10px;display:flex;flex-direction:column;gap:2px;flex:1;overflow
 .nav .nb{margin-left:auto;font:600 10.5px var(--mono);background:var(--card);border:1px solid var(--line2);
   color:var(--dim);border-radius:9px;padding:1px 7px;min-width:24px;text-align:center}
 .nav .nb.hot{background:var(--amber);border-color:var(--amber);color:#1a1206}
+.bsec-h .nb{margin-left:auto;font:600 10.5px var(--mono);background:var(--card);border:1px solid var(--line2);
+  color:var(--dim);border-radius:9px;padding:1px 7px;min-width:24px;text-align:center}
 .nav .key{position:absolute;right:8px;top:50%;transform:translateY(-50%);font:500 9px var(--mono);color:var(--faint);
   border:1px solid var(--line);border-radius:3px;padding:0 4px;opacity:0;transition:opacity .15s}
 .nav:hover .key{opacity:1}.nav .nb~.key{display:none}
@@ -115,7 +117,7 @@ a.btn{text-decoration:none;display:inline-block}
 .eyebrow{font:600 10px var(--disp);letter-spacing:.24em;text-transform:uppercase;color:var(--faint);margin:26px 0 10px}
 .eyebrow:first-child{margin-top:0}
 .eyebrow .n{color:var(--amber)}
-.eyebrow .aside{float:right;letter-spacing:.04em;color:var(--faint);text-transform:none;font:500 11px var(--mono)}
+.eyebrow .aside, h2 .aside, .brow .aside{float:right;letter-spacing:.04em;color:var(--faint);text-transform:none;font:500 11px var(--mono)}
 
 /* ── orbit hero (signature) ─────────────────────────────────────────────── */
 #hero{display:flex;align-items:center;gap:24px;padding:22px 24px;background:var(--panel);
@@ -345,8 +347,8 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
     <button class="nav" data-view="ships" onclick="go('ships')"><span class="ico">⬆</span>Ships<span class="nb" id="nb-ships">0</span></button>
     <button class="nav" data-view="branches" onclick="go('branches')"><span class="ico">⎇</span>Branches<span class="nb" id="nb-branches">0</span></button>
     <div class="navlbl">Fleet</div>
-    <button class="nav" data-view="agents" onclick="go('agents')"><span class="ico">🚧</span>Feature agents<span class="key">5</span></button>
-    <button class="nav" data-view="insights" onclick="go('insights')"><span class="ico">📈</span>Insights<span class="key">6</span></button>
+    <button class="nav" data-view="agents" onclick="go('agents')"><span class="ico">🚧</span>Feature agents<span class="key">6</span></button>
+    <button class="nav" data-view="insights" onclick="go('insights')"><span class="ico">📈</span>Insights<span class="key">7</span></button>
     <div class="navlbl">Help</div>
     <button class="nav" onclick="openText('📖 Operator guide — what everything means','/guide',false)"><span class="ico">📖</span>Guide</button>
   </nav>
