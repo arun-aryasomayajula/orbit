@@ -373,10 +373,62 @@ def do_priority(tid: str, direction: str) -> str:
     return f"{tid}: priority {cur} → {new}."
 
 
+def _next_up_order() -> list[tuple[str, str]]:
+    """The Next-up column's exact display order: queue.json filtered the way
+    build_state filters it (worked/skipped dropped, human-only held unless
+    forced), stable-sorted by priority. Returns (id, priority) pairs so
+    do_move can tell a tie-break move from a priority-band crossing."""
+    worked = set(load_ledger().keys())
+    skips = load_skips()
+    rows = []
+    for q in load_queue():
+        tid = str(q.get("id"))
+        if tid in worked or tid in skips:
+            continue
+        if q.get("category") not in EMITTABLE and not q.get("forced"):
+            continue
+        rows.append((tid, q.get("priority", "medium")))
+    rows.sort(key=lambda r: PRIORITY_RANK.get(r[1], 1))
+    return rows
+
+
 def do_move(tid: str, direction: str) -> str:
+    """Reorder within the Next-up column AS DISPLAYED. The column is a filtered,
+    priority-sorted view of backlog.yaml, so two cards adjacent on screen are
+    usually many blocks apart in the file — swapping raw file neighbors (the old
+    behavior) moved the task past an invisible done/proposed block and the
+    visible order never changed. Instead: find the on-screen neighbor and
+    relocate this task's block just past the neighbor's block."""
     header, blocks, ids = _read_blocks()
     if tid not in ids:
         return f"Task {tid} not found."
+    order = _next_up_order()
+    disp_ids = [r[0] for r in order]
+    if tid in disp_ids:
+        k = disp_ids.index(tid)
+        nk = k - 1 if direction == "up" else k + 1
+        if nk < 0 or nk >= len(order):
+            return f"{tid} is already at the {'top' if direction=='up' else 'bottom'}."
+        n_tid, n_pri = order[nk]
+        pri = order[k][1]
+        if PRIORITY_RANK.get(n_pri, 1) != PRIORITY_RANK.get(pri, 1):
+            # Order is a tie-break WITHIN a priority band — the picker sorts by
+            # priority first, so no amount of reordering crosses a band.
+            return (f"{tid} is at the {'top' if direction == 'up' else 'bottom'} of its "
+                    f"'{pri}' priority band — use {'⬆ pri' if direction == 'up' else '⬇ pri'} "
+                    f"to move it {'sooner' if direction == 'up' else 'later'}.")
+        if n_tid in ids:
+            i = ids.index(tid)
+            blk = blocks.pop(i)
+            ids.pop(i)
+            j = ids.index(n_tid)
+            at = j if direction == "up" else j + 1
+            blocks.insert(at, blk)
+            _write_blocks(header, blocks)
+            _run_converter()
+            return f"Moved {tid} {direction} (now {'before' if direction == 'up' else 'after'} {n_tid})."
+    # Fallback (task not in the Next-up view, e.g. queue.json missing): the old
+    # raw file-neighbor swap, so the button still does something sensible.
     i = ids.index(tid)
     j = i - 1 if direction == "up" else i + 1
     if j < 0 or j >= len(blocks):
@@ -1054,6 +1106,16 @@ def spend_history(days: int = 14) -> list[dict]:
     return out
 
 
+def _on_board(t: dict) -> bool:
+    """Deep-space (board) membership: proposals and human/review-gated work
+    that is still OPEN. `worked` only covers loop-shipped ids, so a task marked
+    status:done in the backlog (shipped by a human outside the loop — never in
+    the ledger) must be dropped here or it haunts the board forever."""
+    if t.get("status") == "done":
+        return False
+    return t.get("autopilot") in ("review-only", "human") or t.get("status") == "proposed"
+
+
 def build_state() -> dict:
     backlog = load_backlog()
     ledger = load_ledger()
@@ -1165,7 +1227,7 @@ def build_state() -> dict:
         tid = str(t.get("id"))
         if tid in worked or tid in skips:
             continue
-        if t.get("autopilot") in ("review-only", "human") or t.get("status") == "proposed":
+        if _on_board(t):
             r = base(tid, t)
             # promotable = will actually reach Next up in one click (loop-workable)
             r["promotable"] = t.get("category") in EMITTABLE
