@@ -38,6 +38,33 @@ feature = new capability (product call) · code_quality/refactor = hygiene,
 no visible change · observability/testing = cheap insurance · infrastructure/
 dependencies = plumbing (eng judgment) · documentation = approve freely.
 
+## Branches tab
+
+Every `autopilot/*` branch on `origin`, reconciled against the task ledger,
+grouped into four buckets:
+
+- **Awaiting review** — finished work, not yet merged or rejected. Gets
+  Review / Open PR / Mark merged / Reject actions, same as Ships.
+- **Merged** — the branch's tip is a git ancestor of the base branch (or it
+  was marked merged). Reference only; safe to bulk-delete.
+- **Orphan** — no live ledger entry points at this branch anymore (e.g. a
+  task was re-run and produced a new timestamped branch) and it isn't merged.
+  Re-run timestamp branches from a retried task show up here once the old
+  branch is superseded.
+- **Rejected** — explicitly rejected. Safe to bulk-delete.
+
+Merge status is computed from **local git ancestry against the configured
+base branch**, refreshed on an internal fetch every ~60s — it stays accurate
+even while the autopilot loop is paused, because it doesn't depend on the
+loop running.
+
+**Delete guardrails:** only `autopilot/*` branches are ever eligible for
+deletion (never the base branch or an unrelated branch). Bulk delete only
+targets the **merged** or **rejected** buckets — there's no bulk-delete for
+awaiting/orphan. Deleting an unmerged branch (awaiting or orphan) always
+requires a per-branch confirm with an extra warning that its work may be
+unreviewed.
+
 ## Safety facts
 
 - Every task ships on its own branch; nothing merges without a human click.

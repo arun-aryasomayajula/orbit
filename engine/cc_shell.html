@@ -201,6 +201,12 @@ ul.acc{margin:6px 0 0 16px;padding:0;font-size:11.5px;color:var(--dim)}
 .chip.on{background:var(--blue-dim);color:var(--blue);border-color:#2b4f86}
 .chip b{font-weight:700;margin-left:4px;font-family:var(--mono)}
 .chip-go{margin-left:auto;background:var(--green-dim);color:var(--green);border-color:#1d5c40}
+.bsec{margin:14px 0}
+.bsec-h{display:flex;align-items:center;gap:8px;margin:0 0 6px;font-size:13px}
+.brow{display:flex;align-items:center;gap:8px;padding:7px 10px;border:1px solid var(--line);
+  border-radius:8px;margin:4px 0;background:var(--card);font-size:12.5px}
+.brow code{font:600 11.5px var(--mono);color:var(--ink)}
+.brow .spacer{flex:1}
 
 /* ── telemetry tail ─────────────────────────────────────────────────────── */
 .tailwrap{margin-top:12px;background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--blue);border-radius:11px;padding:13px 15px}
@@ -337,6 +343,7 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
     <button class="nav" data-view="inbox" onclick="go('inbox')"><span class="ico">📥</span>Inbox<span class="nb" id="nb-inbox">0</span></button>
     <button class="nav" data-view="queue" onclick="go('queue')"><span class="ico">☰</span>Queue<span class="nb" id="nb-queue">0</span></button>
     <button class="nav" data-view="ships" onclick="go('ships')"><span class="ico">⬆</span>Ships<span class="nb" id="nb-ships">0</span></button>
+    <button class="nav" data-view="branches" onclick="go('branches')"><span class="ico">⎇</span>Branches<span class="nb" id="nb-branches">0</span></button>
     <div class="navlbl">Fleet</div>
     <button class="nav" data-view="agents" onclick="go('agents')"><span class="ico">🚧</span>Feature agents<span class="key">5</span></button>
     <button class="nav" data-view="insights" onclick="go('insights')"><span class="ico">📈</span>Insights<span class="key">6</span></button>
@@ -401,6 +408,11 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
   <section class="view" id="view-ships">
     <div class="chips" id="shipRange"></div>
     <div class="grid" id="shipsGrid"></div>
+  </section>
+
+  <section class="view" id="view-branches">
+    <h2>Branches <span class=aside>every autopilot/* branch on origin, reconciled against the ledger</span></h2>
+    <div id="branchesBody"></div>
   </section>
 
   <!-- ── FEATURE AGENTS ── -->
@@ -489,7 +501,7 @@ function toast(m){const t=document.getElementById('toast');t.textContent=m;t.cla
   clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),6000);}
 
 /* ── navigation ─────────────────────────────────────────────────────────── */
-const VIEWS=['overview','inbox','queue','ships','agents','insights'];
+const VIEWS=['overview','inbox','queue','ships','branches','agents','insights'];
 function go(v){
   document.querySelectorAll('.view').forEach(x=>x.classList.toggle('on',x.id==='view-'+v));
   document.querySelectorAll('.nav').forEach(x=>x.classList.toggle('on',x.dataset.view===v));
@@ -501,7 +513,7 @@ document.addEventListener('keydown',e=>{
   if(e.target.tagName==='TEXTAREA'||e.target.tagName==='INPUT')return;
   if(e.key==='/'){e.preventDefault();openPalette();return;}
   if(e.key==='?'){document.getElementById('modal4').style.display='flex';return;}
-  const i=parseInt(e.key,10); if(i>=1&&i<=6) go(VIEWS[i-1]);
+  const i=parseInt(e.key,10); if(i>=1&&i<=7) go(VIEWS[i-1]);
 });
 try{const v=localStorage.getItem('cc-view'); if(v&&VIEWS.includes(v)) go(v);}catch(e){}
 
@@ -687,6 +699,7 @@ function renderTop(){
   const nb=(id,n,hot)=>{const e2=document.getElementById(id);e2.textContent=n;e2.className='nb'+(hot&&n>0?' hot':'');};
   nb('nb-inbox',ib.n,true); nb('nb-queue',r.counts.next,false);
   nb('nb-ships',(r.done||[]).filter(x=>!x.merged&&!x.rejected).length,false);
+  nb('nb-branches',(r.branches||[]).filter(b=>b.category==='awaiting'||b.category==='orphan').length,false);
   if(!r.loop_loaded)document.getElementById('statusText').innerHTML+=' · <span class=hot>daemon not loaded</span>';
   // pinned-tab notifier: title count + amber-dotted favicon while items wait
   const wantTitle=(ib.n?`(${ib.n}) `:'')+'Orbit — Mission Control';
@@ -806,6 +819,46 @@ function renderShips(){
   const items=all.filter(t=>ffn(t)&&(withinRange(t.committed_at)||rangeDays>365));
   document.getElementById('shipsGrid').innerHTML=items.length?items.map(t=>card(t,'done')).join('')
     :`<div class=empty>No ships match. Widen the range or clear the filter.</div>`;
+}
+
+/* ── branches view ──────────────────────────────────────────────────────── */
+function branchRow(b){
+  const st = b.merged?badge('merged','ok')
+    : b.category==='rejected'?badge('rejected','stop')
+    : b.category==='awaiting'?badge('awaiting review','warn')
+    : badge('orphan','muted');
+  let acts='';
+  if(b.has_packet) acts+=`<button class="btn btn-blue btn-mini" onclick="openText('Review packet — ${esc(b.task_id)}','/review?id=${encodeURIComponent(b.task_id)}',false)">Review</button>`;
+  if(b.pr_url) acts+=`<a class="btn btn-blue btn-mini" href="${esc(b.pr_url)}" target="_blank" rel="noopener">Open PR ↗</a>`;
+  if(b.category==='awaiting'){
+    acts+=`<button class="btn btn-go btn-mini" title="record that this landed (feeds merge-rate)" onclick="post('/mark',{id:'${esc(b.task_id)}',outcome:'merged'})">Mark merged</button>`;
+    acts+=`<button class="btn btn-stop btn-mini" onclick="rejectTask('${esc(b.task_id)}')">Reject</button>`;
+  }
+  acts+=`<button class="btn btn-stop btn-mini" onclick="delBranch('${esc(b.branch)}',${b.merged||b.category==='rejected'})">Delete</button>`;
+  return `<div class=brow><code>${esc(b.branch)}</code> ${st} <span class=aside>${b.age_days}d</span><span class=spacer></span>${acts}</div>`;
+}
+function renderBranches(){
+  const bs=(S&&S.branches)||[];
+  const groups=[['awaiting','Awaiting review',null],
+                ['merged','Merged','merged'],
+                ['orphan','Orphans',null],
+                ['rejected','Rejected','rejected']];
+  let html='';
+  for(const [cat,label,bulk] of groups){
+    const rows=bs.filter(b=>b.category===cat);
+    if(!rows.length) continue;
+    const bulkBtn = bulk?`<button class="btn btn-stop btn-mini" onclick="delBulk('${bulk}',${rows.length})">Delete all ${bulk} (${rows.length})</button>`:'';
+    html+=`<div class=bsec><div class=bsec-h><b>${label}</b> <span class=nb>${rows.length}</span>${bulkBtn}</div>${rows.map(branchRow).join('')}</div>`;
+  }
+  document.getElementById('branchesBody').innerHTML = html ||
+    `<div class=empty>No autopilot branches on origin.</div>`;
+}
+function delBranch(branch,safe){
+  const warn = safe?'' : '\n\nThis branch is NOT merged — its work may be unreviewed. ';
+  if(confirm(`Delete origin/${branch}?${warn}`)) post('/delete-branch',{branch:branch});
+}
+function delBulk(kind,n){
+  if(confirm(`Delete all ${n} ${kind} branches from origin? This cannot be undone.`)) post('/delete-branches-bulk',{kind:kind});
 }
 
 /* ── agents view ────────────────────────────────────────────────────────── */
@@ -1081,7 +1134,7 @@ function renderViews(){
   // Preserve column scroll positions across rebuilds.
   const colsEl=document.getElementById('queueCols');
   const scrolls=[...colsEl.querySelectorAll('.col')].map(c=>c.scrollTop);
-  renderStats();renderInboxAll();renderFilters();renderQueue();renderShips();renderAgents();
+  renderStats();renderInboxAll();renderFilters();renderQueue();renderShips();renderBranches();renderAgents();
   renderKpis();renderSpend();renderHistory();renderFunnel();renderRunlog();
   [...colsEl.querySelectorAll('.col')].forEach((c,i)=>{if(scrolls[i])c.scrollTop=scrolls[i];});
 }
