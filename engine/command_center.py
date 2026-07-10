@@ -577,6 +577,54 @@ def trunk_ancestry() -> set:
     return s
 
 
+_TS_SUFFIX = re.compile(r"-\d{8}T\d{6}$")
+
+
+def _task_id_from_branch(name: str) -> str:
+    # "autopilot/task-foo-bar" -> "foo-bar"; strips a trailing -<TIMESTAMP> re-run suffix.
+    base = name[len(PREFIX) + 1:] if name.startswith(PREFIX + "/") else name
+    if base.startswith("task-"):
+        base = base[len("task-"):]
+    return _TS_SUFFIX.sub("", base)
+
+
+def branch_reconcile(branches, ancestry, ledger, now_ts) -> list:
+    # Join origin/<PREFIX>/* branches to the ledger and categorize each.
+    # Pure: all inputs injected. Category order: awaiting > merged > rejected > orphan.
+    rows = []
+    for name, tip, ts in branches:
+        tid = _task_id_from_branch(name)
+        # Ledger keys are prefixed with "task-", so construct the full key
+        entry = ledger.get("task-" + tid, {})
+        entry_ref = (entry.get("remote_ref") or "").removeprefix("origin/") or entry.get("branch") or ""
+        is_current_ref = bool(entry) and entry_ref == name
+        state = entry.get("state") if is_current_ref else None
+        merged = (tip in ancestry) or (is_current_ref and state == "merged")
+        is_orphan = (not entry) or (not is_current_ref)
+
+        if state == "pushed" and not merged:
+            category = "awaiting"
+        elif merged:
+            category = "merged"
+        elif state == "rejected":
+            category = "rejected"
+        else:
+            category = "orphan"
+
+        rows.append({
+            "branch": name,
+            "task_id": tid,
+            "tip": tip,
+            "merged": merged,
+            "ledger_state": state,
+            "is_current_ref": is_current_ref,
+            "is_orphan": is_orphan,
+            "age_days": max(0, (now_ts - ts) // 86400),
+            "category": category,
+        })
+    return rows
+
+
 def bust_branch_caches():
     _FETCH_CACHE["t"] = 0.0
     _BRANCHES_CACHE["t"] = 0.0
