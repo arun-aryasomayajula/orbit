@@ -532,7 +532,7 @@ function card(t,kind){
   const src=t.source?badge(t.source,'muted'):'';
   let live='',timer='',btns='';
   if(kind==='run'){live='live';
-    timer=`<div class="meta"><span class="orbmark orbmark-sm" aria-hidden="true"></span> in orbit <span class="timer" data-start="${t._start||''}">…</span>`+
+    timer=`<div class="meta"><span class="orbmark orbmark-sm" aria-hidden="true"></span> ${S&&S.stopped?'⏸ pause pending — finishing this cycle':'in orbit'} <span class="timer" data-start="${t._start||''}">…</span>`+
       `<div class="wd"><i data-wd="${t._start||''}" style="width:0%"></i></div></div>`;
     btns=`<button class="btn btn-stop btn-mini" onclick="if(confirm('Abort the running cycle and set ${esc(t.id)} aside?'))post('/killtask',{})">Abort &amp; skip</button>`;
   }else if(kind==='next'){
