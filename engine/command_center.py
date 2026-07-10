@@ -507,6 +507,81 @@ def do_rollback(tid: str) -> str:
 
 _MERGED_CACHE = {"t": 0.0, "v": {}}
 
+PREFIX = os.environ.get("ORBIT_BRANCH_PREFIX", "autopilot")
+
+_FETCH_CACHE = {"t": 0.0}
+_BRANCHES_CACHE = {"t": 0.0, "v": []}
+_ANCESTRY_CACHE = {"t": 0.0, "v": set()}
+
+
+def _git(*args, timeout=15):
+    # Thin wrapper: git in the target repo, captured, never raises on non-zero.
+    return subprocess.run(["git", "-C", str(REPO), *args],
+                          capture_output=True, text=True, timeout=timeout)
+
+
+def _fetch_prune():
+    # Refresh remote-tracking refs (and drop refs deleted on origin) so branch
+    # status is accurate even while the loop is paused. Cached 60s. --prune
+    # never deletes REMOTE branches, only stale local tracking refs.
+    now = time.time()
+    if now - _FETCH_CACHE["t"] < 60:
+        return
+    try:
+        _git("fetch", "--prune", "origin", "--quiet")
+    except Exception:
+        pass
+    _FETCH_CACHE["t"] = now
+
+
+def remote_branches() -> list:
+    # [(name, tip_sha, committer_ts)] for origin/<PREFIX>/* — from local
+    # remote-tracking refs (fresh via _fetch_prune), one for-each-ref call.
+    now = time.time()
+    if now - _BRANCHES_CACHE["t"] < 60:
+        return _BRANCHES_CACHE["v"]
+    _fetch_prune()
+    out = []
+    try:
+        r = _git("for-each-ref", "--format=%(refname:short) %(objectname) %(committerdate:unix)",
+                 f"refs/remotes/origin/{PREFIX}/")
+        for ln in r.stdout.splitlines():
+            parts = ln.split()
+            if len(parts) != 3:
+                continue
+            short, sha, ts = parts  # short = "origin/autopilot/task-x"
+            name = short[len("origin/"):] if short.startswith("origin/") else short
+            try:
+                out.append((name, sha, int(ts)))
+            except ValueError:
+                continue
+    except Exception:
+        out = []
+    _BRANCHES_CACHE.update(t=now, v=out)
+    return out
+
+
+def trunk_ancestry() -> set:
+    # Full SHAs reachable from origin/<BASE_BRANCH>. A branch tip in this set is
+    # merged. Same technique as merged_map, shared here. Cached 60s.
+    now = time.time()
+    if now - _ANCESTRY_CACHE["t"] < 60:
+        return _ANCESTRY_CACHE["v"]
+    s = set()
+    try:
+        r = _git("rev-list", "-8000", f"origin/{BASE_BRANCH}")
+        s = set(r.stdout.split())
+    except Exception:
+        s = set()
+    _ANCESTRY_CACHE.update(t=now, v=s)
+    return s
+
+
+def bust_branch_caches():
+    _FETCH_CACHE["t"] = 0.0
+    _BRANCHES_CACHE["t"] = 0.0
+    _ANCESTRY_CACHE["t"] = 0.0
+
 
 def merged_map() -> dict:
     """sha → bool: is a shipped commit already an ancestor of the loop base
