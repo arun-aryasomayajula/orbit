@@ -29,6 +29,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.parse
@@ -74,7 +75,30 @@ AUTO_PROMOTE = AP_STATE / "AUTO_PROMOTE"   # presence = auto-feed ON (wrapper re
 LOGDIR = AP_STATE / "logs"
 APLOG = LOGDIR / "orbit.log"   # the loop's live log (run.sh writes here). Heartbeat + cycle stats read from it.
 CONVERTER = ENGINE / "backlog_to_tasks.py"
-BASE_BRANCH = os.environ.get("ORBIT_BASE_BRANCH") or os.environ.get("AP_BASE_BRANCH", "main")
+
+
+def _resolve_base_branch() -> str:
+    # Trunk to build on + measure "merged?" against. Precedence: explicit env
+    # override (set by run.sh / launchd) → the target's config.yaml (source of
+    # truth, same value run.sh uses) → a LOUD 'main' fallback (never silent —
+    # a wrong base makes every merge badge lie).
+    for var in ("ORBIT_BASE_BRANCH", "AP_BASE_BRANCH"):
+        v = os.environ.get(var)
+        if v:
+            return v
+    try:
+        cfg = yaml.safe_load((AP_HOME / "config.yaml").read_text()) or {}
+        if cfg.get("base_branch"):
+            return str(cfg["base_branch"])
+    except Exception:
+        pass
+    print("WARNING: base_branch unresolved (no ORBIT_BASE_BRANCH/AP_BASE_BRANCH env, "
+          "no base_branch in config.yaml) — merge detection will be WRONG. "
+          "Defaulting to 'main'.", file=sys.stderr)
+    return "main"
+
+
+BASE_BRANCH = _resolve_base_branch()
 PORT = int(os.environ.get("PORT", "8787"))
 SHELL_FILE = ENGINE / "cc_shell.html"         # the SPA shell — read per request so design edits go live on refresh
 REVIEWS = AP_STATE / "reviews"                # per-ship review packets (review_packet.py)
