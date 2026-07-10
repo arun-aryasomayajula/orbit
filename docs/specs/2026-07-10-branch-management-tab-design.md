@@ -17,7 +17,8 @@ glance which are merged, which await review, and which are junk. Measured on
 - **2** branches are re-run duplicates (`…-<TIMESTAMP>`): when a task is re-run and the
   clean branch name already exists on origin, `run.sh` pushes a second timestamped
   branch (`engine/run.sh` ~line 200), and the ledger only records the latest ref — so the
-  older branch becomes an untracked orphan.
+  older branch becomes an untracked orphan. (Special duplicate detection is deferred — see
+  Non-goals; these simply surface as orphans in this iteration.)
 
 ### Root causes
 
@@ -52,7 +53,7 @@ reverts to `main` and every badge goes wrong. Part A hardens this.
   the resolution so it can't silently fall back to `main`.
 - Give one screen — a new **Branches** tab — that reconciles the ledger against every
   `autopilot/*` branch on origin and categorizes each as awaiting-review / merged /
-  orphan-or-duplicate / rejected.
+  orphan / rejected.
 - Provide safe **cleanup**: per-branch and bulk delete of remote branches, hard-scoped to
   the `autopilot/*` prefix.
 - Work with **no Bitbucket API** — pure local git ancestry (the loop fetches each cycle;
@@ -67,7 +68,11 @@ reverts to `main` and every badge goes wrong. Part A hardens this.
 - No *automatic* branch deletion. Cleanup is one-click manual so the operator stays in
   control. (An opt-in auto-prune-merged flag may come later; out of scope here.)
 - No change to how branches are *created* (no force-push of the original on re-run —
-  that would violate the no-force-push rule). Duplicates are handled by cleanup instead.
+  that would violate the no-force-push rule).
+- No special **duplicate** detection/labeling or "delete superseded" bulk path (deferred).
+  Re-run duplicates surface as ordinary orphans and are deletable per-branch. A future
+  iteration may add sibling-aware detection and, separately, fix `run.sh` to stop creating
+  the timestamped second branch.
 
 ## Design
 
@@ -101,7 +106,6 @@ Branch row schema:
   "merged":        true|false,        # tip is ancestor of origin/<base_branch>, OR ledger state==merged
   "ledger_state":  "pushed"|"merged"|"rejected"|"committed"|"escalated"|null,
   "is_current_ref":true|false,        # matches the ledger entry's remote_ref for this task
-  "is_duplicate":  true|false,        # name carries a -<TIMESTAMP> suffix AND a clean-named sibling exists
   "is_orphan":     true|false,        # on origin but no ledger entry (or not the current ref)
   "age_days":      3,                 # from tip commit date
   "has_packet":    true|false,        # reviews/task-<id>.md exists
@@ -114,7 +118,7 @@ Category derivation (mutually exclusive display buckets, evaluated in order):
 1. **awaiting-review**: `ledger_state == "pushed"` and not `merged`.
 2. **merged**: `merged == true`.
 3. **rejected**: `ledger_state == "rejected"` and not merged.
-4. **orphan/duplicate**: `is_orphan || is_duplicate` (and not caught above).
+4. **orphan**: `is_orphan` (and not caught above). Re-run timestamp-dupes fall here.
 
 Freshness: the tab triggers a cached (~60s TTL, same cadence as `merged_map`) refresh that
 runs `git fetch --prune origin` before enumerating. `--prune` drops local stale
@@ -134,11 +138,9 @@ Rendered as four collapsible sections mirroring the categories, newest-actionabl
 - **Awaiting review** (N) — per row: age, `🔍 Review` (packet), `Open PR`, `Merge`, `Reject`,
   `Delete`.
 - **Merged** (N) — per row: `Delete`. Section header: **Delete all merged** button.
-- **Orphans / duplicates** (N) — per row: `Delete` (+ a "duplicate of \<clean branch>" note).
-  Section header **Delete all superseded** button — bulk-deletes only *duplicates whose
-  clean-named sibling still exists* (the work is preserved on the sibling) and merged orphans.
-  A **true orphan** (unmerged, no sibling) may be unreviewed work, so it is per-branch `Delete`
-  with confirm only — never in the bulk sweep. This keeps Part C consistent with guardrail D#3.
+- **Orphans** (N) — branches on origin not tracked as the ledger's current ref (includes
+  re-run timestamp-dupes). Per row: `Delete` with confirm — these may be unmerged, unreviewed
+  work, so there is **no bulk delete** here (consistent with guardrail D#3).
 - **Rejected** (N) — per row: `Delete`. Section header: **Delete all rejected** button.
 
 Ships tab is unchanged (task-review lens); Branches is the git-hygiene lens. They share the
@@ -154,21 +156,14 @@ the existing POST routes in `do_GET`/`do_POST`). Runs `git push origin --delete 
 1. The branch name **must** match `^<ORBIT_BRANCH_PREFIX>/` (i.e. `autopilot/`). Any other
    branch is rejected outright — named/team branches (`main`, `feature/*`, deploy pointers)
    can never be deleted from this UI by construction.
-2. **Bulk** delete endpoints (`delete all merged` / `delete all rejected` / `delete all
-   superseded`) may only delete branches the reconciler classified as **merged**, **rejected**,
-   or **duplicate-with-surviving-sibling** respectively — verified server-side, not trusted
-   from the client.
-3. Any branch whose work could be **unmerged and unreviewed** — an awaiting-review branch, or
-   a true orphan (unmerged, no sibling) — is deletable only via the **per-branch** `Delete`
-   with an explicit confirm; it is never included in any bulk sweep.
+2. **Bulk** delete endpoints (`delete all merged` / `delete all rejected`) may only delete
+   branches the reconciler classified as **merged** or **rejected** respectively — verified
+   server-side, not trusted from the client.
+3. Any branch whose work could be **unmerged and unreviewed** — an awaiting-review branch or
+   an orphan — is deletable only via the **per-branch** `Delete` with an explicit confirm; it
+   is never included in any bulk sweep.
 4. On successful delete, the reconciler cache is invalidated so the row disappears on the
    next poll.
-
-### Part E — Duplicate handling
-
-Duplicates (`…-<TIMESTAMP>`) surface in the Orphans/duplicates section with a note pointing at
-the clean-named sibling, and are deletable individually or via the section's bulk button. No
-change to `run.sh` push behavior.
 
 ## Data flow
 
@@ -203,11 +198,9 @@ Backend (pytest-style, no git/network — inject inputs):
 
 - `branch_reconcile`: given a synthetic branch list + ancestry set + ledger, asserts correct
   category for each fixture — pushed-unmerged→awaiting, ancestor-of-base→merged,
-  `-<TS>`-with-sibling→duplicate, on-origin-no-ledger→orphan, marked-rejected→rejected.
-- Duplicate detection: `task-x` + `task-x-20260710T101010` → the timestamped one flagged
-  `is_duplicate` with the clean one as sibling.
+  on-origin-no-ledger (incl. a `-<TS>` re-run branch)→orphan, marked-rejected→rejected.
 - Delete guardrail: rejects any name not under `autopilot/`; bulk-merged rejects a branch not
-  in the merged set; awaiting-review branch is excluded from every bulk path.
+  in the merged set; awaiting-review and orphan branches are excluded from every bulk path.
 
 Frontend: existing Jest/RTL harness for the tab — renders the four sections from a mocked
 `/api/state`, bulk buttons call the right endpoint with the right branch set, and the delete
