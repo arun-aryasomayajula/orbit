@@ -1202,6 +1202,20 @@ def build_state() -> dict:
     if STATE.exists():
         runlog = [ln[2:] for ln in STATE.read_text().splitlines() if ln.strip().startswith("- ")][-10:]
 
+    # Reconciled autopilot/* branches for the Branches tab. Decorate the pure
+    # rows with filesystem/URL facts build_state owns.
+    import time as _t
+    _now = int(_t.time())
+    _branch_rows = branch_reconcile(remote_branches(), trunk_ancestry(), load_ledger(), _now)
+    for _b in _branch_rows:
+        _b["has_packet"] = (REVIEWS / f"task-{_b['task_id']}.md").exists()
+        _b["pr_url"] = (
+            f"{BB_PR_NEW}?source={urllib.parse.quote(_b['branch'], safe='')}"
+            f"&dest={urllib.parse.quote(BASE_BRANCH, safe='')}"
+            if BB_PR_NEW and not _b["merged"] and _b["category"] != "rejected"
+            else None
+        )
+
     rt = probe_runtime()
     rt.update({"running": running, "next_up": next_up, "board": board, "skipped": skipped,
                "auto_feed": AUTO_PROMOTE.exists(), "metrics": agent_metrics(), "history": hist["days"],
@@ -1210,6 +1224,7 @@ def build_state() -> dict:
                "spend_history": spend_history(),
                "done": done, "escalated": escalated, "skips": sorted(skips),
                "runlog": runlog,
+               "branches": _branch_rows,
                "counts": {"next": len(next_up), "board": len(board), "done": len(done),
                           "escalated": len(escalated), "skipped": len(skips)}})
     return rt
