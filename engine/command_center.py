@@ -903,6 +903,40 @@ def do_merge_to_loop(branch: str) -> str:
         subprocess.run(["git", "-C", str(REPO), "worktree", "prune"], capture_output=True, text=True)
 
 
+def do_delete_branch(branch: str) -> str:
+    # Delete a single remote branch. HARD guardrail: only <PREFIX>/* refs — named
+    # / team branches can never be deleted from this UI. Per-branch delete is
+    # allowed for ANY category (the UI gates unmerged ones behind a confirm).
+    if not branch.startswith(PREFIX + "/"):
+        return f"Refused: '{branch}' is not under '{PREFIX}/' — only orbit task branches are deletable here."
+    r = _git("push", "origin", "--delete", branch)
+    bust_branch_caches()
+    if r.returncode != 0:
+        return f"Delete of '{branch}' FAILED:\n{r.stderr.strip()}"
+    return f"Deleted origin/{branch}."
+
+
+def do_delete_branches_bulk(kind: str) -> str:
+    # Bulk delete only branches the SERVER classifies as `kind` (merged|rejected).
+    # Never trusts the client; awaiting-review and orphan branches are never
+    # touched here — those are per-branch, confirmed deletes only.
+    if kind not in ("merged", "rejected"):
+        return f"Refused: bulk delete only supports merged|rejected (got '{kind}')."
+    import time as _t
+    rows = branch_reconcile(remote_branches(), trunk_ancestry(), load_ledger(), int(_t.time()))
+    targets = [r["branch"] for r in rows
+               if r["category"] == kind and r["branch"].startswith(PREFIX + "/")]
+    deleted, failed = [], []
+    for b in targets:
+        if _git("push", "origin", "--delete", b).returncode == 0:
+            deleted.append(b)
+        else:
+            failed.append(b)
+    bust_branch_caches()
+    tail = f" ({len(failed)} failed)" if failed else ""
+    return f"Deleted {len(deleted)} {kind} branch(es){tail}."
+
+
 # ── state assembly (JSON for the SPA) ─────────────────────────────────────────
 def agent_metrics() -> dict:
     """Productivity stats — local & fast (ledger states + the wrapper's saved
@@ -1882,6 +1916,13 @@ class Handler(BaseHTTPRequestHandler):
                 if not re.match(r"^[A-Za-z0-9._/-]{1,120}$", branch):
                     self._send(b'{"ok":false,"msg":"invalid branch"}', "application/json", 400); return
                 msg = do_merge_to_loop(branch)
+            elif path == "/delete-branch":
+                branch = (data.get("branch", [""])[0]).strip()
+                if not re.match(r"^[A-Za-z0-9._/-]{1,120}$", branch):
+                    self._send(b'{"ok":false,"msg":"invalid branch"}', "application/json", 400); return
+                msg = do_delete_branch(branch)
+            elif path == "/delete-branches-bulk":
+                msg = do_delete_branches_bulk((data.get("kind", [""])[0]).strip())
             else:
                 self._send(b'{"ok":false,"msg":"unknown action"}', "application/json", 404); return
             self._send(json.dumps({"ok": True, "msg": msg}).encode(), "application/json")
