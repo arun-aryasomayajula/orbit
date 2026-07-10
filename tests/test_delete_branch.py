@@ -21,9 +21,10 @@ def _cc(tmp_path, monkeypatch):
 
 
 class _FakeGit:
-    def __init__(self): self.deleted = []
+    def __init__(self): self.deleted = []; self.calls = 0
     def __call__(self, *args, **kw):
         import types
+        self.calls += 1
         if args[:2] == ("push", "origin") and "--delete" in args:
             self.deleted.append(args[-1])
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -35,6 +36,7 @@ def test_refuses_non_autopilot(tmp_path, monkeypatch):
     msg = cc.do_delete_branch("main")
     assert "refused" in msg.lower()
     assert fg.deleted == []
+    assert fg.calls == 0
 
 
 def test_single_delete_autopilot(tmp_path, monkeypatch):
@@ -59,3 +61,28 @@ def test_bulk_merged_only_touches_merged(tmp_path, monkeypatch):
     msg = cc.do_delete_branches_bulk("merged")
     assert fg.deleted == ["autopilot/task-m"]   # awaiting NOT deleted
     assert "1" in msg
+
+
+def test_bulk_rejected_only_touches_rejected(tmp_path, monkeypatch):
+    cc = _cc(tmp_path, monkeypatch)
+    fg = _FakeGit(); monkeypatch.setattr(cc, "_git", fg)
+    monkeypatch.setattr(cc, "remote_branches", lambda: [
+        ("autopilot/task-r", "sha_r", 1_000_000),   # rejected
+        ("autopilot/task-a", "sha_a", 1_000_000),   # awaiting
+    ])
+    monkeypatch.setattr(cc, "trunk_ancestry", lambda: set())
+    monkeypatch.setattr(cc, "load_ledger", lambda: {
+        "r": {"state": "rejected", "sha": "sha_r", "remote_ref": "origin/autopilot/task-r"},
+        "a": {"state": "pushed", "sha": "sha_a", "remote_ref": "origin/autopilot/task-a"},
+    })
+    msg = cc.do_delete_branches_bulk("rejected")
+    assert fg.deleted == ["autopilot/task-r"]   # awaiting NOT deleted
+    assert "1" in msg
+
+
+def test_bulk_refuses_invalid_kind(tmp_path, monkeypatch):
+    cc = _cc(tmp_path, monkeypatch)
+    fg = _FakeGit(); monkeypatch.setattr(cc, "_git", fg)
+    msg = cc.do_delete_branches_bulk("awaiting")
+    assert fg.deleted == []
+    assert "Refused" in msg
