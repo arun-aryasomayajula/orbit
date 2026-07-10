@@ -1,5 +1,7 @@
 # Branch-Management Tab Implementation Plan
 
+> **ARCHIVED build-history (shipped 2026-07-10).** This is the TDD build ladder kept for provenance — the exact code/tests each task landed. The durable why-and-invariants record is the sibling `2026-07-10-branch-management-tab-design.md`; the code is the source of truth for how.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add an orbit dashboard "Branches" tab that reconciles the ledger against every `autopilot/*` branch on origin (awaiting-review / merged / orphan / rejected) with guarded per-branch and bulk delete.
@@ -8,7 +10,7 @@
 
 **Tech Stack:** Python 3 stdlib (`subprocess`, `http.server`, `yaml`), vanilla JS in a single HTML file, pytest.
 
-**Design spec:** `docs/specs/2026-07-10-branch-management-tab-design.md`
+**Design spec (rationale record):** `docs/specs/done/2026-07-10-branch-management-tab-design.md`
 
 ## Global Constraints
 
