@@ -594,8 +594,8 @@ def branch_reconcile(branches, ancestry, ledger, now_ts) -> list:
     rows = []
     for name, tip, ts in branches:
         tid = _task_id_from_branch(name)
-        # Ledger keys are prefixed with "task-", so construct the full key
-        entry = ledger.get("task-" + tid, {})
+        # Ledger keys are bare task ids (no "task-" prefix) — match _task_id_from_branch's output.
+        entry = ledger.get(tid, {})
         entry_ref = (entry.get("remote_ref") or "").removeprefix("origin/") or entry.get("branch") or ""
         is_current_ref = bool(entry) and entry_ref == name
         state = entry.get("state") if is_current_ref else None

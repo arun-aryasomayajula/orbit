@@ -33,10 +33,10 @@ def test_categories(tmp_path, monkeypatch):
     ]
     ancestry = {"sha_done"}
     ledger = {
-        "task-await": {"state": "pushed",   "sha": "sha_await", "remote_ref": "origin/autopilot/task-await"},
-        "task-done":  {"state": "pushed",   "sha": "sha_done",  "remote_ref": "origin/autopilot/task-done"},
-        "task-rej":   {"state": "rejected", "sha": "sha_rej",   "remote_ref": "origin/autopilot/task-rej"},
-        "task-dup":   {"state": "pushed",   "sha": "sha_new",   "remote_ref": "origin/autopilot/task-dup"},
+        "await": {"state": "pushed",   "sha": "sha_await", "remote_ref": "origin/autopilot/task-await"},
+        "done":  {"state": "pushed",   "sha": "sha_done",  "remote_ref": "origin/autopilot/task-done"},
+        "rej":   {"state": "rejected", "sha": "sha_rej",   "remote_ref": "origin/autopilot/task-rej"},
+        "dup":   {"state": "pushed",   "sha": "sha_new",   "remote_ref": "origin/autopilot/task-dup"},
     }
     rows = {r["branch"]: r for r in cc.branch_reconcile(branches, ancestry, ledger, NOW)}
 
@@ -60,7 +60,7 @@ def test_categories(tmp_path, monkeypatch):
 def test_marked_merged_without_ancestry(tmp_path, monkeypatch):
     cc = _cc(tmp_path, monkeypatch)
     branches = [("autopilot/task-m", "sha_m", 1_000_000)]
-    ledger = {"task-m": {"state": "merged", "sha": "sha_m", "remote_ref": "origin/autopilot/task-m"}}
+    ledger = {"m": {"state": "merged", "sha": "sha_m", "remote_ref": "origin/autopilot/task-m"}}
     rows = cc.branch_reconcile(branches, set(), ledger, 1_000_000)
     assert rows[0]["category"] == "merged"
     assert rows[0]["merged"] is True
