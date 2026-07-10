@@ -623,6 +623,7 @@ function idleWhy(r,t){
   else if(idleAge <= r.interval*1.5) eta = `next pick within ~${r.interval}s`;
   const etaPart = eta?` — ${eta}`:'';
   switch(r.idle_reason){
+    case 'cycle-running': return {tag:'In orbit', msg:`A cycle is running. ${beat}.`, cls:'green'};
     case 'stopped': return {tag:'Paused', msg:`Kill-switch present — click Resume to run. ${beat}.`, cls:'amber'};
     case 'daily-cap': return {tag:'Daily cap', msg:`Hit the daily task cap — resets tomorrow. ${beat}.`, cls:'amber'};
     case 'usage-limit': return {tag:'Backing off', msg:`Usage limit hit${etaPart}. ${beat}.`, cls:'amber'};
@@ -640,7 +641,7 @@ function renderTop(){
   const money=`$${(r.daily_spend||0).toFixed(2)} est.`;
   let s;
   if(r.stopped)s=`⏸ <b>Paused.</b> Nothing runs or spends until you resume · ${r.counts.next} queued · ${money} today`;
-  else if(r.cycle_running&&r.cycle_start)s=`<b>In orbit: ${esc(r.current_task||'claiming a task…')}</b> · ${fmt(t-r.cycle_start)} elapsed · ${r.daily_count}/${r.max_tasks} tasks + ${money} today · ${r.counts.next} queued behind it`;
+  else if(r.cycle_running&&r.cycle_start)s=`<b>In orbit: ${esc(r.current_task||'claiming a task…')}</b>${r.current_task_tentative?' <span class=mut>(confirming…)</span>':''} · ${fmt(t-r.cycle_start)} elapsed · ${r.daily_count}/${r.max_tasks} tasks + ${money} today · ${r.counts.next} queued behind it`;
   else {const w=idleWhy(r,t); s=`<b>${w.tag}.</b> ${w.msg} · ${r.daily_count}/${r.max_tasks} tasks + ${money} today · ${r.counts.next} queued`;}
   if(ib.n)s+=` · <span class=hot>${ib.n} item${ib.n===1?'':'s'} need you</span>`;
   document.getElementById('statusText').innerHTML=s;
@@ -654,7 +655,7 @@ function renderTop(){
     const p=Math.min(1,(t-r.cycle_start)/r.cycle_timeout);
     orbit.className='orbit';arc.style.strokeDashoffset=ORBIT_C*(1-p);
     arc.style.stroke=p>.8?'var(--amber)':'var(--blue)';
-    hs.innerHTML=`In orbit <span class=mut>· ${esc(r.current_task||'claiming a task…')}</span>`;
+    hs.innerHTML=`In orbit <span class=mut>· ${esc(r.current_task||'claiming a task…')}${r.current_task_tentative?' (confirming…)':''}</span>`;
     hsub.innerHTML=`<b>${fmt(t-r.cycle_start)}</b> elapsed of a ${Math.floor(r.cycle_timeout/60)}m watchdog window · one atomic commit per cycle, pushed to its own branch.`;}
   else{const w=idleWhy(r,t);
     orbit.className='orbit idle';arc.style.strokeDashoffset=ORBIT_C*0.25;

@@ -123,6 +123,27 @@ print(sum(1 for t in tasks if str(t.get("id")) not in worked and str(t.get("id")
 PYEOF
 }
 
+# The id the cycle will MOST LIKELY claim — first pickable task in queue order,
+# same worked/skipped filter as count_pickable. Written as a provisional marker
+# before the cycle so the dashboard names the task in seconds instead of showing
+# "claiming a task…" for minutes while the agent reads STATE/backlog and vets it.
+# The agent's own ledger-claim overwrites .current-task-id with the authoritative id.
+next_pickable_id() {
+  python3 - "$STATE/queue.json" "$ENGINE/ledger.py" "$STATE/skips.txt" <<'PYEOF'
+import json, os, subprocess, sys
+qf, ledger, sk = sys.argv[1], sys.argv[2], sys.argv[3]
+q = json.load(open(qf)) if os.path.exists(qf) else {}
+tasks = q.get("queue", q.get("tasks", q)) if isinstance(q, dict) else q
+try: worked = set(subprocess.check_output(["python3", ledger, "worked-ids"], text=True).split())
+except Exception: worked = set()
+skips = set(l.strip() for l in open(sk)) if os.path.exists(sk) else set()
+for t in tasks:
+    tid = str(t.get("id"))
+    if tid not in worked and tid not in skips:
+        print(tid); break
+PYEOF
+}
+
 run_cycle() {
   local out="$1"; cd "$WT" || return 1
   local caff=""; command -v caffeinate >/dev/null 2>&1 && caff="caffeinate -i"
@@ -159,6 +180,12 @@ one_iteration() {
 
   local cyclelog="$LOGDIR/cycle-$(date '+%Y%m%dT%H%M%S').log"
   log "cycle start ($pickable pickable) → $cyclelog"
+  # Name the task on the dashboard immediately (see next_pickable_id). Provisional
+  # until the agent's claim overwrites .current-task-id; kept in a SEPARATE file so
+  # the post-cycle push/escalation below only ever reads the authoritative marker.
+  local cand; cand="$(next_pickable_id 2>/dev/null)"
+  [ -n "$cand" ] && echo "$cand" > "$STATE/.cycle-candidate"
+  set_idle_reason "cycle-running" 0
   run_cycle "$cyclelog"
   log "cycle cost \$$(record_spend "$cyclelog") (today \$$(todays_spend), informational)"
 
@@ -191,7 +218,7 @@ one_iteration() {
       python3 "$ENGINE/ledger.py" escalate "$tid" "wrapper: no commit (gate fail / too large / incomplete)" >>"$LOGDIR/orbit.log" 2>&1 || true
     fi
   fi
-  rm -f "$marker" 2>/dev/null || true
+  rm -f "$marker" "$STATE/.cycle-candidate" 2>/dev/null || true
 
   if grep -qiE "usage limit|rate limit|session limit|429|quota" "$cyclelog" 2>/dev/null \
      && ! grep -q '"type":"result"' "$cyclelog" 2>/dev/null; then echo LIMIT; return; fi

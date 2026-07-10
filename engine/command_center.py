@@ -230,6 +230,15 @@ def probe_runtime() -> dict:
     except Exception:
         pass
 
+    # Task identity: the agent's authoritative claim (.current-task-id) wins; until
+    # it lands (minutes into a cycle) fall back to run.sh's provisional .cycle-candidate
+    # so the dashboard names the task in seconds. tentative=True flags the fallback so
+    # the UI can mark it as still-confirming.
+    claimed = MARKER.read_text().strip() if MARKER.exists() else None
+    cand_file = AP_STATE / ".cycle-candidate"
+    candidate = cand_file.read_text().strip() if cand_file.exists() else None
+    current_task = claimed or candidate
+
     return {
         "now": time.time(),
         "loop_loaded": loop_loaded(),
@@ -237,7 +246,8 @@ def probe_runtime() -> dict:
         "stop_note": (STOP.read_text().strip() if STOP.exists() else None),
         "cycle_running": running,
         "cycle_start": start if running else None,
-        "current_task": (MARKER.read_text().strip() if MARKER.exists() else None),
+        "current_task": current_task,
+        "current_task_tentative": bool(current_task and not claimed),
         "heartbeat": heartbeat,
         "idle_reason": idle_reason,
         "resume_at": resume_at,
