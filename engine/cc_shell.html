@@ -89,6 +89,24 @@ nav{padding:12px 10px;display:flex;flex-direction:column;gap:2px;flex:1;overflow
 .meter .bar i{display:block;height:100%;background:var(--green);border-radius:3px;transition:width .5s}
 .meter .bar i.warn{background:var(--amber)}
 .meter .row{display:flex;justify-content:space-between}
+/* rail collapse toggle + icon-only collapsed state */
+.railtoggle{margin-left:auto;background:none;border:1px solid var(--line2);color:var(--dim);
+  width:24px;height:24px;border-radius:6px;cursor:pointer;font:600 13px/1 var(--mono);flex:none}
+.railtoggle:hover{color:var(--ink);border-color:var(--faint)}
+.btn .fi{font-size:13px}
+body.rail-collapsed{--rail:66px}
+.rail-collapsed .brand{padding:16px 0}
+.rail-collapsed .brand .sat{justify-content:center;gap:0}
+.rail-collapsed .brand h1,.rail-collapsed .brand .base,.rail-collapsed .navlbl{display:none}
+.rail-collapsed nav{padding:12px 8px}
+.rail-collapsed .nav{font-size:0;justify-content:center;padding:10px 0}
+.rail-collapsed .nav .ico{font-size:16px}
+.rail-collapsed .nav .nb,.rail-collapsed .nav .key{display:none}
+.rail-collapsed .nav.on::before{left:-8px}
+.rail-collapsed .railfoot{padding:12px 8px}
+.rail-collapsed .railfoot .lbl{display:none}
+.rail-collapsed .railfoot .btn{padding:9px 0;text-align:center}
+.rail-collapsed .meter{display:none}
 
 /* ── buttons ────────────────────────────────────────────────────────────── */
 .btn{border:1px solid var(--line2);border-radius:7px;padding:7px 12px;font:600 12px var(--disp);
@@ -357,6 +375,28 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
 
 /* rows-only stack (inbox) — never a multi-column grid */
 .rows{display:flex;flex-direction:column;gap:10px}
+
+/* ── admin / settings ────────────────────────────────────────────────────── */
+.setcard{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:14px;max-width:860px}
+.setcard h3{font:600 10.5px var(--disp);letter-spacing:.18em;text-transform:uppercase;color:var(--dim);margin:0 0 13px}
+.field{margin-bottom:13px}
+.field>label{display:block;font:600 11px var(--disp);color:var(--dim);margin-bottom:5px}
+.field .hint{font:500 10.5px var(--mono);color:var(--faint);margin-top:4px}
+.field input,.field select,.field textarea{width:100%;background:var(--void);border:1px solid var(--line2);
+  border-radius:8px;padding:8px 11px;color:var(--ink);font:500 12.5px var(--mono)}
+.field input:focus,.field select:focus,.field textarea:focus{outline:2px solid var(--blue);outline-offset:1px}
+.field textarea{resize:vertical;min-height:120px;line-height:1.55}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.checkrow{display:flex;flex-wrap:wrap;gap:8px}
+.checkrow label{display:inline-flex;align-items:center;gap:6px;background:var(--card);border:1px solid var(--line2);
+  border-radius:8px;padding:6px 10px;font:600 11.5px var(--disp);color:var(--dim);cursor:pointer}
+.checkrow label.on{color:var(--blue);border-color:#2b4f86;background:var(--blue-dim)}
+.checkrow input{width:auto}
+.set-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;position:sticky;bottom:0;max-width:860px;
+  background:linear-gradient(0deg,var(--void) 55%,transparent);padding:14px 0 6px;margin-top:4px}
+.set-meta{font:500 11px/1.7 var(--mono);color:var(--faint)}
+.set-meta code{color:var(--dim)}
+@media(max-width:700px){.grid2{grid-template-columns:1fr}}
 </style></head><body>
 
 <div id="stars" aria-hidden="true"></div><div id="stars2" aria-hidden="true"></div>
@@ -457,7 +497,8 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
 
 <aside id="rail">
   <div class="brand">
-    <div class="sat"><span class="orbmark" aria-hidden="true"></span><h1>Orbit</h1></div>
+    <div class="sat"><span class="orbmark" aria-hidden="true"></span><h1>Orbit</h1>
+      <button class="railtoggle" id="railToggle" onclick="toggleRail()" title="Collapse sidebar" aria-label="Toggle sidebar">«</button></div>
     <div class="base">orbiting <b>__BRANCH__</b></div>
   </div>
   <nav aria-label="Views">
@@ -471,6 +512,8 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
     <div class="navlbl">Fleet</div>
     <button class="nav" data-view="agents" onclick="go('agents')"><span class="ico">🚧</span>Feature agents<span class="key">7</span></button>
     <button class="nav" data-view="insights" onclick="go('insights')"><span class="ico">📈</span>Insights<span class="key">8</span></button>
+    <div class="navlbl">Admin</div>
+    <button class="nav" data-view="settings" onclick="go('settings')" title="Settings"><span class="ico">⚙</span>Settings</button>
     <div class="navlbl">Help</div>
     <button class="nav" onclick="openText('📖 Operator guide — what everything means','/guide',false)"><span class="ico">📖</span>Guide</button>
   </nav>
@@ -557,6 +600,13 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
     </div>
   </section>
 
+  <!-- ── SETTINGS / ADMIN ── -->
+  <section class="view" id="view-settings">
+    <h2 style="margin:0 0 4px">Settings <span class=aside>config.yaml is the single source of truth — point Orbit at any repo</span></h2>
+    <p class="colsub" style="margin:0 0 16px">Edit, Save, then Restart the loop to apply. Everything here is per-target, so this same Orbit engine drives any codebase.</p>
+    <div id="settingsBody"><div class=empty>Loading configuration…</div></div>
+  </section>
+
   <!-- ── INSIGHTS ── -->
   <section class="view" id="view-insights">
     <div class="kpis" id="kpis"></div>
@@ -633,11 +683,12 @@ function toast(m){const t=document.getElementById('toast');t.textContent=m;t.cla
   clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),6000);}
 
 /* ── navigation ─────────────────────────────────────────────────────────── */
-const VIEWS=['overview','inbox','queue','deepspace','ships','branches','agents','insights'];
+const VIEWS=['overview','inbox','queue','deepspace','ships','branches','agents','insights','settings'];
 function go(v){
   document.querySelectorAll('.view').forEach(x=>x.classList.toggle('on',x.id==='view-'+v));
   document.querySelectorAll('.nav').forEach(x=>x.classList.toggle('on',x.dataset.view===v));
   try{localStorage.setItem('cc-view',v)}catch(e){}
+  if(v==='settings')loadSettings();   // fetch fresh config each time the tab opens
 }
 document.addEventListener('keydown',e=>{
   if(e.key==='Escape'){closePalette();closeModal();closeModal2();closeModal3();closeModal4();return;}
@@ -648,6 +699,21 @@ document.addEventListener('keydown',e=>{
   const i=parseInt(e.key,10); if(i>=1&&i<=8) go(VIEWS[i-1]);
 });
 try{const v=localStorage.getItem('cc-view'); if(v&&VIEWS.includes(v)) go(v);}catch(e){}
+
+/* ── rail collapse (icon-only when collapsed) ───────────────────────────── */
+function toggleRail(){
+  const c=document.body.classList.toggle('rail-collapsed');
+  try{localStorage.setItem('cc-rail-collapsed',c?'1':'0')}catch(e){}
+  const b=document.getElementById('railToggle');
+  if(b){b.textContent=c?'»':'«';b.title=(c?'Expand':'Collapse')+' sidebar';}
+}
+(function(){
+  var collapsed=false; try{collapsed=localStorage.getItem('cc-rail-collapsed')==='1';}catch(e){}
+  if(collapsed){document.body.classList.add('rail-collapsed');
+    var b=document.getElementById('railToggle'); if(b){b.textContent='»';b.title='Expand sidebar';}}
+  // native tooltips keep the icon-only rail usable when collapsed
+  document.querySelectorAll('.nav').forEach(function(n){if(!n.title)n.title=n.textContent.replace(/\s*\d+$/,'').trim();});
+})();
 
 /* ── shared card renderer ───────────────────────────────────────────────── */
 const SAFE_CATS=['testing','documentation','dependencies','code_quality','developer_experience'];
@@ -819,11 +885,13 @@ function renderTop(){
     (r.cycle_running?`<button class="btn" onclick="if(confirm('Abort the running cycle? The task is set aside, not retried.'))post('/killtask',{})">Abort cycle</button>`:'');
   // rail buttons + meter
   const lb=document.getElementById('loopBtn');
-  lb.textContent=r.stopped?'▶ Resume':'⏸ Pause';
+  lb.innerHTML=r.stopped?'<span class="fi">▶</span><span class="lbl">Resume</span>':'<span class="fi">⏸</span><span class="lbl">Pause</span>';
   lb.className='btn '+(r.stopped?'btn-go':'btn-stop');
+  lb.title=r.stopped?'Resume the loop':'Pause the loop';
   const fb=document.getElementById('feedBtn');
-  fb.textContent='Auto-feed '+(r.auto_feed?'on':'off');
+  fb.innerHTML='<span class="fi">⦿</span><span class="lbl">Auto-feed '+(r.auto_feed?'on':'off')+'</span>';
   fb.className='btn '+(r.auto_feed?'btn-blue':'btn-ghost');
+  fb.title='Auto-feed '+(r.auto_feed?'on — the loop promotes safe work itself':'off');
   const spendPct=0; // spend is informational only — never a gauge against a cap
   const taskPct=Math.min(100,r.daily_count/r.max_tasks*100);
   const pct=Math.max(spendPct,taskPct);
@@ -1312,6 +1380,67 @@ function pollTail(){
 /* ── loop controls ──────────────────────────────────────────────────────── */
 function toggleLoop(){if(!S)return;post(S.stopped?'/resume':'/stop',{});}
 function toggleFeed(){if(!S)return;post('/autofeed',{on:S.auto_feed?'0':'1'});}
+
+/* ── settings / admin ───────────────────────────────────────────────────── */
+function escAttr(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/"/g,'&quot;');}
+function postJSON(path,obj){return fetch(path,{method:'POST',
+  headers:{'Content-Type':'application/json','X-CC-Token':TOKEN},body:JSON.stringify(obj)}).then(r=>r.json());}
+function collectChecks(id){return [...document.querySelectorAll('#set-'+id+' input:checked')].map(i=>i.value);}
+function loadSettings(){
+  fetch('/api/config',{headers:{'X-CC-Token':TOKEN}}).then(r=>r.json()).then(function(d){
+    const c=d.config||{}, m=d.meta||{};
+    const txt=(id,label,val,hint)=>`<div class=field><label>${label}</label><input id="set-${id}" value="${escAttr(val)}">${hint?`<div class=hint>${hint}</div>`:''}</div>`;
+    const num=(id,label,val,hint)=>`<div class=field><label>${label}</label><input id="set-${id}" type="number" min="1" value="${escAttr(val)}">${hint?`<div class=hint>${hint}</div>`:''}</div>`;
+    const sel=(id,label,val,opts)=>`<div class=field><label>${label}</label><select id="set-${id}">`+opts.map(o=>`<option value="${escAttr(o)}" ${o===val?'selected':''}>${esc(o)}</option>`).join('')+`</select></div>`;
+    const checks=(id,label,all,on,hint)=>`<div class=field><label>${label}</label><div class=checkrow id="set-${id}">`+
+      all.map(o=>`<label class="${on.includes(o)?'on':''}"><input type="checkbox" value="${escAttr(o)}" ${on.includes(o)?'checked':''} onchange="this.parentNode.classList.toggle('on',this.checked)">${esc(o)}</label>`).join('')+
+      `</div>${hint?`<div class=hint>${hint}</div>`:''}</div>`;
+    document.getElementById('settingsBody').innerHTML=
+      `<div class=setcard><h3>Repository &amp; branch</h3>
+        ${txt('repo','Target repo path',c.repo||m.repo,'relative to .autopilot, or absolute')}
+        <div class=grid2>${txt('base_branch','Base branch — what Orbit orbits',c.base_branch||m.base_branch)}${txt('branch_prefix','Task-branch prefix',c.branch_prefix||'autopilot')}</div></div>
+      <div class=setcard><h3>Git host</h3>
+        <div class=grid2>${sel('git_host','Provider',c.git_host||m.git_host,m.hosts_all||['bitbucket','github','gitlab'])}${txt('git_repo','Repo slug (org/repo)',c.git_repo||m.git_repo,'drives PR + source links')}</div>
+        <div class=set-meta>New-PR link: <code>${esc(m.git_pr_url||'—')}</code></div></div>
+      <div class=setcard><h3>Agent</h3>
+        <div class=grid2>${txt('model','Model',c.model)}${sel('permission_mode','Permission mode',c.permission_mode,['acceptEdits','plan','bypassPermissions','default'])}</div></div>
+      <div class=setcard><h3>Cadence</h3>
+        <div class=grid2>${num('interval_seconds','Poll interval (s)',c.interval_seconds)}${num('max_tasks_per_day','Max tasks / day',c.max_tasks_per_day)}</div>
+        ${num('cycle_timeout_seconds','Cycle timeout (s)',c.cycle_timeout_seconds)}</div>
+      <div class=setcard><h3>Discovery</h3>
+        ${checks('sources','Task sources',m.sources_all||[],c.sources||[],'where the loop pulls work from')}
+        ${checks('workable_categories','Auto-workable categories',m.categories_all||[],c.workable_categories||[],'categories the loop may build unattended')}</div>
+      <div class=setcard><h3>Verification gates</h3>
+        <div class=field><label>Gates — JSON: name → { cmd, cwd, needs: [] }</label>
+          <textarea id="set-gates" spellcheck="false">${esc(JSON.stringify(c.gates||{},null,2))}</textarea>
+          <div class=hint>the commands that must pass before a change ships — the #1 thing to set per repo</div></div></div>
+      <div class=setcard><h3>Advanced</h3>
+        ${txt('spec','Standing spec file',c.spec||'','reread by the agent each cycle')}
+        ${txt('commit_trailer','Commit trailer',c.commit_trailer||'')}</div>
+      <div class=setcard><h3>Environment (read-only)</h3>
+        <div class=set-meta>.autopilot: <code>${esc(m.ap_home)}</code><br>repo: <code>${esc(m.repo)}</code><br>dashboard port: <code>${esc(m.port)}</code><br>loop service: <code>${esc(m.loop_label)}</code><br>dashboard service: <code>${esc(m.dashboard_label)}</code></div></div>
+      <div class=set-actions>
+        <button class="btn btn-go" onclick="saveSettings()">Save config</button>
+        <button class="btn btn-amber" onclick="if(confirm('Restart the loop to apply saved config? Any in-flight cycle is aborted.'))post('/restart-loop',{})">Restart loop</button>
+        <button class="btn" onclick="if(confirm('Restart the dashboard? The page will blink — hard-refresh after ~2s.'))post('/restart-dashboard',{})">Restart dashboard</button>
+        <span class=set-meta>Save writes config.yaml · Restart loop applies it to the running loop</span></div>`;
+  }).catch(e=>{document.getElementById('settingsBody').innerHTML=`<div class=empty>Could not load settings: ${esc(String(e))}</div>`;});
+}
+function saveSettings(){
+  let gates;
+  try{gates=JSON.parse(document.getElementById('set-gates').value||'{}');}
+  catch(e){toast('Gates is not valid JSON: '+e.message);return;}
+  const v=id=>document.getElementById('set-'+id).value.trim();
+  const n=id=>parseInt(document.getElementById('set-'+id).value,10);
+  const payload={
+    repo:v('repo'),base_branch:v('base_branch'),branch_prefix:v('branch_prefix'),
+    git_host:v('git_host'),git_repo:v('git_repo'),model:v('model'),permission_mode:v('permission_mode'),
+    interval_seconds:n('interval_seconds'),max_tasks_per_day:n('max_tasks_per_day'),cycle_timeout_seconds:n('cycle_timeout_seconds'),
+    sources:collectChecks('sources'),workable_categories:collectChecks('workable_categories'),
+    spec:v('spec'),commit_trailer:v('commit_trailer'),gates:gates
+  };
+  postJSON('/api/config',payload).then(j=>toast(j.msg||'saved')).catch(e=>toast('Save failed: '+e));
+}
 
 /* ── render pipeline ────────────────────────────────────────────────────── */
 function sig(r){return JSON.stringify([r.running,r.next_up,r.done,r.board,r.skipped,r.escalated,r.runlog,r.history,r.funnel,r.feature_builds,r.spend_history,r.branches]);}
