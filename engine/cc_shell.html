@@ -324,6 +324,12 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
      fixed behind all content, centred-ish in the main area. Rendered in JS;
      paints a single static frame under prefers-reduced-motion. */
 #orbits{position:fixed;inset:0;width:100%;height:100%;display:block;z-index:-1;pointer-events:none}
+/* tooltip when hovering a sun/planet over empty background — each body is a live metric */
+#orbtip{position:fixed;z-index:30;pointer-events:none;display:none;max-width:250px;
+  background:rgba(13,20,36,.95);border:1px solid var(--line2);border-radius:9px;padding:8px 11px;
+  box-shadow:0 12px 34px rgba(0,0,0,.5);font:500 11.5px/1.5 var(--mono);color:var(--ink)}
+#orbtip b{font:600 10.5px var(--disp);letter-spacing:.08em;color:var(--amber);display:block;margin-bottom:2px;text-transform:uppercase}
+#orbtip.show{display:block}
 
 /* ── deep space (Gmail-style reader: row list + reading pane) ─────────────── */
 .ds-wrap{display:grid;grid-template-columns:minmax(300px,400px) 1fr;gap:14px;align-items:start}
@@ -373,27 +379,31 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
   var cvs=document.getElementById('orbits'); if(!cvs||!cvs.getContext) return;
   var ctx=cvs.getContext('2d'), W=0, H=0, DPR=Math.min(2,window.devicePixelRatio||1);
   var reduced=matchMedia('(prefers-reduced-motion: reduce)').matches;
-  // radius as a fraction of min(W,H); speed in rad/s; ph = start angle.
+  // Each body is a live metric. r = orbit radius as a fraction of min(W,H);
+  // spd = rad/s; ph = start angle. .x/.y are filled each frame for hit-testing.
+  var sun={size:13,label:'The loop',key:'sun',x:0,y:0};
   var planets=[
-    {r:0.14,size:5, col:'#7C9CFF',spd: 0.055,ph:0.3},
-    {r:0.22,size:8, col:'#4ADE9C',spd:-0.034,ph:1.1},
-    {r:0.31,size:11,col:'#A78BFA',spd: 0.022,ph:2.4,ring:true},
-    {r:0.42,size:7, col:'#FFB35C',spd:-0.015,ph:0.8},
-    {r:0.54,size:9, col:'#6FB4FF',spd: 0.010,ph:3.6}
+    {r:0.14,size:5, col:'#7C9CFF',spd: 0.055,ph:0.3,label:'Launch pad',   key:'queued'},
+    {r:0.22,size:8, col:'#4ADE9C',spd:-0.034,ph:1.1,label:'Deep space',   key:'board'},
+    {r:0.31,size:11,col:'#A78BFA',spd: 0.022,ph:2.4,label:'Feature agents',key:'agents',ring:true},
+    {r:0.42,size:7, col:'#FFB35C',spd:-0.015,ph:0.8,label:'Ships',         key:'ships'},
+    {r:0.54,size:9, col:'#6FB4FF',spd: 0.010,ph:3.6,label:'Landed',        key:'merged'}
   ];
   function resize(){W=cvs.clientWidth;H=cvs.clientHeight;cvs.width=W*DPR;cvs.height=H*DPR;ctx.setTransform(DPR,0,0,DPR,0,0);}
   function draw(t){
     ctx.clearRect(0,0,W,H);
     var cx=W*0.56, cy=H*0.46, u=Math.min(W,H);
+    sun.x=cx; sun.y=cy;
     var g=ctx.createRadialGradient(cx,cy,0,cx,cy,88);
     g.addColorStop(0,'rgba(255,230,180,.85)');g.addColorStop(.35,'rgba(255,179,92,.55)');g.addColorStop(1,'rgba(255,179,92,0)');
     ctx.fillStyle=g;ctx.beginPath();ctx.arc(cx,cy,88,0,7);ctx.fill();
-    ctx.fillStyle='#ffe6bf';ctx.beginPath();ctx.arc(cx,cy,13,0,7);ctx.fill();
+    ctx.fillStyle='#ffe6bf';ctx.beginPath();ctx.arc(cx,cy,sun.size,0,7);ctx.fill();
     for(var i=0;i<planets.length;i++){
       var p=planets[i], rad=p.r*u;
       ctx.strokeStyle='rgba(124,156,255,.14)';ctx.lineWidth=1;
       ctx.beginPath();ctx.arc(cx,cy,rad,0,7);ctx.stroke();
       var a=p.ph+t*p.spd, px=cx+Math.cos(a)*rad, py=cy+Math.sin(a)*rad;
+      p.x=px; p.y=py;
       if(p.ring){ctx.strokeStyle='rgba(167,139,250,.55)';ctx.lineWidth=2;
         ctx.save();ctx.translate(px,py);ctx.rotate(a);ctx.scale(1,.4);
         ctx.beginPath();ctx.arc(0,0,p.size+7,0,7);ctx.stroke();ctx.restore();}
@@ -403,6 +413,40 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
       ctx.beginPath();ctx.arc(px,py,p.size,0,7);ctx.fill();ctx.shadowBlur=0;
     }
   }
+  // Live value for each body, read from the state the app publishes to window.CC_STATE.
+  function bodyVal(key){
+    var S=window.CC_STATE; if(!S) return '…';
+    var c=S.counts||{}, done=S.done||[], fb=S.feature_builds||[];
+    if(key==='sun'){var st=S.stopped?'Paused':(S.cycle_running?'In orbit':'Armed');
+      return st+' · '+(S.daily_count||0)+'/'+(S.max_tasks||0)+' tasks · $'+((S.daily_spend||0).toFixed(2))+' today';}
+    if(key==='queued') return (c.next||0)+' task(s) waiting to launch';
+    if(key==='board')  return (c.board||0)+' proposal(s) to triage';
+    if(key==='agents'){var r=fb.filter(function(b){return b.status==='running';}).length;
+      return fb.length+' feature agent(s)'+(r?(' · '+r+' building now'):'');}
+    if(key==='ships')  return done.filter(function(t){return !t.merged&&!t.rejected;}).length+' ship(s) awaiting review';
+    if(key==='merged') return done.filter(function(t){return t.merged;}).length+' merged to the loop';
+    return '';
+  }
+  // Tooltip, shown only when the cursor is over empty background (not a card/control).
+  var tip=document.createElement('div'); tip.id='orbtip'; document.body.appendChild(tip);
+  var BLOCK='.card,.brow,.ds-row,.chip,.nav,button,a,input,textarea,#topbar,.band,.col,.rail,#hero,.stat,.frow,.fbuild,.kpis';
+  function hitTest(mx,my){
+    var all=[sun].concat(planets);
+    for(var i=0;i<all.length;i++){var o=all[i],dx=mx-o.x,dy=my-o.y;
+      if(dx*dx+dy*dy <= Math.pow(o.size+10,2)) return o;}
+    return null;
+  }
+  window.addEventListener('mousemove',function(e){
+    var el=document.elementFromPoint(e.clientX,e.clientY);
+    if(el&&el.closest&&el.closest(BLOCK)){tip.classList.remove('show');return;}
+    var o=hitTest(e.clientX,e.clientY);
+    if(!o){tip.classList.remove('show');return;}
+    tip.innerHTML='<b>'+o.label+'</b>'+bodyVal(o.key);
+    tip.style.left=Math.min(e.clientX+14,window.innerWidth-tip.offsetWidth-8)+'px';
+    tip.style.top=Math.min(e.clientY+14,window.innerHeight-tip.offsetHeight-8)+'px';
+    tip.classList.add('show');
+  });
+  window.addEventListener('mouseout',function(e){if(!e.relatedTarget)tip.classList.remove('show');});
   var t0=performance.now();
   function frame(now){draw((now-t0)/1000);requestAnimationFrame(frame);}
   window.addEventListener('resize',resize);
@@ -1299,6 +1343,7 @@ function trackTouchdowns(j){
 function refresh(){
   fetch('/api/state').then(r=>r.json()).then(j=>{
     S=j;serverNow=j.now;fetchedAt=Date.now();
+    window.CC_STATE=j;   // published for the orbital-background hover tooltips
     trackTouchdowns(j);
     document.getElementById('stalePill').style.display='none';
     renderTop();
