@@ -189,6 +189,7 @@ a.btn{text-decoration:none;display:inline-block}
 .b-vio{background:var(--violet-dim);color:var(--violet)} .b-acc{background:var(--blue-dim);color:var(--blue)}
 details{margin-top:7px} summary{cursor:pointer;color:var(--dim);font-size:11.5px}
 ul.acc{margin:6px 0 0 16px;padding:0;font-size:11.5px;color:var(--dim)}
+.acc-d>summary{color:var(--green);font-weight:600}
 .timer{font:600 12px var(--mono);color:var(--blue);font-variant-numeric:tabular-nums}
 .wd{height:3px;border-radius:2px;background:var(--card2);margin-top:6px;overflow:hidden}.wd>i{display:block;height:100%;background:var(--blue)}
 .btns{display:flex;gap:5px;margin-top:9px;flex-wrap:wrap}
@@ -720,7 +721,10 @@ const SAFE_CATS=['testing','documentation','dependencies','code_quality','develo
 function badge(t,c){return t?`<span class="b b-${c}">${esc(t)}</span>`:'';}
 function gateCls(g){return{allow:'ok','review-only':'warn',human:'stop'}[g]||'muted';}
 function accList(list){if(!list||!list.length)return'';
-  return `<details><summary>done when… (${list.length} criteria)</summary><ul class=acc>`+
+  // Open by default — acceptance criteria are the task's contract (the agent gets
+  // them folded into its task string; the verifier grades against them), so they
+  // should be visible, not buried behind a click.
+  return `<details open class=acc-d><summary>✓ Acceptance criteria (${list.length})</summary><ul class=acc>`+
     list.map(a=>`<li>${esc(a)}</li>`).join('')+`</ul></details>`;}
 function card(t,kind){
   const cat=badge(t.category,(t.category&&SAFE_CATS.includes(t.category))?'ok':'warn');
