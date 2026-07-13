@@ -955,6 +955,27 @@ def do_merge_to_loop(branch: str) -> str:
         subprocess.run(["git", "-C", str(REPO), "worktree", "prune"], capture_output=True, text=True)
 
 
+def do_feature_start(tid: str, title: str, branch: str) -> str:
+    """Kick off a dedicated feature-agent build in its own worktree.
+
+    Delegates to engine/feature_build.py, which registers the build in
+    feature_builds.json, carves a worktree off origin/<base_branch>, runs the
+    agent headless, and pushes the work to `branch` for review. Returns fast —
+    the actual build runs detached.
+    """
+    title = (title or tid)[:200]
+    branch = branch or f"feature/{tid}"
+    try:
+        r = subprocess.run(
+            [sys.executable, str(ENGINE / "feature_build.py"), "start", tid, title, branch],
+            capture_output=True, text=True, timeout=30)
+    except Exception as e:
+        return f"Could not start feature agent: {e}"
+    if r.returncode != 0:
+        return f"Could not start feature agent: {(r.stderr or r.stdout).strip()[:200]}"
+    return (r.stdout or "Feature agent started.").strip()
+
+
 def do_delete_branch(branch: str) -> str:
     # Delete a single remote branch. HARD guardrail: only <PREFIX>/* refs — named
     # / team branches can never be deleted from this UI. Per-branch delete is
@@ -1976,6 +1997,13 @@ class Handler(BaseHTTPRequestHandler):
                 if not re.match(r"^[A-Za-z0-9._/-]{1,120}$", branch):
                     self._send(b'{"ok":false,"msg":"invalid branch"}', "application/json", 400); return
                 msg = do_merge_to_loop(branch)
+            elif path == "/feature-start":
+                if not tid:
+                    self._send(b'{"ok":false,"msg":"missing task id"}', "application/json", 400); return
+                branch = (data.get("branch", [""])[0]).strip()
+                if branch and not re.match(r"^[A-Za-z0-9._/-]{1,120}$", branch):
+                    self._send(b'{"ok":false,"msg":"invalid branch"}', "application/json", 400); return
+                msg = do_feature_start(tid, (data.get("title", [""])[0]).strip(), branch)
             elif path == "/delete-branch":
                 branch = (data.get("branch", [""])[0]).strip()
                 if not re.match(r"^[A-Za-z0-9._/-]{1,120}$", branch):
