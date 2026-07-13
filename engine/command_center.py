@@ -107,12 +107,49 @@ DIFFDIR = AP_STATE / "diffs"                  # wrapper backup patches
 LAUNCHD_LABEL = os.environ.get("ORBIT_LAUNCHD_LABEL", "com.orbit.autopilot")
 # Dollar spend is informational only — displayed, never a cap (the wrapper's
 # only hard daily limit is the task count).
-# Bitbucket "org/repo" for the prefilled PR-create URL; empty → URL omitted.
-BB_REPO = os.environ.get("ORBIT_BB_REPO", "")
-BB_PR_NEW = f"https://bitbucket.org/{BB_REPO}/pull-requests/new" if BB_REPO else ""
-# Source-browse base for task doc links (docs: paths in backlog tasks render as
-# clickable Bitbucket links); empty → docs render as plain paths.
-BB_SRC = f"https://bitbucket.org/{BB_REPO}/src/{BASE_BRANCH}/" if BB_REPO else ""
+# Git host + repo drive the PR-create and source-browse links. config.yaml is the
+# single source of truth (env kept as a fallback for back-compat). reload_settings()
+# refreshes these live from config.yaml each state build, so Admin-panel edits show
+# up within one poll without restarting the dashboard.
+GIT_HOST = "bitbucket"
+GIT_REPO = os.environ.get("ORBIT_BB_REPO", "")
+BB_PR_NEW = ""
+BB_SRC = ""
+
+
+def _load_cfg() -> dict:
+    """Read the target repo's .autopilot/config.yaml (empty dict on any failure)."""
+    try:
+        return yaml.safe_load((AP_HOME / "config.yaml").read_text()) or {}
+    except Exception:
+        return {}
+
+
+def _git_urls(host: str, repo: str, base: str) -> tuple:
+    """(source-browse URL, new-PR URL) for the configured git host."""
+    if not repo:
+        return "", ""
+    if host == "github":
+        return (f"https://github.com/{repo}/tree/{base}/",
+                f"https://github.com/{repo}/compare/{base}?expand=1")
+    if host == "gitlab":
+        return (f"https://gitlab.com/{repo}/-/tree/{base}",
+                f"https://gitlab.com/{repo}/-/merge_requests/new")
+    return (f"https://bitbucket.org/{repo}/src/{base}/",
+            f"https://bitbucket.org/{repo}/pull-requests/new")
+
+
+def reload_settings() -> None:
+    """Refresh mutable product settings from config.yaml (config-first, env
+    fallback). Called at the top of each build_state() so Admin edits reflect live."""
+    global BASE_BRANCH, GIT_HOST, GIT_REPO, PREFIX, BB_SRC, BB_PR_NEW
+    cfg = _load_cfg()
+    BASE_BRANCH = str(cfg.get("base_branch") or os.environ.get("ORBIT_BASE_BRANCH")
+                      or os.environ.get("AP_BASE_BRANCH") or "main")
+    GIT_HOST = str(cfg.get("git_host") or "bitbucket")
+    GIT_REPO = str(cfg.get("git_repo") or os.environ.get("ORBIT_BB_REPO") or "")
+    PREFIX = str(cfg.get("branch_prefix") or os.environ.get("ORBIT_BRANCH_PREFIX") or "autopilot")
+    BB_SRC, BB_PR_NEW = _git_urls(GIT_HOST, GIT_REPO, BASE_BRANCH)
 # Operator guide served at /guide (project copy wins so operators can localize).
 GUIDE_FILES = [AP_HOME / "GUIDE.md", ORBIT_HOME / "docs" / "OPERATOR-GUIDE.md"]
 
@@ -1009,6 +1046,117 @@ def do_delete_branches_bulk(kind: str) -> str:
     return f"Deleted {len(deleted)} {kind} branch(es){tail}."
 
 
+# ── admin / settings (config.yaml is the portable single source of truth) ─────
+CATEGORIES_ALL = ["bug", "feature", "refactor", "code_quality", "testing", "documentation",
+                  "dependencies", "developer_experience", "security", "infrastructure",
+                  "release_management", "git_practices"]
+SOURCES_ALL = ["backlog", "backlog-research", "maturity-score", "logwatch", "ui-test",
+               "code-review", "security-review", "network-review"]
+HOSTS_ALL = ["bitbucket", "github", "gitlab"]
+_PREFIX_RE = re.compile(r"^[A-Za-z0-9._/-]{1,60}$")
+
+
+def _dashboard_label() -> str:
+    """This dashboard's launchd label, derived from the loop label."""
+    if LAUNCHD_LABEL.startswith("com.orbit.orbit-"):
+        return "com.orbit.dashboard-" + LAUNCHD_LABEL[len("com.orbit.orbit-"):]
+    return "com.orbit.dashboard-" + REPO.name
+
+
+def config_payload() -> dict:
+    """Full config.yaml + resolved runtime meta for the Admin panel."""
+    reload_settings()
+    src, pr = _git_urls(GIT_HOST, GIT_REPO, BASE_BRANCH)
+    return {
+        "config": _load_cfg(),
+        "meta": {
+            "ap_home": str(AP_HOME), "repo": str(REPO), "port": PORT,
+            "loop_label": LAUNCHD_LABEL, "dashboard_label": _dashboard_label(),
+            "base_branch": BASE_BRANCH, "git_host": GIT_HOST, "git_repo": GIT_REPO,
+            "git_src_url": src, "git_pr_url": pr,
+            "categories_all": CATEGORIES_ALL, "sources_all": SOURCES_ALL, "hosts_all": HOSTS_ALL,
+        },
+    }
+
+
+def _validate_config(d: dict) -> list:
+    """Return a list of human-readable errors for an incoming config patch (empty = ok)."""
+    errs = []
+    def _posint(k):
+        if k in d and (not isinstance(d[k], int) or d[k] <= 0):
+            errs.append(f"{k} must be a positive integer")
+    def _nonempty(k):
+        if k in d and (not isinstance(d[k], str) or not d[k].strip()):
+            errs.append(f"{k} must be a non-empty string")
+    _nonempty("base_branch"); _nonempty("model"); _nonempty("permission_mode"); _nonempty("repo")
+    _posint("interval_seconds"); _posint("max_tasks_per_day"); _posint("cycle_timeout_seconds")
+    if "git_host" in d and d["git_host"] not in HOSTS_ALL:
+        errs.append("git_host must be one of " + ", ".join(HOSTS_ALL))
+    if "branch_prefix" in d and not _PREFIX_RE.match(str(d.get("branch_prefix", ""))):
+        errs.append("branch_prefix has invalid characters")
+    for k in ("sources", "workable_categories"):
+        if k in d and not (isinstance(d[k], list) and all(isinstance(x, str) for x in d[k])):
+            errs.append(f"{k} must be a list of strings")
+    if "gates" in d:
+        g = d["gates"]
+        if not isinstance(g, dict):
+            errs.append("gates must be an object of name -> {cmd, cwd, needs}")
+        else:
+            for name, spec in g.items():
+                if not isinstance(spec, dict) or not str(spec.get("cmd", "")).strip():
+                    errs.append(f"gate '{name}' needs a non-empty cmd")
+    return errs
+
+
+def _write_config(cfg: dict) -> None:
+    """Atomically write config.yaml with a generated header (the Admin panel owns it)."""
+    header = ("# Orbit config for this target repo — the single source of truth for\n"
+              "# both the loop and the dashboard. Edited via the dashboard Admin panel.\n\n")
+    tmp = AP_HOME / "config.yaml.tmp"
+    tmp.write_text(header + yaml.safe_dump(cfg, sort_keys=False, default_flow_style=False, allow_unicode=True))
+    tmp.replace(AP_HOME / "config.yaml")
+
+
+def do_save_config(raw: str) -> str:
+    """Validate an incoming JSON patch, merge it into config.yaml, and persist.
+    Keys not present in the patch are preserved (gates/env/etc. survive)."""
+    try:
+        incoming = json.loads(raw or "{}")
+    except Exception as e:
+        return f"Invalid JSON: {e}"
+    if not isinstance(incoming, dict):
+        return "Config payload must be an object."
+    errs = _validate_config(incoming)
+    if errs:
+        return "Rejected — " + "; ".join(errs)
+    cfg = _load_cfg()
+    cfg.update(incoming)   # merge: preserves keys the UI did not send
+    _write_config(cfg)
+    reload_settings()
+    return "✓ Saved config.yaml. Use 'Restart loop' to apply it to the running loop."
+
+
+def do_restart(label: str, delay: float = 0) -> str:
+    """Restart an orbit launchd service via kickstart. Guarded to com.orbit.* labels.
+    A delay lets the HTTP response return before the dashboard restarts itself."""
+    if not label.startswith("com.orbit."):
+        return f"Refused: '{label}' is not an orbit service."
+    target = f"gui/{os.getuid()}/{label}"
+    if delay:
+        # Detached delayed kickstart (no shell) so the HTTP response returns before
+        # this process is restarted out from under it.
+        subprocess.Popen(
+            [sys.executable, "-c",
+             f"import time,subprocess;time.sleep({float(delay)});"
+             f"subprocess.run(['launchctl','kickstart','-k',{target!r}])"],
+            start_new_session=True)
+        return f"Restarting {label} in ~{int(delay)}s — the dashboard will blink; hard-refresh after."
+    r = subprocess.run(["launchctl", "kickstart", "-k", target], capture_output=True, text=True)
+    if r.returncode != 0:
+        return f"Restart of {label} failed: {(r.stderr or r.stdout).strip()[:200]}"
+    return f"✓ Restarted {label}."
+
+
 # ── state assembly (JSON for the SPA) ─────────────────────────────────────────
 def agent_metrics() -> dict:
     """Productivity stats — local & fast (ledger states + the wrapper's saved
@@ -1138,6 +1286,7 @@ def _on_board(t: dict) -> bool:
 
 
 def build_state() -> dict:
+    reload_settings()   # config.yaml is the source of truth — reflect Admin edits live
     backlog = load_backlog()
     ledger = load_ledger()
     skips = load_skips()
@@ -1928,6 +2077,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(body.encode(), "text/html; charset=utf-8")
         elif path == "/api/state":
             self._send(json.dumps(build_state()).encode(), "application/json")
+        elif path == "/api/config":
+            self._send(json.dumps(config_payload()).encode(), "application/json")
         elif path == "/api/cycletail":
             self._send(json.dumps(cycletail()).encode(), "application/json")
         elif path in ("/review", "/diff"):
@@ -1954,7 +2105,8 @@ class Handler(BaseHTTPRequestHandler):
         if not hmac.compare_digest(self.headers.get("X-CC-Token", ""), _TOKEN):
             self._send(b'{"ok":false,"msg":"missing/invalid token - hard-refresh the dashboard"}', "application/json", 403); return
         length = int(self.headers.get("Content-Length", 0))
-        data = urllib.parse.parse_qs(self.rfile.read(length).decode())
+        raw = self.rfile.read(length).decode() if length else ""
+        data = urllib.parse.parse_qs(raw)
         tid = (data.get("id", [""])[0]).strip()
         if tid and not _TID_RE.match(tid):
             self._send(b'{"ok":false,"msg":"invalid task id"}', "application/json", 400); return
@@ -2011,6 +2163,12 @@ class Handler(BaseHTTPRequestHandler):
                 msg = do_delete_branch(branch)
             elif path == "/delete-branches-bulk":
                 msg = do_delete_branches_bulk((data.get("kind", [""])[0]).strip())
+            elif path == "/api/config":
+                msg = do_save_config(raw)
+            elif path == "/restart-loop":
+                msg = do_restart(LAUNCHD_LABEL)
+            elif path == "/restart-dashboard":
+                msg = do_restart(_dashboard_label(), delay=1)
             else:
                 self._send(b'{"ok":false,"msg":"unknown action"}', "application/json", 404); return
             self._send(json.dumps({"ok": True, "msg": msg}).encode(), "application/json")
