@@ -170,6 +170,10 @@ run_cycle() {
 one_iteration() {
   gates_ready || { echo SKIP; return; }
   prepare_worktree || { echo FAIL; return; }
+  # Auto-close verified no-ops (tasks whose shipped commit is already an ancestor
+  # of the base branch) BEFORE regenerating the queue, so they never re-inject or
+  # re-escalate into the operator inbox.
+  python3 "$ENGINE/autoclose.py" >>"$LOGDIR/orbit.log" 2>&1 || log "WARN: autoclose failed"
   python3 "$ENGINE/backlog_to_tasks.py" >>"$LOGDIR/orbit.log" 2>&1 || log "WARN: backlog→queue refresh failed"
   if [ -f "$STATE/AUTO_PROMOTE" ] && [ "$(count_pickable)" = "0" ]; then
     log "auto-feed: promoting next safe task"
