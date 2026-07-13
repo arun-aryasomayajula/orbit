@@ -7,9 +7,9 @@ each task's CONTRACT before it can be emitted into the loop queue:
 
   HARD failures (task is NOT emitted unless `lint_ok: true` waives it):
     - missing/unknown category
-    - no acceptance_criteria AND context under 40 chars (no contract at all)
+    - no acceptance_criteria (the verifier has nothing objective to grade, so
+      the maker has no contract to satisfy — the top cause of no-commit churn)
   SOFT warnings (emitted, but flagged on the dashboard):
-    - no acceptance_criteria (verifier has nothing objective to grade)
     - only one acceptance criterion
     - no context (maker gets a title, not intent)
     - very short title
@@ -42,11 +42,9 @@ def lint_task(t: dict) -> tuple[list[str], list[str]]:
         hard.append("no category")
     elif cat not in KNOWN_CATEGORIES:
         hard.append(f"unknown category '{cat}'")
-    if not acc and len(ctx) < 40:
-        hard.append("no acceptance criteria and (almost) no context — contract too thin to build against")
-
     if not acc:
-        soft.append("no acceptance criteria — the verifier has nothing objective to grade")
+        hard.append("no acceptance criteria — the verifier has nothing objective to "
+                    "grade (add criteria, or set lint_ok: true to waive)")
     elif len(acc) == 1:
         soft.append("single acceptance criterion — consider splitting the contract out")
     if not ctx:
