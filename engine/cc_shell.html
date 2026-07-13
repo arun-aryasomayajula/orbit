@@ -319,9 +319,42 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation:none!important;transition:none!important}
 }
+
+/* ── orbital system: a canvas solar system (sun + planets on glowing orbits),
+     fixed behind all content, centred-ish in the main area. Rendered in JS;
+     paints a single static frame under prefers-reduced-motion. */
+#orbits{position:fixed;inset:0;width:100%;height:100%;display:block;z-index:-1;pointer-events:none}
+
+/* ── deep space (Gmail-style reader: row list + reading pane) ─────────────── */
+.ds-wrap{display:grid;grid-template-columns:minmax(300px,400px) 1fr;gap:14px;align-items:start}
+.ds-list{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;
+  max-height:calc(100vh - 210px);overflow-y:auto}
+.ds-list::-webkit-scrollbar,.ds-read::-webkit-scrollbar{width:8px}
+.ds-list::-webkit-scrollbar-thumb,.ds-read::-webkit-scrollbar-thumb{background:var(--card2);border-radius:4px}
+.ds-row{display:block;width:100%;text-align:left;background:none;border:0;border-bottom:1px solid var(--line);
+  padding:11px 13px;cursor:pointer;color:var(--ink)}
+.ds-row:hover{background:var(--card)}
+.ds-row.sel{background:var(--card2);box-shadow:inset 3px 0 0 var(--amber)}
+.ds-row .r-top{display:flex;align-items:center;gap:7px;margin-bottom:3px}
+.ds-row .r-tid{font:500 10px var(--mono);color:var(--faint);margin-left:auto;flex:none}
+.ds-row .r-title{font:600 12.5px/1.4 var(--body);color:var(--ink);
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.ds-row .r-snip{font:500 11px/1.5 var(--mono);color:var(--dim);margin-top:3px;
+  display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
+.ds-row .pdot{width:7px;height:7px;border-radius:50%;flex:none}
+.ds-read{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;
+  min-height:220px;max-height:calc(100vh - 210px);overflow-y:auto}
+.ds-read .card{background:transparent;border:0;padding:0;margin:0}
+.ds-read-empty{color:var(--faint);text-align:center;padding:48px 20px;line-height:1.7}
+.ds-read-empty b{color:var(--dim)}
+@media (max-width:820px){.ds-wrap{grid-template-columns:1fr}.ds-list{max-height:320px}}
+
+/* rows-only stack (inbox) — never a multi-column grid */
+.rows{display:flex;flex-direction:column;gap:10px}
 </style></head><body>
 
 <div id="stars" aria-hidden="true"></div><div id="stars2" aria-hidden="true"></div>
+<canvas id="orbits" aria-hidden="true"></canvas>
 <script>
 // Deterministic starfield: golden-angle scatter painted as box-shadows on two 1px layers.
 (function(){
@@ -331,6 +364,50 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
     return sh.join(',');}
   document.getElementById('stars').style.boxShadow=field(70,0,.22);
   document.getElementById('stars2').style.boxShadow=field(40,.7,.10);
+})();
+</script>
+<script>
+// Canvas solar system behind all content: a glowing sun with planets on visible
+// orbits (one ringed), centred-ish in the main pane. Static frame under reduced motion.
+(function(){
+  var cvs=document.getElementById('orbits'); if(!cvs||!cvs.getContext) return;
+  var ctx=cvs.getContext('2d'), W=0, H=0, DPR=Math.min(2,window.devicePixelRatio||1);
+  var reduced=matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // radius as a fraction of min(W,H); speed in rad/s; ph = start angle.
+  var planets=[
+    {r:0.14,size:5, col:'#7C9CFF',spd: 0.055,ph:0.3},
+    {r:0.22,size:8, col:'#4ADE9C',spd:-0.034,ph:1.1},
+    {r:0.31,size:11,col:'#A78BFA',spd: 0.022,ph:2.4,ring:true},
+    {r:0.42,size:7, col:'#FFB35C',spd:-0.015,ph:0.8},
+    {r:0.54,size:9, col:'#6FB4FF',spd: 0.010,ph:3.6}
+  ];
+  function resize(){W=cvs.clientWidth;H=cvs.clientHeight;cvs.width=W*DPR;cvs.height=H*DPR;ctx.setTransform(DPR,0,0,DPR,0,0);}
+  function draw(t){
+    ctx.clearRect(0,0,W,H);
+    var cx=W*0.56, cy=H*0.46, u=Math.min(W,H);
+    var g=ctx.createRadialGradient(cx,cy,0,cx,cy,88);
+    g.addColorStop(0,'rgba(255,230,180,.85)');g.addColorStop(.35,'rgba(255,179,92,.55)');g.addColorStop(1,'rgba(255,179,92,0)');
+    ctx.fillStyle=g;ctx.beginPath();ctx.arc(cx,cy,88,0,7);ctx.fill();
+    ctx.fillStyle='#ffe6bf';ctx.beginPath();ctx.arc(cx,cy,13,0,7);ctx.fill();
+    for(var i=0;i<planets.length;i++){
+      var p=planets[i], rad=p.r*u;
+      ctx.strokeStyle='rgba(124,156,255,.14)';ctx.lineWidth=1;
+      ctx.beginPath();ctx.arc(cx,cy,rad,0,7);ctx.stroke();
+      var a=p.ph+t*p.spd, px=cx+Math.cos(a)*rad, py=cy+Math.sin(a)*rad;
+      if(p.ring){ctx.strokeStyle='rgba(167,139,250,.55)';ctx.lineWidth=2;
+        ctx.save();ctx.translate(px,py);ctx.rotate(a);ctx.scale(1,.4);
+        ctx.beginPath();ctx.arc(0,0,p.size+7,0,7);ctx.stroke();ctx.restore();}
+      var pg=ctx.createRadialGradient(px-p.size*.3,py-p.size*.3,0,px,py,p.size);
+      pg.addColorStop(0,'#fff');pg.addColorStop(.4,p.col);pg.addColorStop(1,p.col);
+      ctx.fillStyle=pg;ctx.shadowColor=p.col;ctx.shadowBlur=14;
+      ctx.beginPath();ctx.arc(px,py,p.size,0,7);ctx.fill();ctx.shadowBlur=0;
+    }
+  }
+  var t0=performance.now();
+  function frame(now){draw((now-t0)/1000);requestAnimationFrame(frame);}
+  window.addEventListener('resize',resize);
+  resize();
+  if(reduced) draw(1.2); else frame(t0);
 })();
 </script>
 
@@ -344,11 +421,12 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
     <button class="nav on" data-view="overview" onclick="go('overview')"><span class="ico">◉</span>Overview<span class="key">1</span></button>
     <button class="nav" data-view="inbox" onclick="go('inbox')"><span class="ico">📥</span>Inbox<span class="nb" id="nb-inbox">0</span></button>
     <button class="nav" data-view="queue" onclick="go('queue')"><span class="ico">☰</span>Queue<span class="nb" id="nb-queue">0</span></button>
+    <button class="nav" data-view="deepspace" onclick="go('deepspace')"><span class="ico">🌌</span>Deep space<span class="nb" id="nb-deepspace">0</span></button>
     <button class="nav" data-view="ships" onclick="go('ships')"><span class="ico">⬆</span>Ships<span class="nb" id="nb-ships">0</span></button>
     <button class="nav" data-view="branches" onclick="go('branches')"><span class="ico">⎇</span>Branches<span class="nb" id="nb-branches">0</span></button>
     <div class="navlbl">Fleet</div>
-    <button class="nav" data-view="agents" onclick="go('agents')"><span class="ico">🚧</span>Feature agents<span class="key">6</span></button>
-    <button class="nav" data-view="insights" onclick="go('insights')"><span class="ico">📈</span>Insights<span class="key">7</span></button>
+    <button class="nav" data-view="agents" onclick="go('agents')"><span class="ico">🚧</span>Feature agents<span class="key">7</span></button>
+    <button class="nav" data-view="insights" onclick="go('insights')"><span class="ico">📈</span>Insights<span class="key">8</span></button>
     <div class="navlbl">Help</div>
     <button class="nav" onclick="openText('📖 Operator guide — what everything means','/guide',false)"><span class="ico">📖</span>Guide</button>
   </nav>
@@ -395,15 +473,23 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
   <!-- ── INBOX ── -->
   <section class="view" id="view-inbox">
     <div class="eyebrow">Escalations — the agent stopped and asked <span class="aside">answer one and it re-queues with your answer in the contract</span></div>
-    <div class="grid" id="inboxEsc"></div>
+    <div class="rows" id="inboxEsc"></div>
     <div class="eyebrow">Ships awaiting your review <span class="aside">read the packet, then merge or reject</span></div>
-    <div class="grid" id="inboxShips"></div>
+    <div class="rows" id="inboxShips"></div>
   </section>
 
   <!-- ── QUEUE ── -->
   <section class="view" id="view-queue">
-    <div class="chips" id="filterbar"></div>
     <div class="cols" id="queueCols"></div>
+  </section>
+
+  <!-- ── DEEP SPACE (proposals — Gmail-style reader) ── -->
+  <section class="view" id="view-deepspace">
+    <div class="chips" id="filterbar"></div>
+    <div class="ds-wrap">
+      <div class="ds-list" id="dsList"></div>
+      <div class="ds-read" id="dsRead"></div>
+    </div>
   </section>
 
   <!-- ── SHIPS ── -->
@@ -474,7 +560,7 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
   <h3>Keyboard</h3>
   <div style="font:500 12.5px/2.2 var(--mono);color:var(--dim)">
     <div><kbd>⌘K</kbd> or <kbd>/</kbd> &nbsp;find anything, jump to it</div>
-    <div><kbd>1</kbd>–<kbd>6</kbd> &nbsp;switch views</div>
+    <div><kbd>1</kbd>–<kbd>8</kbd> &nbsp;switch views</div>
     <div><kbd>?</kbd> &nbsp;this help</div>
     <div><kbd>Esc</kbd> &nbsp;close any overlay</div>
   </div>
@@ -503,7 +589,7 @@ function toast(m){const t=document.getElementById('toast');t.textContent=m;t.cla
   clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),6000);}
 
 /* ── navigation ─────────────────────────────────────────────────────────── */
-const VIEWS=['overview','inbox','queue','ships','branches','agents','insights'];
+const VIEWS=['overview','inbox','queue','deepspace','ships','branches','agents','insights'];
 function go(v){
   document.querySelectorAll('.view').forEach(x=>x.classList.toggle('on',x.id==='view-'+v));
   document.querySelectorAll('.nav').forEach(x=>x.classList.toggle('on',x.dataset.view===v));
@@ -515,7 +601,7 @@ document.addEventListener('keydown',e=>{
   if(e.target.tagName==='TEXTAREA'||e.target.tagName==='INPUT')return;
   if(e.key==='/'){e.preventDefault();openPalette();return;}
   if(e.key==='?'){document.getElementById('modal4').style.display='flex';return;}
-  const i=parseInt(e.key,10); if(i>=1&&i<=7) go(VIEWS[i-1]);
+  const i=parseInt(e.key,10); if(i>=1&&i<=8) go(VIEWS[i-1]);
 });
 try{const v=localStorage.getItem('cc-view'); if(v&&VIEWS.includes(v)) go(v);}catch(e){}
 
@@ -540,7 +626,8 @@ function card(t,kind){
       <button class="btn btn-mini" title="move up in the queue" onclick="post('/move',{id:'${esc(t.id)}',dir:'up'})">▲</button>
       <button class="btn btn-mini" title="move down" onclick="post('/move',{id:'${esc(t.id)}',dir:'down'})">▼</button>
       <button class="btn btn-mini" title="raise priority" onclick="post('/priority',{id:'${esc(t.id)}',dir:'up'})">Pri +</button>
-      <button class="btn btn-ghost btn-mini" title="park it in the graveyard orbit" onclick="post('/skip',{id:'${esc(t.id)}'})">Park</button>`;
+      <button class="btn btn-ghost btn-mini" title="park it in the graveyard orbit" onclick="post('/skip',{id:'${esc(t.id)}'})">Park</button>
+      <button class="btn btn-vio btn-mini" title="build this as a dedicated feature agent in its own worktree off the loop branch" onclick="featureBuild('${esc(t.id)}')">⚡ Feature agent</button>`;
   }else if(kind==='board'){
     if(t.promotable){
       btns+=`<button class="btn btn-go btn-mini" title="queue it — the loop will build it on its own branch" onclick="post('/promote',{id:'${esc(t.id)}'})">Queue it</button>`;
@@ -551,12 +638,14 @@ function card(t,kind){
       btns+=`<button class="btn btn-mini" title="let it through despite the thin contract" onclick="post('/lintok',{id:'${esc(t.id)}'})">Waive lint</button>`;
     }
     btns+=`<button class="btn btn-mini" title="raise priority" onclick="post('/priority',{id:'${esc(t.id)}',dir:'up'})">Pri +</button>
-      <button class="btn btn-ghost btn-mini" title="park it in the graveyard orbit" onclick="post('/skip',{id:'${esc(t.id)}'})">Park</button>`;
+      <button class="btn btn-ghost btn-mini" title="park it in the graveyard orbit" onclick="post('/skip',{id:'${esc(t.id)}'})">Park</button>
+      <button class="btn btn-vio btn-mini" title="build this as a dedicated feature agent in its own worktree off the loop branch" onclick="featureBuild('${esc(t.id)}')">⚡ Feature agent</button>`;
   }else if(kind==='skipped'){
     btns=`<button class="btn btn-go btn-mini" onclick="post('/unskip',{id:'${esc(t.id)}'})">Bring back</button>`;
   }else if(kind==='esc'){
     btns=`<button class="btn btn-go btn-mini" title="your answer joins the contract and the task re-queues" onclick="answerTask('${esc(t.id)}')">Answer &amp; re-queue</button>
-      <button class="btn btn-ghost btn-mini" title="park it in the graveyard orbit" onclick="post('/skip',{id:'${esc(t.id)}'})">Park</button>`;
+      <button class="btn btn-ghost btn-mini" title="park it in the graveyard orbit" onclick="post('/skip',{id:'${esc(t.id)}'})">Park</button>
+      <button class="btn btn-vio btn-mini" title="build this as a dedicated feature agent in its own worktree off the loop branch" onclick="featureBuild('${esc(t.id)}')">⚡ Feature agent</button>`;
   }else if(kind==='done'){
     const ref=`${(t.sha||'').slice(0,8)} → ${esc(t.branch||t.remote_ref||'')}`;
     const when=t.committed_at?` · ${t.committed_at} (${relDays(t.committed_at)})`:'';
@@ -699,7 +788,7 @@ function renderTop(){
      <div class=bar><i class="${pct>=85?'warn':''}" style="width:${pct}%"></i></div>`;
   // nav badges
   const nb=(id,n,hot)=>{const e2=document.getElementById(id);e2.textContent=n;e2.className='nb'+(hot&&n>0?' hot':'');};
-  nb('nb-inbox',ib.n,true); nb('nb-queue',r.counts.next,false);
+  nb('nb-inbox',ib.n,true); nb('nb-queue',r.counts.next,false); nb('nb-deepspace',(r.counts&&r.counts.board)||0,false);
   nb('nb-ships',(r.done||[]).filter(x=>!x.merged&&!x.rejected).length,false);
   nb('nb-branches',(r.branches||[]).filter(b=>b.category==='awaiting'||b.category==='orphan').length,false);
   if(!r.loop_loaded)document.getElementById('statusText').innerHTML+=' · <span class=hot>daemon not loaded</span>';
@@ -765,6 +854,7 @@ const FILTERS=[
   {k:'review',label:'Reviews',test:t=>['code-review','security-review','network-review'].includes(t.source)},
   {k:'infra',label:'Infra & sec',test:t=>['security','infrastructure','release_management','git_practices'].includes(t.category)},
   {k:'docs',label:'Docs & tests',test:t=>['documentation','testing'].includes(t.category)},
+  {k:'parked',label:'⚰ Parked',parked:true},
 ];
 let activeFilter='all';
 function filtered(items){const f=FILTERS.find(x=>x.k===activeFilter);return(f&&f.test)?items.filter(f.test):items;}
@@ -772,7 +862,7 @@ function setFilter(k){activeFilter=k;renderViews();}
 function renderFilters(){
   const bar=document.getElementById('filterbar');
   bar.innerHTML=FILTERS.map(f=>{
-    const n=f.test?S.board.filter(f.test).length:S.board.length;
+    const n=f.parked?(S.skipped||[]).length:(f.test?S.board.filter(f.test).length:S.board.length);
     return `<button class="chip ${f.k===activeFilter?'on':''}" onclick="setFilter('${f.k}')">${f.label}<b>${n}</b></button>`;
   }).join('')+`<button class="chip chip-go" onclick="promoteAllShown()">Queue all shown</button>`;
 }
@@ -793,9 +883,41 @@ function renderQueue(){
     col('In orbit','hl-run',r.running.map(x=>({...x,_start:r.cycle_start})),'run',orbitEmpty)+
     col('Launch pad','hl-next',r.next_up,'next',r.auto_feed
       ?'Launch pad is dry — Auto-feed found nothing safe to promote.<br><b>Queue something from Deep space.</b>'
-      :'Launch pad is dry.<br><b>Queue something from Deep space, or switch on Auto-feed.</b>')+
-    col('Deep space'+(activeFilter!=='all'?' · '+esc(activeFilter):''),'',filtered(r.board),'board','Deep space is empty — discovery sources will refill it.')+
-    col('Graveyard orbit','hl-skip',r.skipped,'skipped','Graveyard orbit is empty.');
+      :'Launch pad is dry.<br><b>Queue something from Deep space, or switch on Auto-feed.</b>');
+}
+
+/* ── deep space view (Gmail-style: row list + reading pane) ──────────────── */
+let dsSel=null;
+function dsSource(){
+  const f=FILTERS.find(x=>x.k===activeFilter);
+  if(f&&f.parked) return {list:(S.skipped||[]),kind:'skipped'};
+  return {list:filtered(S.board),kind:'board'};
+}
+function dsDot(t){return t.priority==='high'?'var(--amber)':(t.category&&SAFE_CATS.includes(t.category))?'var(--green)':'var(--blue)';}
+function selectDeep(id){dsSel=id;renderDeepspace();const rd=document.getElementById('dsRead');if(rd)rd.scrollTop=0;}
+function renderDeepspace(){
+  if(!S)return;
+  const listEl=document.getElementById('dsList'),readEl=document.getElementById('dsRead');
+  if(!listEl||!readEl)return;
+  const {list,kind}=dsSource();
+  const sc=listEl.scrollTop;
+  if(!list.length){
+    listEl.innerHTML=`<div class=empty style="padding:28px 14px">${activeFilter==='all'?'Deep space is empty — discovery sources refill it over time.':'Nothing matches this filter.'}</div>`;
+    readEl.innerHTML=`<div class=ds-read-empty>🌌<br><b>Deep space is clear.</b><br>Proposed work lands here for you to triage.</div>`;
+    return;
+  }
+  if(!dsSel||!list.some(t=>t.id===dsSel)) dsSel=list[0].id;
+  listEl.innerHTML=list.map(t=>{
+    const snip=t.plain||t.decision_hint||t.title;
+    const pri=t.priority==='high'?badge('high','warn'):'';
+    const catOk=t.category&&SAFE_CATS.includes(t.category);
+    return `<button class="ds-row ${t.id===dsSel?'sel':''}" onclick="selectDeep('${esc(t.id)}')">
+      <div class=r-top><span class="pdot" style="background:${dsDot(t)}"></span>${badge(t.category||'—',catOk?'ok':'warn')}${pri}<span class=r-tid>${esc(t.id)}</span></div>
+      <div class=r-title>${esc(t.title)}</div>
+      <div class=r-snip>${esc(snip)}</div></button>`;
+  }).join('');
+  readEl.innerHTML=card(list.find(t=>t.id===dsSel),kind);
+  listEl.scrollTop=sc;
 }
 
 /* ── ships view ─────────────────────────────────────────────────────────── */
@@ -990,6 +1112,12 @@ function copyDigest(){const t=document.getElementById('digesttext');t.select();
 function closeModal(){document.getElementById('modal').style.display='none';}
 
 /* ── inbox actions / text viewer ────────────────────────────────────────── */
+function featureBuild(id){
+  const t=findTask(id); const branch='feature/'+id;
+  const loop=(S&&S.base_branch)||'the loop branch';
+  if(confirm('Build "'+(t.title||id)+'" as a dedicated feature agent?\n\n• carves its own git worktree off '+loop+'\n• an agent implements it end-to-end (build → test → commit)\n• pushes '+branch+' for your review (never auto-merged)\n\nTrack it live in the Feature agents tab.'))
+    post('/feature-start',{id:id,title:t.title||id,branch:branch});
+}
 function forceTask(id,cat){
   const msg='Hand "'+id+'" to the agent?\n\nThis is a '+cat+' task — normally human-only. The agent will attempt a code fix on its own branch for your review (never merged). Work it cannot do — secret rotation, infra grants, migrations — comes back as an escalation.';
   if(confirm(msg))post('/force',{id:id});
@@ -1043,8 +1171,8 @@ function paletteItems(q){
   (S.escalated||[]).forEach(t=>add(t,'inbox','escalated',true));
   (S.done||[]).forEach(t=>add(t,'ships',t.merged?'merged':t.rejected?'rejected':'needs review',!t.merged&&!t.rejected));
   (S.next_up||[]).forEach(t=>add(t,'queue','queued'));
-  (S.board||[]).forEach(t=>add(t,'queue','triage'));
-  (S.skipped||[]).forEach(t=>add(t,'queue','set aside'));
+  (S.board||[]).forEach(t=>add(t,'deepspace','triage'));
+  (S.skipped||[]).forEach(t=>add(t,'deepspace','set aside'));
   if(!q)return items.slice(0,12);
   const ql=q.toLowerCase();
   const score=x=>{const s=(x.title+' '+(x.id||'')+' '+x.kind).toLowerCase();
@@ -1077,6 +1205,17 @@ function palGo(i){
     return;
   }
   go(x.view);
+  // Deep space is a reader, not a card grid — reset the filter and open the item in the pane.
+  if(x.view==='deepspace'){
+    setTimeout(()=>{
+      if(x.kind!=='set aside'&&activeFilter==='parked'){activeFilter='all';renderFilters();}
+      if(x.kind==='set aside'){activeFilter='parked';renderFilters();}
+      selectDeep(x.id);
+      const row=document.querySelector('#dsList .ds-row.sel');
+      if(row)row.scrollIntoView({block:'center'});
+    },180);
+    return;
+  }
   setTimeout(()=>{
     const el=document.querySelector(`.view.on [data-tid="${CSS.escape(x.id)}"]`);
     if(el){el.scrollIntoView({block:'center'});el.classList.remove('flash');void el.offsetWidth;el.classList.add('flash');}
@@ -1136,7 +1275,7 @@ function renderViews(){
   // Preserve column scroll positions across rebuilds.
   const colsEl=document.getElementById('queueCols');
   const scrolls=[...colsEl.querySelectorAll('.col')].map(c=>c.scrollTop);
-  renderStats();renderInboxAll();renderFilters();renderQueue();renderShips();renderBranches();renderAgents();
+  renderStats();renderInboxAll();renderFilters();renderQueue();renderDeepspace();renderShips();renderBranches();renderAgents();
   renderKpis();renderSpend();renderHistory();renderFunnel();renderRunlog();
   [...colsEl.querySelectorAll('.col')].forEach((c,i)=>{if(scrolls[i])c.scrollTop=scrolls[i];});
 }
