@@ -211,16 +211,49 @@ def _remove_worktree(wt: Path) -> None:
 
 
 # ── commands ─────────────────────────────────────────────────────────────────
+def _stopped() -> bool:
+    """True when Orbit is paused (the loop's STOP kill-switch is present)."""
+    return (AP_STATE / "STOP").exists()
+
+
+def _already_merged(bid: str) -> bool:
+    """True if this task's recorded commit is already an ancestor of the base
+    branch — its fix shipped, so a fresh build would only duplicate it."""
+    led = AP_STATE / "ledger.json"
+    if not led.exists():
+        return False
+    try:
+        e = (json.loads(led.read_text()).get("entries", {}) or {}).get(bid) or {}
+    except Exception:
+        return False
+    target = e.get("sha") or e.get("remote_ref") or (f"origin/{e['branch']}" if e.get("branch") else None)
+    if not target:
+        return False
+    base_ref = f"origin/{_base_branch()}"
+    return subprocess.run(["git", "-C", str(REPO), "merge-base", "--is-ancestor", target, base_ref],
+                          capture_output=True).returncode == 0
+
+
 def cmd_start(bid: str, title: str, branch: str) -> str:
     """Register a running build and spawn the detached worker; return fast."""
     if not _ID_RE.match(bid):
         raise SystemExit(f"invalid id: {bid}")
     if not _BRANCH_RE.match(branch):
         raise SystemExit(f"invalid branch: {branch}")
-    # Guard: don't start a second worker for an id that's already building.
+    # Pause guard: feature agents spend tokens + push branches, so they must
+    # honour the same kill-switch as the loop — nothing runs while Orbit is paused.
+    if _stopped():
+        return "Orbit is paused (STOP present) — feature agents don't run while paused. Resume the loop first."
+    # Dedup guards: never rebuild work that is already building, already pushed for
+    # review, or already merged on the base branch (the redundant-rebuild bug).
     for b in _load():
         if b.get("id") == bid and b.get("status") == "running":
             return f"'{bid}' is already building — see the Feature agents tab."
+        if b.get("id") == bid and b.get("status") == "pushed" and not b.get("merged"):
+            return (f"'{bid}' already has a pushed build ({b.get('branch')}) awaiting review — "
+                    f"merge or reject it first, don't rebuild it.")
+    if _already_merged(bid):
+        return f"'{bid}' is already merged on the base branch — nothing to build."
     _upsert(bid, title=title, branch=branch, status="running",
             started=_now(), finished=None, sha=None, note="preparing worktree")
     LOGDIR.mkdir(parents=True, exist_ok=True)
