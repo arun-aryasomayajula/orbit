@@ -145,7 +145,12 @@ def main() -> int:
         allow = t.get("autopilot") == "allow"
         queued = t.get("status") == "queued"
         cat = t.get("category", "")
-        if tid in skips:
+        if cat == "epic":
+            # Epics are planning-tier containers — planned, approved, and
+            # decomposed into child tasks (epic_plan.py). The loop NEVER works
+            # one directly, not even forced: the children are the workable units.
+            held.append((tid, "epic — plan/approve/decompose it; the loop works its children"))
+        elif tid in skips:
             held.append((tid, "skipped via command center"))
         elif not queued:
             held.append((tid, f"status={t.get('status')}"))

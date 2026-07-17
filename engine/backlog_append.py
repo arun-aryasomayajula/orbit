@@ -85,6 +85,29 @@ def validate_proposal(t: dict, known_categories: set[str]) -> str | None:
     return None
 
 
+def set_task_field(backlog: Path, tid: str, field: str, value: str) -> bool:
+    """Flip one scalar field on one task's block, comment-preserving.
+
+    Same block-level text-edit discipline as the dashboard: locate the `- id:`
+    line, bound the block at the next `- id:`, substitute (or insert) the field
+    line. Never a YAML round-trip. → False if the task isn't in the backlog.
+    """
+    text = backlog.read_text()
+    start = re.search(rf"^(\s*)- id:\s*{re.escape(tid)}\s*(?:#.*)?$", text, re.MULTILINE)
+    if not start:
+        return False
+    nxt = re.search(r"^\s*- id:\s*\S", text[start.end():], re.MULTILINE)
+    end = start.end() + (nxt.start() if nxt else len(text) - start.end())
+    block = text[start.end():end]
+    pat = re.compile(rf"^(\s*){re.escape(field)}:.*$", re.MULTILINE)
+    if pat.search(block):
+        block = pat.sub(rf"\g<1>{field}: {value}", block, count=1)
+    else:
+        block = f"\n{start.group(1)}  {field}: {value}" + block
+    backlog.write_text(text[:start.end()] + block + text[end:])
+    return True
+
+
 def append_tasks(backlog: Path, proposals: list[dict], source: str,
                  header: str, dry_run: bool = False) -> tuple[list[str], list[tuple[str, str]]]:
     """Append valid, new proposals to backlog.yaml. → (added_ids, [(id, why-skipped)])."""
