@@ -573,6 +573,7 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
 
   <!-- ── DEEP SPACE (proposals — Gmail-style reader) ── -->
   <section class="view" id="view-deepspace">
+    <div id="epicsBand"></div>
     <div class="chips" id="filterbar"></div>
     <div class="ds-wrap">
       <div class="ds-list" id="dsList"></div>
@@ -766,7 +767,7 @@ function card(t,kind){
     btns='';
     if(t.has_packet)btns+=`<button class="btn btn-blue btn-mini" title="the 2-minute read: contract, diffstat, verifier evidence" onclick="openText('Review packet — ${esc(t.id)}','/review?id=${encodeURIComponent(t.id)}',false)">Review packet</button>`;
     if(t.has_patch)btns+=`<button class="btn btn-mini" title="the full diff" onclick="openText('Diff — ${esc(t.id)}','/diff?id=${encodeURIComponent(t.id)}',true)">Diff</button>`;
-    if(t.pr_url)btns+=`<a class="btn btn-blue btn-mini" href="${esc(t.pr_url)}" target="_blank" rel="noopener" title="opens Bitbucket with source and target prefilled">Open PR ↗</a>`;
+    if(t.pr_url)btns+=`<a class="btn btn-blue btn-mini" href="${esc(t.pr_url)}" target="_blank" rel="noopener" title="${t.pr_open?'the wrapper already opened this PR — review and merge there':'opens your git host with source and target prefilled'}">${t.pr_open?'View PR':'Open PR'} ↗</a>`;
     if(!t.merged&&!t.rejected){
       btns+=`<button class="btn btn-go btn-mini" title="record that this ship landed" onclick="post('/mark',{id:'${esc(t.id)}',outcome:'merged'})">Mark merged</button>
         <button class="btn btn-stop btn-mini" onclick="rejectTask('${esc(t.id)}')">Reject</button>`;
@@ -795,13 +796,18 @@ function card(t,kind){
       ${t.risk_if_skipped?`<div><b>If we skip it:</b> ${esc(t.risk_if_skipped)}</div>`:''}
       ${(t.docs&&t.docs.length)?`<div><b>Background:</b> ${t.docs.map(d=>S&&S.bb_src?`<a href="${esc(S.bb_src+d)}" target="_blank" rel="noopener">${esc(d)}</a>`:esc(d)).join(' · ')}</div>`:''}
     </details>`:'';
+  // Provenance for intake/signal leads: the WHY + file:line evidence the
+  // discovery source recorded, collapsed behind one tap.
+  const ctx=(kind!=='run'&&kind!=='done'&&t.context)?
+    `<details class=why><summary>context &amp; evidence</summary><div style="white-space:pre-wrap;font-size:12px;opacity:.85">${esc(t.context)}</div></details>`:'';
+  const epicTag=t.epic?badge('epic: '+t.epic,'acc'):'';
   const lint=(kind==='board'&&((t.lint_hard&&t.lint_hard.length)||(t.lint_soft&&t.lint_soft.length)))?
     `<div class=lint>contract: ${esc([...(t.lint_hard||[]).map(x=>'HELD — '+x),...(t.lint_soft||[])].join(' · '))}</div>`:'';
   const note=t.review_note?`<div class=lint>rejected: ${esc(t.review_note)}</div>`:'';
   return `<div class="card ${live}" data-tid="${esc(t.id)}">
-    <div class="card-h"><span class="tid">${esc(t.id)}</span> ${cat} ${gate} ${pri} ${eff} ${rev} ${src}</div>
+    <div class="card-h"><span class="tid">${esc(t.id)}</span> ${cat} ${gate} ${pri} ${eff} ${rev} ${src} ${epicTag}</div>
     <div class="title">${esc(t.title)}</div>
-    ${plain}${brief}${rec}${hint}${timer}${reason}${lint}${note}${why}${accList(t.acceptance_criteria)}
+    ${plain}${brief}${rec}${hint}${timer}${reason}${lint}${note}${ctx}${why}${accList(t.acceptance_criteria)}
     <div class="btns">${btns}</div></div>`;
 }
 // One-line plain-language explainer per section, shown under the heading so a
@@ -1002,6 +1008,39 @@ function renderQueue(){
       :'Launch pad is dry.<br><b>Queue something from Deep space, or switch on Auto-feed.</b>');
 }
 
+/* ── epics band (planning tier: plan → approve spec → decompose) ─────────── */
+function epicStageBadge(st){
+  const m={proposed:['needs planning','muted'],planning:['planning…','warn'],
+           spec_ready:['spec ready — review it','warn'],approved:['approved','ok'],
+           decomposing:['decomposing…','warn'],decomposed:['decomposed','ok']};
+  const x=m[st]||[st,'muted'];return badge(x[0],x[1]);
+}
+function epicCard(e){
+  let btns='';
+  if(e.stage==='proposed')
+    btns+=`<button class="btn btn-vio btn-mini" title="one headless agent call writes a spec for your review — nothing is built" onclick="if(confirm('Run the planner for ${esc(e.id)}? It writes a spec to .autopilot/specs/ for your review.'))post('/epic-action',{id:'${esc(e.id)}',action:'plan'})">🪐 Plan</button>`;
+  if(e.has_spec)
+    btns+=`<button class="btn btn-blue btn-mini" onclick="openText('Spec — ${esc(e.id)}','/epic-spec?id=${encodeURIComponent(e.id)}',false)">Spec</button>`;
+  if(e.stage==='spec_ready')
+    btns+=`<button class="btn btn-go btn-mini" title="freeze the spec — decompose becomes available" onclick="if(confirm('Approve the spec for ${esc(e.id)}? Read it first — decompose translates it faithfully.'))post('/epic-action',{id:'${esc(e.id)}',action:'approve'})">Approve spec</button>
+      <button class="btn btn-mini" title="overwrite the current spec with a fresh plan" onclick="if(confirm('Re-run the planner for ${esc(e.id)}? The current spec is overwritten.'))post('/epic-action',{id:'${esc(e.id)}',action:'plan'})">Re-plan</button>`;
+  if(e.stage==='approved')
+    btns+=`<button class="btn btn-go btn-mini" title="turn the approved spec into child task proposals" onclick="if(confirm('Decompose ${esc(e.id)}? Children land HERE as proposals — you still queue each one.'))post('/epic-action',{id:'${esc(e.id)}',action:'decompose'})">Decompose</button>`;
+  const k=e.children||{};
+  const kids=k.total?`<div class=meta>children: ${k.total} · ${k.queued} queued · ${k.shipped} shipped · <b style="color:var(--green)">${k.merged} merged</b></div>`:'';
+  const ctx=e.context?`<details class=why><summary>context</summary><div style="white-space:pre-wrap;font-size:12px;opacity:.85">${esc(e.context)}</div></details>`:'';
+  return `<div class=card><div class="card-h"><span class=tid>${esc(e.id)}</span> ${badge('epic','acc')} ${epicStageBadge(e.stage)} ${e.priority==='high'?badge('high','warn'):''}</div>
+    <div class=title>${esc(e.title)}</div>${kids}${ctx}${accList(e.acceptance_criteria)}<div class=btns>${btns}</div></div>`;
+}
+function renderEpics(){
+  const band=document.getElementById('epicsBand');if(!band)return;
+  const es=(S&&S.epics)||[];
+  if(!es.length){band.innerHTML='';return;}
+  band.innerHTML=`<div class=band><div class=bandhead><h3>Epics — planning tier</h3>
+    <span class=bandsum>too big for one commit: Plan → review the spec → Approve → Decompose → queue the children below</span></div>
+    <div class=grid>${es.map(epicCard).join('')}</div></div>`;
+}
+
 /* ── deep space view (Gmail-style: row list + reading pane) ──────────────── */
 let dsSel=null;
 function dsSource(){
@@ -1069,7 +1108,7 @@ function branchRow(b){
     : badge('orphan','muted');
   let acts='';
   if(b.has_packet) acts+=`<button class="btn btn-blue btn-mini" onclick="openText('Review packet — ${esc(b.task_id)}','/review?id=${encodeURIComponent(b.task_id)}',false)">Review</button>`;
-  if(b.pr_url) acts+=`<a class="btn btn-blue btn-mini" href="${esc(b.pr_url)}" target="_blank" rel="noopener">Open PR ↗</a>`;
+  if(b.pr_url) acts+=`<a class="btn btn-blue btn-mini" href="${esc(b.pr_url)}" target="_blank" rel="noopener">${b.pr_open?'View PR':'Open PR'} ↗</a>`;
   if(b.category==='awaiting'){
     acts+=`<button class="btn btn-go btn-mini" title="record that this landed (feeds merge-rate)" onclick="post('/mark',{id:'${esc(b.task_id)}',outcome:'merged'})">Mark merged</button>`;
     acts+=`<button class="btn btn-stop btn-mini" onclick="rejectTask('${esc(b.task_id)}')">Reject</button>`;
@@ -1405,6 +1444,8 @@ function loadSettings(){
         <div class=grid2>${txt('base_branch','Base branch — what Orbit orbits',c.base_branch||m.base_branch)}${txt('branch_prefix','Task-branch prefix',c.branch_prefix||'autopilot')}</div></div>
       <div class=setcard><h3>Git host</h3>
         <div class=grid2>${sel('git_host','Provider',c.git_host||m.git_host,m.hosts_all||['bitbucket','github','gitlab'])}${txt('git_repo','Repo slug (org/repo)',c.git_repo||m.git_repo,'drives PR + source links')}</div>
+        ${sel('pull_requests','Auto-raise PRs after each ship',c.pull_requests||'off',['off','github'])}
+        <div class=hint>github = the wrapper runs \`gh pr create\` with the review packet as body (needs an authenticated gh). Merging stays manual either way.</div>
         <div class=set-meta>New-PR link: <code>${esc(m.git_pr_url||'—')}</code></div></div>
       <div class=setcard><h3>Agent</h3>
         <div class=grid2>${txt('model','Model',c.model)}${sel('permission_mode','Permission mode',c.permission_mode,['acceptEdits','plan','bypassPermissions','default'])}</div></div>
@@ -1441,18 +1482,19 @@ function saveSettings(){
     git_host:v('git_host'),git_repo:v('git_repo'),model:v('model'),permission_mode:v('permission_mode'),
     interval_seconds:n('interval_seconds'),max_tasks_per_day:n('max_tasks_per_day'),cycle_timeout_seconds:n('cycle_timeout_seconds'),
     sources:collectChecks('sources'),workable_categories:collectChecks('workable_categories'),
-    spec:v('spec'),commit_trailer:v('commit_trailer'),gates:gates
+    spec:v('spec'),commit_trailer:v('commit_trailer'),gates:gates,
+    pull_requests:v('pull_requests')
   };
   postJSON('/api/config',payload).then(j=>toast(j.msg||'saved')).catch(e=>toast('Save failed: '+e));
 }
 
 /* ── render pipeline ────────────────────────────────────────────────────── */
-function sig(r){return JSON.stringify([r.running,r.next_up,r.done,r.board,r.skipped,r.escalated,r.runlog,r.history,r.funnel,r.feature_builds,r.spend_history,r.branches]);}
+function sig(r){return JSON.stringify([r.running,r.next_up,r.done,r.board,r.skipped,r.escalated,r.runlog,r.history,r.funnel,r.feature_builds,r.spend_history,r.branches,r.epics]);}
 function renderViews(){
   // Preserve column scroll positions across rebuilds.
   const colsEl=document.getElementById('queueCols');
   const scrolls=[...colsEl.querySelectorAll('.col')].map(c=>c.scrollTop);
-  renderStats();renderInboxAll();renderFilters();renderQueue();renderDeepspace();renderShips();renderBranches();renderAgents();
+  renderStats();renderInboxAll();renderFilters();renderEpics();renderDeepspace();renderQueue();renderShips();renderBranches();renderAgents();
   renderKpis();renderSpend();renderHistory();renderFunnel();renderRunlog();
   [...colsEl.querySelectorAll('.col')].forEach((c,i)=>{if(scrolls[i])c.scrollTop=scrolls[i];});
 }

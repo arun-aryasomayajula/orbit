@@ -1013,6 +1013,42 @@ def do_feature_start(tid: str, title: str, branch: str) -> str:
     return (r.stdout or "Feature agent started.").strip()
 
 
+# Planning-tier actions the dashboard may trigger. Stage legality mirrors
+# epic_plan.TRANSITIONS (the CLI re-checks anyway — this is the fast-fail).
+_EPIC_ACTIONS = {"plan": {"proposed", "spec_ready"},
+                 "approve": {"spec_ready"},
+                 "decompose": {"approved"}}
+
+
+def do_epic_action(tid: str, action: str) -> str:
+    """Drive the planning tier from the dashboard. Approve is synchronous (a
+    pure human act, no model). plan/decompose spawn epic_plan.py DETACHED —
+    they run a headless agent for minutes; the card's stage (set immediately
+    by epic_plan) is the progress indicator."""
+    if action not in _EPIC_ACTIONS:
+        return f"unknown epic action '{action}'"
+    t = next((x for x in load_backlog() if str(x.get("id")) == tid), None)
+    if not t or t.get("category") != "epic":
+        return f"'{tid}' is not an epic"
+    stage = t.get("status") or "proposed"
+    if stage not in _EPIC_ACTIONS[action]:
+        return f"cannot {action} from stage '{stage}'"
+    script = str(ENGINE / "epic_plan.py")
+    if action == "approve":
+        r = subprocess.run([sys.executable, script, str(REPO), "approve", tid],
+                           capture_output=True, text=True, timeout=30)
+        out = (r.stdout or r.stderr or "").strip()
+        return out.splitlines()[-1] if out else f"approved {tid}"
+    log = AP_STATE / "logs" / f"epic-{tid}-{action}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("ab") as lf:
+        subprocess.Popen([sys.executable, script, str(REPO), action, tid],
+                         stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
+                         start_new_session=True)
+    who = "Planner" if action == "plan" else "Decomposer"
+    return f"{who} launched for {tid} — the card's stage updates as it works (log: logs/{log.name})"
+
+
 def do_delete_branch(branch: str) -> str:
     # Delete a single remote branch. HARD guardrail: only <PREFIX>/* refs — named
     # / team branches can never be deleted from this UI. Per-branch delete is
@@ -1092,6 +1128,8 @@ def _validate_config(d: dict) -> list:
     _posint("interval_seconds"); _posint("max_tasks_per_day"); _posint("cycle_timeout_seconds")
     if "git_host" in d and d["git_host"] not in HOSTS_ALL:
         errs.append("git_host must be one of " + ", ".join(HOSTS_ALL))
+    if "pull_requests" in d and d["pull_requests"] not in ("off", "github"):
+        errs.append('pull_requests must be "off" or "github"')
     if "branch_prefix" in d and not _PREFIX_RE.match(str(d.get("branch_prefix", ""))):
         errs.append("branch_prefix has invalid characters")
     for k in ("sources", "workable_categories"):
@@ -1304,6 +1342,9 @@ def build_state() -> dict:
                 # non-engineer owner judge each card without reading code.
                 "plain": meta.get("plain", ""), "impact": meta.get("impact", ""),
                 "risk_if_skipped": meta.get("risk_if_skipped", ""),
+                # Provenance for intake/signal leads (the WHY + file:line evidence)
+                # and the epic a decomposed child belongs to.
+                "context": meta.get("context", ""), "epic": meta.get("epic", ""),
                 "effort": meta.get("effort", ""), "decision_hint": meta.get("decision_hint", ""),
                 "docs": [d for d in (meta.get("docs") or []) if isinstance(d, str)],
                 "acceptance_criteria": [a for a in (meta.get("acceptance_criteria") or [])
@@ -1353,12 +1394,15 @@ def build_state() -> dict:
                 "merged": merged,
                 "rejected": st == "rejected",
                 "review_note": e.get("review_note", ""),
-                # Prefilled Bitbucket PR-create link, only while it still makes sense
+                # A REAL PR the wrapper opened (config pull_requests) wins; else
+                # the prefilled PR-create link, only while it still makes sense
                 # (per-task branch, not yet merged, not rejected).
-                "pr_url": (f"{BB_PR_NEW}?source={urllib.parse.quote(branch, safe='')}"
+                "pr_url": e.get("pr_url") or
+                          (f"{BB_PR_NEW}?source={urllib.parse.quote(branch, safe='')}"
                            f"&dest={urllib.parse.quote(BASE_BRANCH, safe='')}"
                            if BB_PR_NEW and branch.startswith("autopilot/") and not merged and st != "rejected"
                            else None),
+                "pr_open": bool(e.get("pr_url")),
                 "has_packet": (REVIEWS / f"task-{tid}.md").exists(),
                 "has_patch": bool(e.get("patch")),
             })
@@ -1397,6 +1441,8 @@ def build_state() -> dict:
         tid = str(t.get("id"))
         if tid in worked or tid in skips:
             continue
+        if t.get("category") == "epic":
+            continue   # epics get their own strip (planning tier), not triage cards
         if _on_board(t):
             r = base(tid, t)
             # promotable = will actually reach Next up in one click (loop-workable)
@@ -1408,6 +1454,38 @@ def build_state() -> dict:
             board.append(r)
     board.sort(key=lambda t: (0 if t.get("status") == "queued" else 1,
                               PRIORITY_RANK.get(t.get("priority", "medium"), 1)))
+
+    # EPICS — the planning tier's strip: stage machine (status field is truth,
+    # epic_plan.py moves it) + a rollup of decomposed children's progress.
+    epic_children: dict = {}
+    for t in backlog:
+        if t.get("epic"):
+            epic_children.setdefault(str(t["epic"]), []).append(str(t.get("id")))
+    epics = []
+    for t in backlog:
+        if t.get("category") != "epic" or t.get("status") == "done":
+            continue
+        tid = str(t.get("id"))
+        rollup = {"total": 0, "proposed": 0, "queued": 0, "shipped": 0, "merged": 0}
+        for k in epic_children.get(tid, []):
+            e = ledger.get(k, {})
+            st = e.get("state")
+            rollup["total"] += 1
+            if st == "merged" or (e.get("sha") and mm.get(e["sha"])):
+                rollup["merged"] += 1
+            elif st in ("pushed", "committed"):
+                rollup["shipped"] += 1
+            elif by_id.get(k, {}).get("status") == "queued":
+                rollup["queued"] += 1
+            else:
+                rollup["proposed"] += 1
+        epics.append({"id": tid, "title": t.get("title") or tid,
+                      "stage": t.get("status") or "proposed",
+                      "priority": t.get("priority", "medium"),
+                      "has_spec": (AP_HOME / "specs" / f"{tid}.md").exists(),
+                      "children": rollup, "context": t.get("context", ""),
+                      "acceptance_criteria": [a for a in (t.get("acceptance_criteria") or [])
+                                              if isinstance(a, str)]})
 
     # SKIPPED = explicitly skipped ids (their own section, with an Un-skip action).
     skipped = []
@@ -1473,18 +1551,21 @@ def build_state() -> dict:
     _branch_rows = branch_reconcile(remote_branches(), trunk_ancestry(), ledger, _now)
     for _b in _branch_rows:
         _b["has_packet"] = (REVIEWS / f"task-{_b['task_id']}.md").exists()
-        _b["pr_url"] = (
+        _real_pr = ledger.get(_b["task_id"], {}).get("pr_url") if _b["is_current_ref"] else None
+        _b["pr_url"] = _real_pr or (
             f"{BB_PR_NEW}?source={urllib.parse.quote(_b['branch'], safe='')}"
             f"&dest={urllib.parse.quote(BASE_BRANCH, safe='')}"
             if BB_PR_NEW and not _b["merged"] and _b["category"] != "rejected"
             else None
         )
+        _b["pr_open"] = bool(_real_pr)
 
     rt = probe_runtime()
     rt.update({"running": running, "next_up": next_up, "board": board, "skipped": skipped,
                "auto_feed": AUTO_PROMOTE.exists(), "metrics": agent_metrics(), "history": hist["days"],
                "funnel": funnel,
                "feature_builds": feature_builds_annotated(),
+               "epics": epics,
                "spend_history": spend_history(),
                "done": done, "escalated": escalated, "skips": sorted(skips),
                "runlog": runlog,
@@ -2088,6 +2169,14 @@ class Handler(BaseHTTPRequestHandler):
             if body is None:
                 self._send(b"not found for this task", "text/plain", 404); return
             self._send(body.encode(), "text/plain; charset=utf-8")
+        elif path == "/epic-spec":
+            # The planner's spec for one epic — rendered in the packet viewer.
+            if not tid or not _TID_RE.match(tid):
+                self._send(b"invalid id", "text/plain", 400); return
+            f = AP_HOME / "specs" / f"{tid}.md"
+            if not f.exists():
+                self._send(b"no spec for this epic yet - run Plan first", "text/plain", 404); return
+            self._send(f.read_text().encode(), "text/plain; charset=utf-8")
         elif path == "/guide":
             # Operator guide: what each section means and how to decide.
             for gf in GUIDE_FILES:
@@ -2144,6 +2233,10 @@ class Handler(BaseHTTPRequestHandler):
                               (data.get("note", [""])[0]).strip())
             elif path == "/lintok":
                 msg = do_lintok(tid)
+            elif path == "/epic-action":
+                if not tid:
+                    self._send(b'{"ok":false,"msg":"missing epic id"}', "application/json", 400); return
+                msg = do_epic_action(tid, (data.get("action", [""])[0]).strip())
             elif path == "/merge-to-loop":
                 branch = (data.get("branch", [""])[0]).strip()
                 if not re.match(r"^[A-Za-z0-9._/-]{1,120}$", branch):
