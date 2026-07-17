@@ -98,10 +98,13 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
     gi = os.path.join(AP, "state", ".gitignore")
     if not os.path.exists(gi):
         open(gi, "w").write("# Orbit runtime state — do not commit\n*\n!.gitignore\n")
-    # copy the cycle command into the target's .claude/commands so `claude -p /orbit-cycle` resolves
+    # copy the engine's commands into the target's .claude/commands so the headless
+    # calls resolve (`claude -p /orbit-cycle`, `/orbit-intake`, ...)
     cmd_dir = os.path.join(TARGET, ".claude", "commands")
     os.makedirs(cmd_dir, exist_ok=True)
-    shutil.copy(os.path.join(ORBIT_HOME, "skills", "orbit-cycle.md"), os.path.join(cmd_dir, "orbit-cycle.md"))
+    for s in os.listdir(os.path.join(ORBIT_HOME, "skills")):
+        if s.endswith(".md"):
+            shutil.copy(os.path.join(ORBIT_HOME, "skills", s), os.path.join(cmd_dir, s))
     # copy agents into the target's .claude/agents
     ag_dir = os.path.join(TARGET, ".claude", "agents")
     os.makedirs(ag_dir, exist_ok=True)

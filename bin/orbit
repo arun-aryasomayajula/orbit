@@ -1,6 +1,9 @@
 #!/bin/bash
 # orbit — thin dispatcher (plain script; routes to the engine). Not a packaged CLI.
 #   orbit init <target>      scaffold .autopilot/ (via install.sh)
+#   orbit intake <target>    survey the repo: verify gates, fill tracks, propose a starter
+#                            backlog (proposed/human — triage on the dashboard). Flags:
+#                            --no-agent --dry-run --timeout N
 #   orbit doctor <target>    validate wiring (read-only, no cycle)
 #   orbit run <target>       run the loop in the foreground
 #   orbit install <target>   install the background service (launchd/systemd)
@@ -14,13 +17,14 @@ verb="${1:-}"; target="${2:-.}"; target="$(cd "$target" && pwd)"
 export ORBIT_HOME
 case "$verb" in
   init)    "$ORBIT_HOME/install.sh" "$target" ;;
+  intake)  python3 "$ORBIT_HOME/engine/intake.py" "$target" "${@:3}" ;;
   doctor)  python3 "$ORBIT_HOME/engine/doctor.py" "$target" "${3:-}" ;;
   run)     "$ORBIT_HOME/engine/run.sh" "$target" ;;
   install) "$ORBIT_HOME/install/install_service.sh" "$target" "$ORBIT_HOME" ;;
   sync)    mkdir -p "$target/.claude/commands" "$target/.claude/agents";
-           cp "$ORBIT_HOME/skills/orbit-cycle.md" "$target/.claude/commands/orbit-cycle.md";
+           cp "$ORBIT_HOME/skills/"*.md "$target/.claude/commands/";
            cp "$ORBIT_HOME/agents/"*.md "$target/.claude/agents/";
-           echo "synced /orbit-cycle command + $(ls "$ORBIT_HOME/agents/"*.md | wc -l | tr -d ' ') agents from $ORBIT_HOME → $target/.claude/ (next cycle uses them)" ;;
+           echo "synced $(ls "$ORBIT_HOME/skills/"*.md | wc -l | tr -d ' ') commands + $(ls "$ORBIT_HOME/agents/"*.md | wc -l | tr -d ' ') agents from $ORBIT_HOME → $target/.claude/ (next cycle uses them)" ;;
   pause)   touch "$target/.autopilot/state/STOP"; echo "paused (STOP present)" ;;
   resume)  rm -f "$target/.autopilot/state/STOP"; echo "resumed" ;;
   status)  python3 "$ORBIT_HOME/engine/ledger.py" summary 2>/dev/null || echo "(no ledger yet)";
