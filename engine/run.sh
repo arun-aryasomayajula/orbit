@@ -144,6 +144,32 @@ for t in tasks:
 PYEOF
 }
 
+# --- optional PR raising (config `pull_requests: "github"`) -----------------
+# Wrapper-only: the agent never sees a provider credential. Opt-in and
+# degrade-to-log — a missing/unauthenticated `gh` or a failed create must never
+# fail the cycle (the branch is already pushed). Merging stays 100% manual.
+raise_pr() {
+  local tid="$1" branch="$2"
+  [ "${ORBIT_PULL_REQUESTS:-off}" = "github" ] || return 0
+  command -v gh >/dev/null 2>&1 || { log "WARN: pull_requests=github but gh not on PATH — skipping PR create"; return 0; }
+  local subject url body="$STATE/reviews/task-${tid}.md"
+  subject="$(git -C "$WT" log -1 --format=%s 2>/dev/null || echo "orbit: $branch")"
+  if [ -n "$tid" ] && [ -f "$body" ]; then
+    url="$(cd "$WT" && gh pr create --head "$branch" --base "$ORBIT_BASE_BRANCH" \
+           --title "$subject" --body-file "$body" 2>>"$LOGDIR/orbit.log")" || url=""
+  else
+    url="$(cd "$WT" && gh pr create --head "$branch" --base "$ORBIT_BASE_BRANCH" \
+           --title "$subject" --body "Automated Orbit ship — review packet under .autopilot/state/reviews/." 2>>"$LOGDIR/orbit.log")" || url=""
+  fi
+  if [ -n "$url" ]; then
+    log "opened PR $url (merge stays manual)"
+    [ -n "$tid" ] && { python3 "$ENGINE/ledger.py" pr "$tid" "$url" >>"$LOGDIR/orbit.log" 2>&1 || true; }
+    notify "🔀 Orbit PR" "task ${tid:-?} → $url"
+  else
+    log "WARN: gh pr create failed for $branch (auth? PR already open?) — branch is pushed; open one manually"
+  fi
+}
+
 run_cycle() {
   local out="$1"; cd "$WT" || return 1
   local caff=""; command -v caffeinate >/dev/null 2>&1 && caff="caffeinate -i"
@@ -212,6 +238,7 @@ one_iteration() {
       log "pushed origin/$branch ($sha) — review, then Merge/Reject"
       [ -n "$tid" ] && { python3 "$ENGINE/ledger.py" pushed "$tid" "origin/$branch" 2>/dev/null || true
         python3 "$ENGINE/review_packet.py" "$tid" "$WT" "$branch" "$ORBIT_BASE_BRANCH" >>"$LOGDIR/orbit.log" 2>&1 || true; }
+      raise_pr "$tid" "$branch"
       notify "🔧 Orbit shipped" "task ${tid:-?} → $branch"
     else
       log "WARN: push failed twice — patch kept: ${patch:-none}"
@@ -239,7 +266,11 @@ while true; do
   [ -f "$STOP_FILE" ] && { log "STOP present — idling."; set_idle_reason "stopped" 60; sleep 60; continue; }
   count="$(cat "$STATE/.count-$(today)" 2>/dev/null || echo 0)"
   if [ "$count" -ge "$MAX_TASKS_PER_DAY" ]; then log "daily cap $MAX_TASKS_PER_DAY reached — idling."; set_idle_reason "daily-cap" 600; sleep 600; continue; fi
-  status="$(one_iteration)"
+  # one_iteration's stdout carries BOTH the tee'd log lines and the final status
+  # word — dispatch on the LAST line only. (Matching the whole capture meant
+  # OK/EMPTY/SKIP/LIMIT never matched once anything was logged: the daily count
+  # never incremented and usage-limit backoff never fired.)
+  status="$(one_iteration)"; status="${status##*$'\n'}"
   case "$status" in
     OK)    echo $((count+1)) > "$STATE/.count-$(today)"; set_idle_reason "between-cycles" "$INTERVAL"; sleep "$INTERVAL" ;;
     FAIL)  echo $((count+1)) > "$STATE/.count-$(today)"; set_idle_reason "recovering" 120; sleep 120 ;;

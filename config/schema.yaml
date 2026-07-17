@@ -57,3 +57,11 @@ env:
 # --- git identity for the wrapper's per-task branches -------------------------
 branch_prefix: "autopilot"   # ships push to origin/<branch_prefix>/task-<id>
 commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
+
+# --- pull requests (optional, wrapper-only) ------------------------------------
+# "github" → after pushing a ship, the WRAPPER (never the agent) runs `gh pr create`
+# against base_branch with the review packet as the PR body, and records the URL in
+# the ledger. Merging stays 100% manual — Orbit never merges. Requires an
+# authenticated `gh` on PATH; if it's missing or the create fails, the cycle just
+# logs and continues (the branch is pushed either way).
+pull_requests: "off"         # "off" | "github"

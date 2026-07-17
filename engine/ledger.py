@@ -17,6 +17,7 @@ Usage:
   ledger.py committed <id> <branch> <sha>  # mark committed (atomic local commit made)
   ledger.py pushed <id> <remote_ref>    # mark pushed (on remote branch, awaiting review)
   ledger.py escalate <id> <reason>      # mark escalated (needs a human)
+  ledger.py pr <id> <url>               # record the PR the wrapper opened for the ship
   ledger.py attach-patch <id> <path>    # record the wrapper's captured patch (backup)
   ledger.py mark <id> merged|rejected [note]  # review outcome (feeds merge-rate metrics)
   ledger.py state <id>                  # print the entry's state ('' if absent)
@@ -117,6 +118,14 @@ def cmd_escalate(tid, reason):
     _save(data)
 
 
+def cmd_pr(tid, url):
+    # Record the PR the wrapper opened for this ship (state unchanged — the PR
+    # is metadata on the pushed branch; review outcome still comes via `mark`).
+    data = _load()
+    _entry(data, tid).update(pr_url=url, updated_at=_now())
+    _save(data)
+
+
 def cmd_attach_patch(tid, path):
     # Record the patch path the wrapper captured for this task (best-effort).
     data = _load()
@@ -178,6 +187,8 @@ def cmd_show():
             line += f"\n      branch: {e['branch']}" + (f" @ {e['sha'][:10]}" if e.get("sha") else "")
         if e.get("remote_ref"):
             line += f"\n      remote: {e['remote_ref']}"
+        if e.get("pr_url"):
+            line += f"\n      pr: {e['pr_url']}"
         if e.get("patch"):
             line += f"\n      patch: {e['patch']}"
         if e.get("reason"):
@@ -199,6 +210,8 @@ def main(argv):
             cmd_pushed(rest[0], rest[1])
         elif cmd == "escalate":
             cmd_escalate(rest[0], rest[1] if len(rest) > 1 else "")
+        elif cmd == "pr":
+            cmd_pr(rest[0], rest[1])
         elif cmd == "attach-patch":
             cmd_attach_patch(rest[0], rest[1])
         elif cmd == "mark":

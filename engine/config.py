@@ -16,6 +16,7 @@ DEFAULTS = {
     "max_tasks_per_day": 12, "cycle_timeout_seconds": 3600, "spec": None,
     "sources": ["backlog"], "branch_prefix": "autopilot",
     "commit_trailer": "Co-Authored-By: Claude <noreply@anthropic.com>",
+    "pull_requests": "off",
 }
 
 def load(target):
@@ -46,6 +47,7 @@ def shellenv(target):
         f"export ORBIT_MAX_TASKS={sh(cfg['max_tasks_per_day'])}",
         f"export ORBIT_CYCLE_TIMEOUT={sh(cfg['cycle_timeout_seconds'])}",
         f"export ORBIT_BRANCH_PREFIX={sh(cfg['branch_prefix'])}",
+        f"export ORBIT_PULL_REQUESTS={sh(cfg['pull_requests'])}",
         f"export AP_HOME={sh(ap_home)}",
         f"export AP_STATE={sh(os.path.join(ap_home, 'state'))}",
     ]
@@ -82,6 +84,8 @@ def validate(target):
     for name, g in (cfg.get("gates") or {}).items():
         if not g.get("cmd"):
             errs.append(f"gate '{name}' has no cmd")
+    if cfg.get("pull_requests") not in ("off", "github"):
+        errs.append(f"pull_requests must be \"off\" or \"github\", got {cfg.get('pull_requests')!r}")
     if errs:
         print("\n".join("  ✗ " + e for e in errs)); sys.exit(1)
     print("  ✓ config valid")

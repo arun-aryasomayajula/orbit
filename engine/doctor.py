@@ -48,6 +48,15 @@ cb = env.get("CLAUDE_BIN", "auto")
 claude = shutil.which("claude") if cb == "auto" else cb
 check("claude binary resolves", bool(claude and (shutil.which(claude) or os.path.exists(claude))), claude or "NOT FOUND")
 
+# 2b. pull requests (wrapper-only, opt-in): gh must resolve AND be authenticated
+if cfg.get("pull_requests") == "github":
+    gh = shutil.which("gh")
+    if not gh:
+        check("pull_requests=github: gh on PATH", False, "gh NOT FOUND — install GitHub CLI or set pull_requests: off")
+    else:
+        authed = subprocess.run(["gh", "auth", "status"], capture_output=True).returncode == 0
+        check("pull_requests=github: gh authenticated", authed, "" if authed else "`gh auth status` failed — run `gh auth login`")
+
 # 3. router — target's .autopilot/router.yaml overrides the engine default at router/router.yaml
 router_path = find("router.yaml") or (
     os.path.join(ORBIT_HOME, "router", "router.yaml")

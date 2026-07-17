@@ -4,3 +4,4 @@ __pycache__/
 engine/logs/
 *.local
 .DS_Store
+implementation-notes.md
