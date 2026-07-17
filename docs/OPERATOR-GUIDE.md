@@ -18,6 +18,7 @@ If you do nothing, it only works what was already approved.
 | **In orbit** | The task being built right now | Nothing — watch, or Abort |
 | **Launch pad** (Queue) | Approved tasks in pick order | Reorder / Park |
 | **Deep space** | Proposals — inert until you approve | "Queue it" or Park |
+| **Epics strip** (top of Deep space) | Big work being planned | Plan → read the spec → Approve → Decompose, then queue the children |
 | **Inbox → Escalations** | Robot stopped; needs a human call | Follow the 👉 recommendation; Answer or Park |
 | **Inbox → Ships awaiting review** | Finished branches | Review packet → Merge / Reject |
 | **Ships** | Shipped / merged / rejected history | Reference |

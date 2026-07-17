@@ -97,7 +97,7 @@ check("every referenced skill resolves", not bad, "" if not bad else "UNRESOLVED
 # 5b. golden calibration resolves (graded exemplars — a third reference type)
 g = router.get("goldens") or {}
 gfile = g.get("file", "goldens/CALIBRATION.md")
-gpath = find(gfile) or (os.path.join(RATCHET_HOME, gfile) if os.path.exists(os.path.join(RATCHET_HOME, gfile)) else None)
+gpath = find(gfile) or (os.path.join(ORBIT_HOME, gfile) if os.path.exists(os.path.join(ORBIT_HOME, gfile)) else None)
 check("golden calibration resolves", bool(gpath), gpath or f"missing ({gfile})")
 
 # 6. dry-run routing over the queue (if present)

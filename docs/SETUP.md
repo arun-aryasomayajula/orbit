@@ -25,8 +25,19 @@ Open `.autopilot/config.yaml`:
 
 Other fields (all optional, sensible defaults): `model`, `permission_mode`, `interval_seconds`,
 `max_tasks_per_day`, `cycle_timeout_seconds`, `spec` (a standing doc the loop rereads),
-`workable_categories`, `sources`, `env.passthrough`, `branch_prefix`, `commit_trailer`.
+`workable_categories`, `sources`, `env.passthrough`, `branch_prefix`, `commit_trailer`,
+`pull_requests` (`"github"` = the wrapper opens a PR per ship via `gh`; merge stays manual).
 Full field docs: `<orbit>/config/schema.yaml`.
+
+## 3.5. Intake (optional — recommended on an unfamiliar repo)
+```bash
+orbit intake .        # flags: --no-agent (deterministic only), --dry-run, --timeout N
+```
+Closes the cold-start gap: executes every gate and reports pass/fail
+(`state/intake/gates-report.txt`), injects a test-bootstrap proposal when NO gates exist,
+then one headless survey call fills the placeholder tracks with real repo facts and writes
+evidence-backed candidate tasks. Everything lands `status: proposed` + `autopilot: human` —
+intake produces leads for you to triage on the dashboard, never queued work.
 
 ## 4. Fill in tracks (optional but high-value)
 `.autopilot/tracks/` seeds from the engine's generic templates. Replace the placeholder lines with
@@ -50,6 +61,19 @@ tasks:
 Only `workable_categories` with `status: queued` and `autopilot: allow` are auto-picked. Others need
 `forced: true` or a human.
 
+### Epics (work too big for one commit)
+Give a big task `category: epic` — the loop can never pick one, even forced. It moves
+through a human-gated planning pipeline instead:
+
+```bash
+orbit epic . plan <id>        # headless planner → .autopilot/specs/<id>.md, stage → spec_ready
+# read the spec, then:
+orbit epic . approve <id>     # human act — freezes the spec, stage → approved
+orbit epic . decompose <id>   # headless decomposer → child tasks (proposed, epic: <id>)
+```
+The dashboard's Epics strip (Deep space) drives the same pipeline with buttons. Children
+are ordinary backlog tasks — queue them one by one, in spec order.
+
 ## 6. Run
 ```bash
 orbit doctor .      # validate everything, dry-run routing (read-only)
@@ -58,8 +82,13 @@ orbit install .     # background service (launchd/systemd)
 orbit pause . / resume .   # kill switch
 ```
 
-## Opt-in task sources (adapters)
-Beyond the native `backlog.yaml`, add source names to `sources:` and Orbit runs the matching
-`<orbit>/adapters/<name>_to_backlog.py` each cycle to convert an external source into proposed
-tasks. Shipped: `foundry` (maturity tasks), `logwatch` (prod log findings), `qa` (UI-test findings).
-These carry their own coupling to specific tools — treat them as examples to adapt.
+## Opt-in task sources (signal adapters)
+Beyond the native `backlog.yaml`, every extra name in `sources:` runs a matching
+`<name>_to_backlog.py` each cycle — resolved from YOUR repo's `.autopilot/adapters/` first,
+then the engine's `adapters/`. The contract: the adapter runs with `AP_HOME`/`AP_STATE`/
+`ORBIT_HOME` exported and cwd = the repo root; it appends `status: proposed` tasks to
+backlog.yaml itself, idempotently (use `engine/backlog_append.py`), and never queues work
+or touches existing tasks. Shipped examples to copy from: `foundry` (maturity tasks),
+`logwatch` (prod log findings), `qa` (UI-test findings) — each carries coupling to its
+specific tool. This is the operate-phase feedback loop: production signal → proposed task
+→ human triage → fix ships.

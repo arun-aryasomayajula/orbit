@@ -4,6 +4,27 @@
 One line splits everything: **engine (generic) vs profile (per-repo)**. The engine never names a
 project; all project knowledge lives in the target's `.autopilot/`. metaql is just the first consumer.
 
+## The second boundary: machines propose, humans dispose
+Every way work ENTERS Orbit (intake survey, signal adapters, epic decomposition) may only
+produce `status: proposed` + `autopilot: human` tasks — promotion to `queued` is always a
+human act (dashboard/CLI). Every way work LEAVES Orbit (branch push, PR creation) stops at
+a review artifact — merging is always a human act. The lifecycle phases hang off this rule:
+
+- **intake** (`engine/intake.py` + `/orbit-intake`) — zero-day onboarding: verify gates
+  deterministically (no gates → a test-bootstrap proposal, because a loop without a gate
+  has no definition of done), agent-fill the tracks, propose an evidence-backed backlog.
+- **planning** (`engine/epic_plan.py` + `/orbit-plan`, `/orbit-decompose`) — `category: epic`
+  tasks are containers the loop can never pick, even forced. Pipeline:
+  plan → spec (`.autopilot/specs/<id>.md`) → **human approves** → decompose → proposed
+  children (`epic: <id>`). Stage lives in the task's own `status` field.
+- **build** — the cycle (below), unchanged: one task, one commit, one review branch.
+- **review** — review packet always; with `pull_requests: "github"` the WRAPPER also runs
+  `gh pr create` (agent never holds provider credentials; merge stays manual).
+- **operate** — signal adapters fold external evidence (logs, QA runs, scorecards) back
+  into proposals each cycle (contract: SETUP.md "signal adapters").
+
+CI and release are deliberately out of scope: nothing here deploys anywhere.
+
 ## The cycle (one iteration of the loop)
 `engine/run.sh` is the resilient outer loop (worktree-isolated, survives sleep/crash/usage-limit via
 the service's KeepAlive + backoff). Each iteration:
@@ -42,8 +63,11 @@ fully describes its own autopilot — clone it and the state comes along (or sta
 | `engine/run.sh` | outer loop wrapper |
 | `engine/config.py` | reads `.autopilot/config.yaml`, emits loop env, answers gates/needs, validates |
 | `engine/doctor.py` | read-only wiring validator + routing dry-run |
-| `engine/ledger.py` | worked-task record |
-| `engine/backlog_to_tasks.py` | backlog + adapters → queue.json |
+| `engine/ledger.py` | worked-task record (incl. wrapper-opened PR URLs) |
+| `engine/backlog_to_tasks.py` | backlog + signal adapters → queue.json |
+| `engine/backlog_append.py` | the ONE way engine code adds/edits backlog tasks (comment-preserving) |
+| `engine/intake.py` | zero-day onboarding: gate verification + survey → proposed backlog |
+| `engine/epic_plan.py` | planning tier: epic → spec → human approval → child tasks |
 | `engine/{review_packet,notify,autopromote,backlog_lint,command_center}.py` | packets, notifications, auto-feed, lint gate, dashboard |
 | `agents/*.md` | builder, checker, verifier, qa-writer, doc-writer (generic) |
 | `skills/orbit-cycle.md` | the orchestrator command |

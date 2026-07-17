@@ -1,14 +1,19 @@
 # Orbit
 
-**An autonomous coding loop for Claude Code that works on any git repo.**
+**An autonomous software-lifecycle loop for Claude Code that works on any git repo.**
 
-Point Orbit at a repository, give it a backlog, and it works one task at a time —
-around the clock, unattended, without ever touching your main branch. Each finished
-task lands as **one atomic commit on its own review branch**. A human reviews and
-merges every ship; Orbit never merges anything itself.
+Point Orbit at a repository and it covers the lifecycle around the code: **intake**
+surveys the repo into an evidence-backed backlog, **epics** plan big work into
+human-approved specs and loop-sized slices, the **build loop** works one task at a
+time around the clock, each ship lands as **one atomic commit on its own review
+branch** (optionally as a ready-made PR), and **signal adapters** feed production
+evidence back into the backlog. Two things never happen without a human click:
+work entering the queue, and work merging.
 
 ```
-one cycle:  pick task ─▶ route (maker · model · skill · tracks) ─▶ build ⇄ check ─▶ verify-spec ─▶ commit ─▶ push review branch ─▶ you review
+intake ─▶ backlog ─▶ (epic? plan ─▶ you approve ─▶ decompose) ─▶ you queue
+one cycle:  pick task ─▶ route (maker · model · skill · tracks) ─▶ build ⇄ check ─▶ verify-spec ─▶ commit ─▶ push review branch (+PR) ─▶ you merge
+signals (logs · QA · scorecards) ─▶ proposed tasks ─▶ back to triage
 ```
 
 One notch forward per cycle, never backward, every change independently reviewable.
@@ -19,14 +24,20 @@ Running a coding agent unattended fails in predictable ways: it invents work, sh
 half-verified changes, piles unrelated edits into one diff, or quietly pushes to main.
 Orbit is the harness that removes those failure modes:
 
-- **A human-curated backlog is the only source of work.** No task in the queue → the
-  loop exits cleanly. It never invents work.
+- **Machines propose, humans dispose.** Intake, epic decomposition, and signal adapters
+  can only create `proposed` tasks; a human queues every piece of work, and no task in
+  the queue means the loop exits cleanly. It never invents work.
 - **Your own test/lint commands (the "gates") are the definition of done.** A checker
   agent must show real passing output — assertions of "all green" are rejected.
 - **A separate verifier agent judges the diff against the task's acceptance criteria**
   before anything is committed. Tasks without acceptance criteria are hard-gated out.
 - **The agent cannot push.** Only the wrapper script pushes, always to a per-task
-  branch, never `--force`, never the base branch.
+  branch, never `--force`, never the base branch. With `pull_requests: "github"` the
+  wrapper also opens the PR (via your `gh` login — the agent never holds credentials);
+  merging stays yours.
+- **Big work is designed before it's built.** An `epic` task can never reach the loop —
+  a planner writes a spec, a human approves it, and only then is it decomposed into
+  one-commit slices.
 - **Anything requiring judgment escalates to you** — auth, payments, migrations,
   secrets, CI config, and architecture decisions are refused, not attempted.
 
@@ -66,6 +77,7 @@ cd ~/code/my-project
 # 3. review the two things auto-detection can't nail
 $EDITOR .autopilot/config.yaml    # confirm gates: commands actually pass locally
 $EDITOR .autopilot/backlog.yaml   # add tasks (with acceptance criteria — required)
+orbit intake .              # …or let intake propose a starter backlog + fill the tracks
 
 # 4. validate, try one cycle in the foreground, then go unattended
 orbit doctor .              # read-only wiring check + routing dry-run
@@ -83,6 +95,8 @@ Full walkthrough with prerequisites, first-cycle verification, and troubleshooti
 | verb | does |
 |------|------|
 | `init` | scaffold `.autopilot/` (same as `install.sh`) |
+| `intake` | survey the repo: verify gates, fill tracks, propose an evidence-backed backlog |
+| `epic` | planning tier: `plan\|approve\|decompose\|status <id>` — spec first, humans approve |
 | `doctor` | validate config + router + tracks + skills; dry-run routing (read-only) |
 | `run` | run the loop in the foreground |
 | `install` | install the background service |

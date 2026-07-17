@@ -94,6 +94,17 @@ Optional but high-leverage: replace the placeholder lines in `.autopilot/tracks/
 with your repo's real gotchas ([SETUP.md](SETUP.md) §4). Tracks are the difference
 between generically-correct code and code that fits your repo.
 
+**Or let intake do both for you.** On a repo you don't know well:
+
+```bash
+orbit intake .        # verifies gates, agent-fills tracks, proposes a starter backlog
+```
+
+One survey call (budget it like a few loop cycles). Everything it produces is a
+`proposed` lead with evidence attached — triage on the dashboard, promote what's real,
+delete the rest. If no gates were configured, its first proposal is the test-bootstrap
+task. Details: [SETUP.md](SETUP.md) §3.5.
+
 ## 5. Validate the wiring
 
 ```bash
@@ -161,7 +172,9 @@ it never disturbs a running task. What every section and button means:
 | robot stopped and asked for help | `.autopilot/state/NEEDS_YOU.md` or the dashboard Inbox — answer or park |
 | updated the engine (`git -C ~/orbit pull`) | `orbit sync <repo>` in every target, so the running agent gets the new command + agents |
 | a merged ship regressed | dashboard **Revert** on the ship (a `git revert`, never `--force`) |
-| queue drained | add tasks, or enable auto-promote / adapters ([SETUP.md](SETUP.md) §5–6) |
+| queue drained | add tasks, run `orbit intake .` again, or enable auto-promote / signal adapters ([SETUP.md](SETUP.md) §5–6) |
+| work too big for one commit | make it an epic: `orbit epic . plan\|approve\|decompose <id>` or the dashboard's Epics strip ([SETUP.md](SETUP.md) §5) |
+| want a PR per ship | set `pull_requests: "github"` in config (needs an authenticated `gh` — doctor checks it); merge stays manual |
 | stop everything permanently | `orbit pause .`, then unload the launchd plist / disable the systemd unit the installer created |
 
 ## 9. Troubleshooting

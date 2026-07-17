@@ -44,9 +44,12 @@ gates:
 workable_categories: [bug, feature, refactor, code_quality, testing, documentation, dependencies, developer_experience]
 
 # --- task sources feeding the backlog -----------------------------------------
-# `backlog` is native (a human-curated backlog.yaml). Others are opt-in adapters in engine's
-# adapters/ that convert an external source into proposed backlog tasks.
-sources: [backlog]           # + optional: foundry, logwatch, qa
+# `backlog` is native (a human-curated backlog.yaml). Every other name is a SIGNAL
+# adapter `<name>_to_backlog.py` — resolved from the target's .autopilot/adapters/
+# first (ship your own feeds), then the engine's adapters/. Adapters append
+# `status: proposed` tasks only; a human queues work. Contract details:
+# backlog_to_tasks.run_source_adapters.
+sources: [backlog]           # + optional: foundry, logwatch, qa, or your own
 
 # --- environment passthrough (NEVER commit secrets; reference env only) -------
 env:
