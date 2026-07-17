@@ -125,14 +125,23 @@ def append_tasks(backlog: Path, proposals: list[dict], source: str,
             added.append(tid)
             blocks.append(render_proposed_task(t, source))
     if added and not dry_run:
-        # A scaffolded backlog says `tasks: []` (flow-style) — appended block
-        # items would be invalid YAML under it. Open the list once, in place.
-        text = backlog.read_text() if backlog.exists() else "tasks:\n"
-        text = re.sub(r"^(tasks:)\s*\[\s*\](\s*(?:#.*)?)$", r"\1\2", text,
-                      count=1, flags=re.MULTILINE)
-        if not text.endswith("\n"):
-            text += "\n"
-        text += f"\n  # ── {header} — triage before promoting ──\n"
-        text += "".join(blocks)
-        backlog.write_text(text)
+        append_raw_blocks(backlog, f"{header} — triage before promoting", blocks)
     return added, skipped
+
+
+def append_raw_blocks(backlog: Path, header: str, blocks: list[str]) -> None:
+    """Append pre-rendered task blocks under a comment header.
+
+    Adapters that render their own blocks (custom gate hints etc.) come through
+    here so the empty-backlog handling lives once: a scaffolded backlog says
+    `tasks: []` (flow-style), under which appended block items would be invalid
+    YAML — open the list in place first.
+    """
+    text = backlog.read_text() if backlog.exists() else "tasks:\n"
+    text = re.sub(r"^(tasks:)\s*\[\s*\](\s*(?:#.*)?)$", r"\1\2", text,
+                  count=1, flags=re.MULTILINE)
+    if not text.endswith("\n"):
+        text += "\n"
+    text += f"\n  # ── {header} ──\n"
+    text += "".join(b if b.endswith("\n") else b + "\n" for b in blocks)
+    backlog.write_text(text)

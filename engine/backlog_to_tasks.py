@@ -110,24 +110,37 @@ def to_queue_entry(t: dict) -> dict:
 
 def run_source_adapters() -> None:
     """Fold each configured non-native source INTO backlog.yaml before the queue
-    is built. `backlog` is native (always present, no adapter). For every OTHER
-    name in the target config.yaml `sources:` list (e.g. foundry, logwatch, qa),
-    run $ORBIT_HOME/adapters/<name>_to_backlog.py if it exists; skip silently if
-    not. If `sources` is just `[backlog]`, no adapters run.
+    is built. `backlog` is native (always present, no adapter). Every OTHER name
+    in the target config.yaml `sources:` list is a SIGNAL adapter resolved as
+    `<name>_to_backlog.py` — target-local `.autopilot/adapters/` first (a repo
+    ships its own signal feeds), then the engine's `adapters/`.
+
+    The adapter CONTRACT: it runs with cwd = the target repo root and
+    AP_HOME/AP_STATE/ORBIT_HOME exported; it appends `status: proposed` tasks to
+    $AP_HOME/backlog.yaml itself, idempotently (see backlog_append.py), and must
+    never queue work or touch existing tasks. A configured source with no
+    adapter is reported loudly — a silently dead signal feed looks like "no
+    findings" forever.
     """
     cfg_path = AP_HOME / "config.yaml"
     try:
         cfg = yaml.safe_load(cfg_path.read_text()) or {}
     except OSError:
         return
-    sources = cfg.get("sources") or ["backlog"]
-    for name in sources:
+    env = dict(os.environ, AP_HOME=str(AP_HOME), AP_STATE=str(AP_STATE),
+               ORBIT_HOME=str(ORBIT_HOME))
+    for name in cfg.get("sources") or ["backlog"]:
         if name == "backlog":
             continue
-        adapter = ORBIT_HOME / "adapters" / f"{name}_to_backlog.py"
-        if adapter.exists():
-            print(f"folding source '{name}' → backlog.yaml ({adapter})")
-            subprocess.run([sys.executable, str(adapter)], cwd=str(ORBIT_HOME))
+        fname = f"{name}_to_backlog.py"
+        adapter = next((p for p in (AP_HOME / "adapters" / fname,
+                                    ORBIT_HOME / "adapters" / fname) if p.exists()), None)
+        if not adapter:
+            print(f"WARN: source '{name}' configured but no adapter found "
+                  f"(looked in {AP_HOME / 'adapters'} and {ORBIT_HOME / 'adapters'})")
+            continue
+        print(f"folding source '{name}' → backlog.yaml ({adapter})")
+        subprocess.run([sys.executable, str(adapter)], cwd=str(AP_HOME.parent), env=env)
 
 
 def main() -> int:

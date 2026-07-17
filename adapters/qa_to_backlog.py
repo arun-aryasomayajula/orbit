@@ -23,16 +23,25 @@ Usage:  python3 qa_to_backlog.py            # append new tasks
         python3 qa_to_backlog.py --dry-run
 """
 from __future__ import annotations
+import os
 import re
 import sys
 from pathlib import Path
 
 import yaml
 
-AP = Path(__file__).resolve().parent
-REPO = AP.parent.parent
-BACKLOG = REPO / "ops" / "autopilot" / "backlog.yaml"
-SEEN = AP / "SEEN.md"
+# Adapter contract (see backlog_to_tasks.run_source_adapters): AP_HOME/AP_STATE/
+# ORBIT_HOME are exported and cwd is the target repo root.
+if not os.environ.get("AP_HOME"):
+    sys.exit("AP_HOME unset — adapters run via backlog_to_tasks (or set AP_HOME=<repo>/.autopilot)")
+AP_HOME = Path(os.environ["AP_HOME"])
+ORBIT_HOME = Path(os.environ.get("ORBIT_HOME") or Path(__file__).resolve().parent.parent)
+sys.path.insert(0, str(ORBIT_HOME / "engine"))
+from backlog_append import append_raw_blocks
+
+REPO = AP_HOME.parent
+BACKLOG = AP_HOME / "backlog.yaml"
+SEEN = REPO / "ops" / "qa" / "SEEN.md"
 
 _SEV2PRI = {"critical": "high", "high": "high", "medium": "medium", "low": "low"}
 
@@ -116,10 +125,8 @@ def main() -> int:
         print("nothing new to add."); return 0
     if dry:
         print("(--dry-run: backlog.yaml NOT modified)"); return 0
-    with BACKLOG.open("a") as f:
-        f.write("\n  # ── auto-ingested from gstack QA / design review (browse) — triage before promoting ──")
-        for b in blocks:
-            f.write(b)
+    append_raw_blocks(BACKLOG, "auto-ingested from gstack QA / design review (browse) — triage before promoting",
+                      blocks)
     print(f"appended {len(added)} proposed UI task(s) to {BACKLOG}")
     return 0
 
