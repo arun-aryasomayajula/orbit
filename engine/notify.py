@@ -35,16 +35,18 @@ def notify_macos(title: str, message: str):
 
 def notify_slack(title: str, message: str, url: str = ""):
     # POST to the configured Slack incoming webhook, if any (best-effort).
+    # `hook` (the secret webhook) and `url` (the user-facing dashboard link)
+    # must never mix — embedding the hook in the message would publish it.
     try:
-        url = open(WEBHOOK_FILE).read().strip()
+        hook = open(WEBHOOK_FILE).read().strip()
     except OSError:
         return
-    if not url.startswith("https://hooks.slack.com/"):
+    if not hook.startswith("https://hooks.slack.com/"):
         return
     try:
         text = f"*{title}*\n{message}" + (f"\n<{url}|Open the dashboard>" if url else "")
         body = json.dumps({"text": text}).encode()
-        req = urllib.request.Request(url, data=body,
+        req = urllib.request.Request(hook, data=body,
                                      headers={"Content-Type": "application/json"})
         urllib.request.urlopen(req, timeout=10)
     except Exception:
