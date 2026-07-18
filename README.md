@@ -103,6 +103,9 @@ Full walkthrough with prerequisites, first-cycle verification, and troubleshooti
 | `sync` | re-copy the engine's command + agents into the target (after an engine `git pull`) |
 | `pause` / `resume` | kill switch (touch / remove the STOP file) |
 | `status` | queue + ledger + today's spend |
+| `digest` | every stalled human gate in one read (`--send` → Slack/macOS with a dashboard link) |
+| `learn` | mine the ledger into calibration candidates — approve on the dashboard, briefed from the next cycle |
+| `report` | per-category outcome rates: do the learned lessons actually bend the curves? |
 
 ## The dashboard
 

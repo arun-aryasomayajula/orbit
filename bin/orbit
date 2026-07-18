@@ -14,6 +14,8 @@
 #   orbit pause|resume <target>   touch/remove the STOP file
 #   orbit status <target>    queue + ledger + today's spend
 #   orbit digest <target>    every stalled human gate in one read (--send → Slack/macOS)
+#   orbit learn <target>     mine the ledger into calibration candidates (approve on the dashboard)
+#   orbit report <target>    per-category outcome rates — do the learned lessons bend the curves?
 set -euo pipefail
 ORBIT_HOME="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/.." && pwd)"
 verb="${1:-}"; target="${2:-.}"; target="$(cd "$target" && pwd)"
@@ -32,6 +34,8 @@ case "$verb" in
   pause)   touch "$target/.autopilot/state/STOP"; echo "paused (STOP present)" ;;
   resume)  rm -f "$target/.autopilot/state/STOP"; echo "resumed" ;;
   digest)  python3 "$ORBIT_HOME/engine/digest.py" "$target" "${@:3}" ;;
+  learn)   python3 "$ORBIT_HOME/engine/calibration_miner.py" "$target" "${@:3}" ;;
+  report)  python3 "$ORBIT_HOME/engine/calibration_miner.py" "$target" --report ;;
   status)  python3 "$ORBIT_HOME/engine/ledger.py" summary 2>/dev/null || echo "(no ledger yet)";
            echo "today spend: \$$(cat "$target/.autopilot/state/.spend-$(date +%F)" 2>/dev/null || echo 0)" ;;
   *) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;

@@ -19,8 +19,9 @@ If you do nothing, it only works what was already approved.
 | **Launch pad** (Queue) | Approved tasks in pick order | Reorder / Park |
 | **Deep space** | Proposals — inert until you approve | "Queue it" or Park |
 | **Epics strip** (top of Deep space) | Big work being planned | Plan → read the spec → Approve → Decompose, then queue the children |
+| **Calibration strip** | Lessons mined from this repo's own merges/rejections/reverts (`orbit learn`) | Approve → briefed into agents from the next cycle; Reject with a reason |
 | **Inbox → Escalations** | Robot stopped; needs a human call | Follow the 👉 recommendation; Answer or Park |
-| **Inbox → Ships awaiting review** | Finished branches | Review packet → Merge / Reject |
+| **Inbox → Ships awaiting review** | Finished branches | Review packet ("Decide fast" header first) → Merge / Reject (a reason is required — it teaches the loop) |
 | **Ships** | Shipped / merged / rejected history | Reference |
 | **Graveyard orbit** | Parked tasks | Bring back anytime |
 

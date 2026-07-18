@@ -1069,6 +1069,69 @@ def do_epic_action(tid: str, action: str) -> str:
     return f"{who} launched for {tid} — the card's stage updates as it works (log: logs/{log.name})"
 
 
+def load_calibration_candidates() -> list:
+    """Pending calibration-miner candidates for the dashboard's strip."""
+    out = []
+    d = AP_HOME / "goldens" / "candidates"
+    if d.is_dir():
+        for p in sorted(d.glob("*.json")):
+            try:
+                c = json.loads(p.read_text())
+            except (OSError, ValueError):
+                continue
+            out.append({k: c.get(k) for k in ("id", "kind", "task_id", "category",
+                                              "title", "card_line", "evidence", "mined_at")})
+    return out
+
+
+def do_calibration_action(cid: str, action: str, reason: str = "") -> str:
+    """Approve/reject a mined calibration candidate — the ONLY path by which a
+    learned lesson starts being briefed into agents (approve appends its card
+    line to goldens/LEARNED.md; the cycle reads that alongside the engine's
+    calibration). Reject requires a reason and archives it — miner input."""
+    if not re.match(r"^[A-Za-z0-9._-]{1,120}$", cid):
+        return "invalid candidate id"
+    gold = AP_HOME / "goldens"
+    src = gold / "candidates" / f"{cid}.json"
+    if not src.exists():
+        return f"no pending candidate '{cid}'"
+    try:
+        c = json.loads(src.read_text())
+    except (OSError, ValueError):
+        return f"candidate '{cid}' is unreadable"
+    if action == "approve":
+        learned = gold / "LEARNED.md"
+        cat = (c.get("category") or "").strip() or "always"
+        text = learned.read_text() if learned.exists() else (
+            "# Learned calibration — THIS repo's graded lessons, mined from its own ledger\n"
+            "\n"
+            "Approved on the dashboard's Calibration strip; the cycle briefs the `always`\n"
+            "section plus the task category's section ALONGSIDE the engine's calibration.\n"
+            "Every line cites the ledger evidence it came from (goldens/approved/). Prune\n"
+            "lines that stop earning their keep — `orbit report` shows whether the\n"
+            "rejected/reverted/escalated curves actually bend.\n")
+        marker = f"## {cat}"
+        lines = text.splitlines()
+        if marker in lines:
+            lines.insert(lines.index(marker) + 1, f"- {c.get('card_line') or ''}")
+            text = "\n".join(lines) + "\n"
+        else:
+            text = text.rstrip("\n") + f"\n\n{marker}\n- {c.get('card_line') or ''}\n"
+        learned.write_text(text)
+        (gold / "approved").mkdir(parents=True, exist_ok=True)
+        src.rename(gold / "approved" / src.name)
+        return f"Approved {cid} → goldens/LEARNED.md (briefed from the next cycle)."
+    if action == "reject":
+        if not reason.strip():
+            return "A rejection reason is required — it's archived with the candidate and feeds the miner."
+        c["rejected_reason"] = reason
+        (gold / "rejected").mkdir(parents=True, exist_ok=True)
+        (gold / "rejected" / src.name).write_text(json.dumps(c, indent=2) + "\n")
+        src.unlink()
+        return f"Rejected {cid} (archived with reason)."
+    return f"unknown calibration action '{action}'"
+
+
 def do_delete_branch(branch: str) -> str:
     # Delete a single remote branch. HARD guardrail: only <PREFIX>/* refs — named
     # / team branches can never be deleted from this UI. Per-branch delete is
@@ -1586,6 +1649,7 @@ def build_state() -> dict:
                "funnel": funnel,
                "feature_builds": feature_builds_annotated(),
                "epics": epics,
+               "calibration": load_calibration_candidates(),
                "spend_history": spend_history(),
                "done": done, "escalated": escalated, "skips": sorted(skips),
                "runlog": runlog,
@@ -2257,6 +2321,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not tid:
                     self._send(b'{"ok":false,"msg":"missing epic id"}', "application/json", 400); return
                 msg = do_epic_action(tid, (data.get("action", [""])[0]).strip())
+            elif path == "/calibration-action":
+                if not tid:
+                    self._send(b'{"ok":false,"msg":"missing candidate id"}', "application/json", 400); return
+                msg = do_calibration_action(tid, (data.get("action", [""])[0]).strip(),
+                                            (data.get("reason", [""])[0]).strip())
             elif path == "/merge-to-loop":
                 branch = (data.get("branch", [""])[0]).strip()
                 if not re.match(r"^[A-Za-z0-9._/-]{1,120}$", branch):

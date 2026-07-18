@@ -574,6 +574,7 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
   <!-- ── DEEP SPACE (proposals — Gmail-style reader) ── -->
   <section class="view" id="view-deepspace">
     <div id="epicsBand"></div>
+    <div id="calibrationBand"></div>
     <div class="chips" id="filterbar"></div>
     <div class="ds-wrap">
       <div class="ds-list" id="dsList"></div>
@@ -1039,6 +1040,38 @@ function renderEpics(){
   band.innerHTML=`<div class=band><div class=bandhead><h3>Epics — planning tier</h3>
     <span class=bandsum>too big for one commit: Plan → review the spec → Approve → Decompose → queue the children below</span></div>
     <div class=grid>${es.map(epicCard).join('')}</div></div>`;
+}
+
+/* ── calibration strip: the goldens learning loop's human gate ───────────── */
+function calKindBadge(k){
+  if(k==='positive')return badge('strong exemplar','ok');
+  if(k==='amended')return badge('review-delta','warn');
+  if(k==='escalation-memory')return badge('escalation memory','acc');
+  return badge('anti-pattern','stop');
+}
+function calCard(c){
+  const ev=(c.evidence&&c.evidence.length)?`<details class=why><summary>evidence (${c.evidence.length})</summary><div style="white-space:pre-wrap;font-size:12px;opacity:.85">${esc(c.evidence.join('\n'))}</div></details>`:'';
+  return `<div class=card><div class="card-h"><span class=tid>${esc(c.task_id)}</span> ${calKindBadge(c.kind)} ${c.category?badge(c.category,'ok'):''}</div>
+    <div class=title>${esc(c.title||c.id)}</div>
+    <div class=meta style="white-space:pre-wrap">${esc(c.card_line||'')}</div>${ev}
+    <div class=btns>
+      <button class="btn btn-go btn-mini" title="append this lesson to goldens/LEARNED.md — briefed into every agent from the next cycle" onclick="if(confirm('Approve this lesson? It is briefed into the maker/checker/verifier from the next cycle.'))post('/calibration-action',{id:'${esc(c.id)}',action:'approve'})">Approve lesson</button>
+      <button class="btn btn-stop btn-mini" onclick="calReject('${esc(c.id)}')">Reject</button>
+    </div></div>`;
+}
+function calReject(id){
+  const why=prompt('Why is this lesson wrong or not worth briefing? (archived with the candidate — miner input)');
+  if(why===null)return;
+  if(!why.trim()){toast('A reason is required.');return;}
+  post('/calibration-action',{id:id,action:'reject',reason:why.trim()});
+}
+function renderCalibration(){
+  const band=document.getElementById('calibrationBand');if(!band)return;
+  const cs=(S&&S.calibration)||[];
+  if(!cs.length){band.innerHTML='';return;}
+  band.innerHTML=`<div class=band><div class=bandhead><h3>Calibration — lessons mined from this repo's own ships</h3>
+    <span class=bandsum>nothing is briefed into agents until you approve it · approve → goldens/LEARNED.md · reject archives with your reason</span></div>
+    <div class=grid>${cs.map(calCard).join('')}</div></div>`;
 }
 
 /* ── deep space view (Gmail-style: row list + reading pane) ──────────────── */
@@ -1507,7 +1540,7 @@ function renderViews(){
   // Preserve column scroll positions across rebuilds.
   const colsEl=document.getElementById('queueCols');
   const scrolls=[...colsEl.querySelectorAll('.col')].map(c=>c.scrollTop);
-  renderStats();renderInboxAll();renderFilters();renderEpics();renderDeepspace();renderQueue();renderShips();renderBranches();renderAgents();
+  renderStats();renderInboxAll();renderFilters();renderEpics();renderCalibration();renderDeepspace();renderQueue();renderShips();renderBranches();renderAgents();
   renderKpis();renderSpend();renderHistory();renderFunnel();renderRunlog();
   [...colsEl.querySelectorAll('.col')].forEach((c,i)=>{if(scrolls[i])c.scrollTop=scrolls[i];});
 }
