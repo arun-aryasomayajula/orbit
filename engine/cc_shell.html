@@ -772,7 +772,7 @@ function card(t,kind){
       btns+=`<button class="btn btn-go btn-mini" title="record that this ship landed" onclick="post('/mark',{id:'${esc(t.id)}',outcome:'merged'})">Mark merged</button>
         <button class="btn btn-stop btn-mini" onclick="rejectTask('${esc(t.id)}')">Reject</button>`;
     }
-    if(t.merged)btns+=`<button class="btn btn-vio btn-mini" onclick="if(confirm('Revert ${esc(t.id)} on the loop branch and push the revert?'))post('/rollback',{id:'${esc(t.id)}'})">Revert</button>`;
+    if(t.merged)btns+=`<button class="btn btn-vio btn-mini" onclick="revertTask('${esc(t.id)}')">Revert</button>`;
     timer=`<div class="meta">${ref}${when}</div>`;
   }
   const pri=(kind==='next'||kind==='board')?badge((t.priority||'medium')+' priority',t.priority==='high'?'warn':'acc'):'';
@@ -1304,11 +1304,24 @@ function rejectTask(id){
   document.getElementById('m3go').className='btn btn-stop btn-mini';
   document.getElementById('modal3').style.display='flex'; ta.focus();
 }
+function revertTask(id){
+  const t=findTask(id); m3={id:id,mode:'revert'};
+  document.getElementById('m3title').textContent='Revert this merged ship';
+  document.getElementById('m3ctx').innerHTML=`<b>${esc(t.title)}</b><br>reverts ${esc((t.sha||'').slice(0,8))} on the base branch and pushes the revert`;
+  const ta=document.getElementById('m3text');
+  ta.value=''; ta.placeholder='Why is it being reverted? The reason is recorded on the task and tunes what gets auto-fed.';
+  document.getElementById('m3go').textContent='Revert ship';
+  document.getElementById('m3go').className='btn btn-vio btn-mini';
+  document.getElementById('modal3').style.display='flex'; ta.focus();
+}
 function submitAction(){
   const txt=document.getElementById('m3text').value.trim();
   if(m3.mode==='answer'){ if(!txt){toast('Write an answer first — it becomes part of the contract.');return;}
     post('/answer',{id:m3.id,text:txt}); }
-  else post('/mark',{id:m3.id,outcome:'rejected',note:txt});
+  else if(m3.mode==='revert'){ if(!txt){toast('Give a reason — it is recorded on the task and mined to tune the loop.');return;}
+    post('/rollback',{id:m3.id,note:txt}); }
+  else{ if(!txt){toast('Give a reason — it is recorded on the task and mined to tune the loop.');return;}
+    post('/mark',{id:m3.id,outcome:'rejected',note:txt}); }
   closeModal3();
 }
 function closeModal3(){document.getElementById('modal3').style.display='none';}

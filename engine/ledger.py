@@ -20,6 +20,7 @@ Usage:
   ledger.py pr <id> <url>               # record the PR the wrapper opened for the ship
   ledger.py attach-patch <id> <path>    # record the wrapper's captured patch (backup)
   ledger.py mark <id> merged|rejected [note]  # review outcome (feeds merge-rate metrics)
+  ledger.py reverted <id> [note]        # record a post-merge revert + the operator's why
   ledger.py state <id>                  # print the entry's state ('' if absent)
   ledger.py clear <id>                  # remove an entry so the picker can re-pick it (re-promote)
   ledger.py worked-ids                  # print every id already worked (one per line)
@@ -150,6 +151,19 @@ def cmd_mark(tid, outcome, note=""):
     print(f"task {tid} → {outcome}")
 
 
+def cmd_reverted(tid, note=""):
+    # Record that the operator reverted this ship after merge. State is kept
+    # (the original sha stays an ancestor of base, so `merged` categorization
+    # still holds) — this adds the WHY, which the calibration miner feeds on.
+    data = _load()
+    e = _entry(data, tid)
+    e.update(reverted_at=_now(), updated_at=_now())
+    if note:
+        e["revert_note"] = note
+    _save(data)
+    print(f"task {tid} → reverted recorded")
+
+
 def cmd_state(tid):
     # Print the entry's state (empty line if the id was never worked).
     print(_load()["entries"].get(str(tid), {}).get("state", ""))
@@ -216,6 +230,8 @@ def main(argv):
             cmd_attach_patch(rest[0], rest[1])
         elif cmd == "mark":
             cmd_mark(rest[0], rest[1], rest[2] if len(rest) > 2 else "")
+        elif cmd == "reverted":
+            cmd_reverted(rest[0], rest[1] if len(rest) > 1 else "")
         elif cmd == "state":
             cmd_state(rest[0])
         elif cmd == "clear":

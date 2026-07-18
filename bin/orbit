@@ -13,6 +13,7 @@
 #                            (run after `git -C <engine> pull` so engine updates reach the running agent)
 #   orbit pause|resume <target>   touch/remove the STOP file
 #   orbit status <target>    queue + ledger + today's spend
+#   orbit digest <target>    every stalled human gate in one read (--send → Slack/macOS)
 set -euo pipefail
 ORBIT_HOME="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/.." && pwd)"
 verb="${1:-}"; target="${2:-.}"; target="$(cd "$target" && pwd)"
@@ -30,6 +31,7 @@ case "$verb" in
            echo "synced $(ls "$ORBIT_HOME/skills/"*.md | wc -l | tr -d ' ') commands + $(ls "$ORBIT_HOME/agents/"*.md | wc -l | tr -d ' ') agents from $ORBIT_HOME → $target/.claude/ (next cycle uses them)" ;;
   pause)   touch "$target/.autopilot/state/STOP"; echo "paused (STOP present)" ;;
   resume)  rm -f "$target/.autopilot/state/STOP"; echo "resumed" ;;
+  digest)  python3 "$ORBIT_HOME/engine/digest.py" "$target" "${@:3}" ;;
   status)  python3 "$ORBIT_HOME/engine/ledger.py" summary 2>/dev/null || echo "(no ledger yet)";
            echo "today spend: \$$(cat "$target/.autopilot/state/.spend-$(date +%F)" 2>/dev/null || echo 0)" ;;
   *) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;

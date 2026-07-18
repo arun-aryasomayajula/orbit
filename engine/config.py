@@ -17,6 +17,7 @@ DEFAULTS = {
     "sources": ["backlog"], "branch_prefix": "autopilot",
     "commit_trailer": "Co-Authored-By: Claude <noreply@anthropic.com>",
     "pull_requests": "off",
+    "dashboard_url": "http://127.0.0.1:8787",
 }
 
 def load(target):
@@ -48,6 +49,7 @@ def shellenv(target):
         f"export ORBIT_CYCLE_TIMEOUT={sh(cfg['cycle_timeout_seconds'])}",
         f"export ORBIT_BRANCH_PREFIX={sh(cfg['branch_prefix'])}",
         f"export ORBIT_PULL_REQUESTS={sh(cfg['pull_requests'])}",
+        f"export ORBIT_DASHBOARD_URL={sh(cfg['dashboard_url'])}",
         f"export AP_HOME={sh(ap_home)}",
         f"export AP_STATE={sh(os.path.join(ap_home, 'state'))}",
     ]

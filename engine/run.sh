@@ -50,7 +50,8 @@ mkdir -p "$LOGDIR" "$DIFFDIR" "$STATE/reviews"
 ts(){ date '+%Y-%m-%d %H:%M:%S'; }
 log(){ echo "[$(ts)] $*" | tee -a "$LOGDIR/orbit.log"; }
 today(){ date '+%Y-%m-%d'; }
-notify(){ python3 "$ENGINE/notify.py" "$1" "$2" >/dev/null 2>&1 || true; }
+DASH="${ORBIT_DASHBOARD_URL:-http://127.0.0.1:8787}"
+notify(){ python3 "$ENGINE/notify.py" "$1" "$2" "${3:-}" >/dev/null 2>&1 || true; }
 
 # --- preflight: are this repo's gate dependencies up? (config gates[].needs) ---
 service_up() {
@@ -164,7 +165,7 @@ raise_pr() {
   if [ -n "$url" ]; then
     log "opened PR $url (merge stays manual)"
     [ -n "$tid" ] && { python3 "$ENGINE/ledger.py" pr "$tid" "$url" >>"$LOGDIR/orbit.log" 2>&1 || true; }
-    notify "🔀 Orbit PR" "task ${tid:-?} → $url"
+    notify "🔀 Orbit PR" "task ${tid:-?} → $url" "$url"
   else
     log "WARN: gh pr create failed for $branch (auth? PR already open?) — branch is pushed; open one manually"
   fi
@@ -239,7 +240,7 @@ one_iteration() {
       [ -n "$tid" ] && { python3 "$ENGINE/ledger.py" pushed "$tid" "origin/$branch" 2>/dev/null || true
         python3 "$ENGINE/review_packet.py" "$tid" "$WT" "$branch" "$ORBIT_BASE_BRANCH" >>"$LOGDIR/orbit.log" 2>&1 || true; }
       raise_pr "$tid" "$branch"
-      notify "🔧 Orbit shipped" "task ${tid:-?} → $branch"
+      notify "🔧 Orbit shipped" "task ${tid:-?} → $branch — review packet is ready; merge or reject" "$DASH"
     else
       log "WARN: push failed twice — patch kept: ${patch:-none}"
     fi
@@ -247,6 +248,10 @@ one_iteration() {
     log "cycle produced no commit (no-op / escalation)."
     if [ -n "$tid" ] && ! python3 "$ENGINE/ledger.py" worked-ids 2>/dev/null | tr ' ' '\n' | grep -qx "$tid"; then
       python3 "$ENGINE/ledger.py" escalate "$tid" "wrapper: no commit (gate fail / too large / incomplete)" >>"$LOGDIR/orbit.log" 2>&1 || true
+    fi
+    # An escalated cycle is a stalled human gate — say so where the human is.
+    if [ -n "$tid" ] && [ "$(python3 "$ENGINE/ledger.py" state "$tid" 2>/dev/null)" = "escalated" ]; then
+      notify "🙋 Orbit needs you" "task $tid escalated — answer it to unblock the loop" "$DASH"
     fi
   fi
   rm -f "$marker" "$STATE/.cycle-candidate" 2>/dev/null || true

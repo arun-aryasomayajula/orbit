@@ -67,6 +67,48 @@ def _ledger_entry(tid: str) -> dict:
         return {}
 
 
+# Paths whose change means the diff touched a surface Orbit normally escalates
+# (auth/payments/migrations/secrets/CI). Flagged in the decision header so the
+# reviewer's eye lands on the riskiest file first, never as a merge blocker.
+SENSITIVE_RE = re.compile(
+    r"auth|login|session|password|payment|billing|invoice|migrat|secret|credential"
+    r"|\.env|\.github/workflows|\.gitlab-ci|Jenkinsfile", re.IGNORECASE)
+
+
+def _numstat(gitdir: str, sha: str) -> list[tuple[int, int, str]]:
+    """[(adds, dels, path)] for the ship commit; binary files count as 0."""
+    rows = []
+    for ln in _git(gitdir, "show", "--numstat", "--format=", sha).splitlines():
+        parts = ln.split("\t")
+        if len(parts) == 3:
+            a, d, p = parts
+            rows.append((int(a) if a.isdigit() else 0, int(d) if d.isdigit() else 0, p))
+    return rows
+
+
+def decision_header(task: dict, led: dict, files: list[tuple[int, int, str]], sha: str) -> list[str]:
+    """The decide-in-a-minute block: scope, risk, where to look, how to undo."""
+    adds, dels = sum(f[0] for f in files), sum(f[1] for f in files)
+    sensitive = [p for _, _, p in files if SENSITIVE_RE.search(p)]
+    top = sorted(files, key=lambda f: f[0] + f[1], reverse=True)[:3]
+    lines = [
+        "## Decide fast",
+        "",
+        f"- **Scope**: {len(files)} file(s), +{adds} −{dels} · "
+        f"category `{task.get('category') or '?'}` · priority {task.get('priority') or '?'}",
+        ("- **Sensitive surfaces**: ⚠ " + ", ".join(f"`{p}`" for p in sensitive[:5])
+         if sensitive else "- **Sensitive surfaces**: none touched"),
+    ]
+    if top:
+        lines.append("- **Look here first**: " +
+                     ", ".join(f"`{p}` (+{a} −{d})" for a, d, p in top))
+    undo = f"`git revert {sha[:10]}`"
+    if led.get("patch"):
+        undo += f" · backup patch: `{led['patch']}`"
+    lines.append(f"- **Undo after merge**: {undo}")
+    return lines + [""]
+
+
 def build(tid: str, gitdir: str, branch: str, dest: str) -> Path:
     REVIEWS.mkdir(parents=True, exist_ok=True)
     task = _load_task(tid)
@@ -76,6 +118,7 @@ def build(tid: str, gitdir: str, branch: str, dest: str) -> Path:
     subject = _git(gitdir, "log", "-1", "--format=%s", sha).strip()
     body = _git(gitdir, "log", "-1", "--format=%b", sha).strip()
     stat = _git(gitdir, "show", "--stat", "--format=", sha).strip()
+    files = _numstat(gitdir, sha)
 
     notes_file = REVIEWS / f"task-{tid}-notes.md"
     notes = notes_file.read_text().strip() if notes_file.exists() else "(the cycle left no review notes)"
@@ -92,6 +135,7 @@ def build(tid: str, gitdir: str, branch: str, dest: str) -> Path:
         *( [f"- **Open a PR**: {pr_url}"] if pr_url else [] ),
         f"- **Backup patch**: `{led.get('patch') or '(none recorded)'}`",
         "",
+        *decision_header(task, led, files, sha),
         "## The contract (what was asked)",
         "",
         "```",

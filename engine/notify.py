@@ -4,7 +4,9 @@
 macOS notification (osascript) always; Slack too if a webhook is configured.
 Never raises, never blocks the loop: every path is wrapped and short-timeout.
 
-Usage:  notify.py "<title>" "<message>"
+Usage:  notify.py "<title>" "<message>" ["<url>"]
+        The optional url (usually the dashboard) is appended as a Slack link —
+        the human gate should be one tap away from every event.
 Config: optional Slack incoming-webhook URL in $AP_HOME/.slack_webhook
         (one line, git-ignored). No webhook file → macOS-only.
 """
@@ -31,7 +33,7 @@ def notify_macos(title: str, message: str):
         pass
 
 
-def notify_slack(title: str, message: str):
+def notify_slack(title: str, message: str, url: str = ""):
     # POST to the configured Slack incoming webhook, if any (best-effort).
     try:
         url = open(WEBHOOK_FILE).read().strip()
@@ -40,7 +42,8 @@ def notify_slack(title: str, message: str):
     if not url.startswith("https://hooks.slack.com/"):
         return
     try:
-        body = json.dumps({"text": f"*{title}*\n{message}"}).encode()
+        text = f"*{title}*\n{message}" + (f"\n<{url}|Open the dashboard>" if url else "")
+        body = json.dumps({"text": text}).encode()
         req = urllib.request.Request(url, data=body,
                                      headers={"Content-Type": "application/json"})
         urllib.request.urlopen(req, timeout=10)
@@ -48,14 +51,14 @@ def notify_slack(title: str, message: str):
         pass
 
 
-def send(title: str, message: str):
+def send(title: str, message: str, url: str = ""):
     # Fan out to every configured channel; failures are silent by design.
     notify_macos(title, message)
-    notify_slack(title, message)
+    notify_slack(title, message, url)
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("usage: notify.py <title> <message>", file=sys.stderr)
+        print("usage: notify.py <title> <message> [url]", file=sys.stderr)
         sys.exit(2)
-    send(sys.argv[1], sys.argv[2])
+    send(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "")

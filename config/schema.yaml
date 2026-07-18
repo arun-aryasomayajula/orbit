@@ -16,6 +16,11 @@ interval_seconds: 180        # sleep between cycles
 max_tasks_per_day: 12        # hard daily cap (failed cycles count too)
 cycle_timeout_seconds: 3600  # watchdog kill per cycle
 
+# --- where the human gates live ------------------------------------------------
+dashboard_url: "http://127.0.0.1:8787"   # linked from Slack notifications + the digest, so every
+                                         # merge/escalation decision is one tap away. Change it if the
+                                         # dashboard is reachable at another address (tailscale etc.).
+
 # --- the spec the cycle re-reads each run (optional) --------------------------
 spec: null                   # e.g. "docs/VISION.md" — a standing spec the orchestrator rereads so it
                              # doesn't drift. null = no standing spec (task contracts alone govern).

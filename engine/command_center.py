@@ -569,11 +569,13 @@ def do_autofeed(on: bool) -> str:
     return "Auto-feed OFF — the loop only works what you promote."
 
 
-def do_rollback(tid: str) -> str:
+def do_rollback(tid: str, note: str = "") -> str:
     led = load_ledger().get(tid, {})
     sha = led.get("sha")
     if not sha:
         return f"No recorded commit sha for task {tid} — nothing to roll back."
+    if not note.strip():
+        return "A revert reason is required — it's recorded on the task and mined to tune the loop."
     cur = subprocess.run(["git", "-C", str(REPO), "rev-parse", "--abbrev-ref", "HEAD"],
                          capture_output=True, text=True).stdout.strip()
     dirty = subprocess.run(["git", "-C", str(REPO), "status", "--porcelain", "-uno"],
@@ -591,6 +593,8 @@ def do_rollback(tid: str) -> str:
                            f"HEAD:refs/heads/{BASE_BRANCH}"], capture_output=True, text=True)
     if push.returncode != 0:
         return f"Reverted {sha} locally but PUSH failed (non-ff?):\n{push.stderr.strip()}"
+    subprocess.run(["python3", str(ENGINE / "ledger.py"), "reverted", tid, note],
+                   capture_output=True, text=True)
     return f"Rolled back task {tid} (reverted {sha[:8]}) and pushed to origin/{BASE_BRANCH}."
 
 
@@ -750,10 +754,14 @@ def merged_map() -> dict:
 
 def do_mark(tid: str, outcome: str, note: str = "") -> str:
     """Record the human review outcome (merged / rejected) in the ledger — the
-    raw data behind merge-rate-per-source. Reject keeps the branch on origin
+    raw data behind merge-rate-per-source. A reject REQUIRES a reason: it is
+    the loop's only ground-truth on why a ship was wrong (the calibration
+    miner learns from it). Reject keeps the branch on origin
     (delete it manually if you want); the id stays worked so it isn't re-picked."""
     if outcome not in ("merged", "rejected"):
         return f"Invalid outcome '{outcome}'."
+    if outcome == "rejected" and not note.strip():
+        return "A reject reason is required — it's recorded on the task and mined to tune the loop."
     r = subprocess.run(["python3", str(ENGINE / "ledger.py"), "mark", tid, outcome, note],
                        capture_output=True, text=True)
     _MERGED_CACHE.update(t=0.0)   # re-check ancestry on the next poll
@@ -2225,7 +2233,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/runnow":
                 msg = do_runnow(tid)
             elif path == "/rollback":
-                msg = do_rollback(tid)
+                msg = do_rollback(tid, (data.get("note", [""])[0]).strip())
             elif path == "/answer":
                 msg = do_answer(tid, (data.get("text", [""])[0]).strip())
             elif path == "/mark":
