@@ -92,3 +92,13 @@ or touches existing tasks. Shipped examples to copy from: `foundry` (maturity ta
 `logwatch` (prod log findings), `qa` (UI-test findings) — each carries coupling to its
 specific tool. This is the operate-phase feedback loop: production signal → proposed task
 → human triage → fix ships.
+
+`jira` is the shipped intake-side source: label a ticket `orbit-ready` and the adapter
+exports it, has an enrichment agent survey the code and draft a gated task contract
+(evidence + gradable acceptance criteria), and imports it — or comments specific
+questions back on the ticket when it's too thin to build (a human's reply retriggers
+enrichment). Ships, merges, and rejections are commented back on the ticket, all
+engine-side. Configure the `jira:` block (see `config/schema.yaml`), add `jira` to
+`sources:`, and put credentials in `state/.jira_token` — agents never see the token.
+Exception to "never queues work": with `jira.auto_queue: true` a gate-passing import
+lands queued — the ready-label was the human queue act. Merge stays human always.

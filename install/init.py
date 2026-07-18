@@ -98,6 +98,11 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
     gi = os.path.join(AP, "state", ".gitignore")
     if not os.path.exists(gi):
         open(gi, "w").write("# Orbit runtime state — do not commit\n*\n!.gitignore\n")
+    # profile-level gitignore: secrets that may live beside config.yaml (the
+    # documented fallback locations for notify's webhook and the jira token)
+    api = os.path.join(AP, ".gitignore")
+    if not os.path.exists(api):
+        open(api, "w").write("# Orbit secrets — never commit\n.jira_token\n.slack_webhook\n")
     # copy the engine's commands into the target's .claude/commands so the headless
     # calls resolve (`claude -p /orbit-cycle`, `/orbit-intake`, ...)
     cmd_dir = os.path.join(TARGET, ".claude", "commands")

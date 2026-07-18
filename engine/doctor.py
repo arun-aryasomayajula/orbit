@@ -57,6 +57,21 @@ if cfg.get("pull_requests") == "github":
         authed = subprocess.run(["gh", "auth", "status"], capture_output=True).returncode == 0
         check("pull_requests=github: gh authenticated", authed, "" if authed else "`gh auth status` failed — run `gh auth login`")
 
+# 2c. jira source (optional): config block ↔ sources wiring + token present
+jcfg = cfg.get("jira")
+sources = cfg.get("sources") or []
+if jcfg:
+    check("jira: block has base_url + project", bool(jcfg.get("base_url") and jcfg.get("project")),
+          "" if jcfg.get("base_url") and jcfg.get("project") else "both are required (see config/schema.yaml)")
+    check("jira: listed in sources", "jira" in sources,
+          "" if "jira" in sources else "add `jira` to sources: or the adapter never runs")
+    tok = next((p for p in (os.path.join(AP, "state", ".jira_token"), os.path.join(AP, ".jira_token"))
+                if os.path.exists(p)), None)
+    check("jira: token file present", bool(tok),
+          tok or f"put credentials in {os.path.join(AP, 'state', '.jira_token')} (basic: email:api_token · bearer: PAT)")
+elif "jira" in sources:
+    check("jira in sources has a jira: config block", False, "add a jira: block (see config/schema.yaml)")
+
 # 3. router — target's .autopilot/router.yaml overrides the engine default at router/router.yaml
 router_path = find("router.yaml") or (
     os.path.join(ORBIT_HOME, "router", "router.yaml")

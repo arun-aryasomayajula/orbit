@@ -61,6 +61,25 @@ env:
 branch_prefix: "autopilot"   # ships push to origin/<branch_prefix>/task-<id>
 commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
 
+# --- jira as a task source (optional, wrapper-only credentials) ----------------
+# Requires `jira` in sources: above. A human applying `ready_label` to a ticket is
+# the triage act: the adapter exports the ticket, an enrichment agent surveys the
+# code and drafts a gated task contract (or comments specific questions back on the
+# ticket when it's too thin to build). Ships/merges/rejections are commented back.
+# Credentials live in $AP_STATE/.jira_token (auto-gitignored) — basic: `email:api_token`
+# (cloud), bearer: a PAT (server/DC). Agents never see the token; all REST is engine-side.
+# jira:
+#   base_url: "https://<org>.atlassian.net"
+#   project: "CDP"                 # issues considered (JQL project =)
+#   ready_label: "orbit-ready"     # human sets this label = human triage act
+#   auth: "basic"                  # "basic" | "bearer"
+#   auto_queue: false              # true → enriched, gate-passing imports land queued/allow
+#                                  # (the label WAS the queue act). Merge stays human always.
+#   writeback: true                # comment PR url / merged / rejected back on the ticket
+#   on_merge_transition: null      # e.g. "Done" — transition applied after a merge comment
+#   max_imports_per_poll: 3        # enrichment is a model call; bound it per poll
+#   enrich_timeout_seconds: 900
+
 # --- pull requests (optional, wrapper-only) ------------------------------------
 # "github" → after pushing a ship, the WRAPPER (never the agent) runs `gh pr create`
 # against base_branch with the review packet as the PR body, and records the URL in
