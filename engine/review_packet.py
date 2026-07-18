@@ -122,6 +122,8 @@ def build(tid: str, gitdir: str, branch: str, dest: str) -> Path:
 
     notes_file = REVIEWS / f"task-{tid}-notes.md"
     notes = notes_file.read_text().strip() if notes_file.exists() else "(the cycle left no review notes)"
+    runtime_file = REVIEWS / f"task-{tid}-runtime.md"
+    runtime = runtime_file.read_text().strip() if runtime_file.exists() else ""
 
     pr_url = (f"https://bitbucket.org/{BB_REPO}/pull-requests/new"
               f"?source={branch}&dest={dest}") if BB_REPO else ""
@@ -155,6 +157,7 @@ def build(tid: str, gitdir: str, branch: str, dest: str) -> Path:
         "",
         notes,
         "",
+        *( ["## Runtime evidence (observed in the running product)", "", runtime, ""] if runtime else [] ),
         "## Reviewer checklist",
         "",
         "- [ ] Diff matches the contract (no scope creep, nothing missing)",

@@ -66,6 +66,21 @@ env:
 branch_prefix: "autopilot"   # ships push to origin/<branch_prefix>/task-<id>
 commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
 
+# --- runtime verification (optional): prove ships in the RUNNING product -------
+# After the cycle commits and BEFORE the wrapper pushes, a runtime agent launches
+# (or attaches to) the app and drives the exact flow the acceptance criteria name;
+# its evidence lands in the review packet. Only listed categories are checked.
+# `evidence` never blocks; `required` escalates instead of shipping when observed
+# behaviour CONTRADICTS a criterion (unable-to-run is never a failure). No block
+# → no runtime checks (default).
+# runtime_check:
+#   launch: "npm run dev"            # optional — how the agent starts the app
+#   url: "http://localhost:3000"     # optional — where to reach it
+#   timeout_seconds: 900
+#   categories:
+#     frontend: required
+#     feature: evidence
+
 # --- jira as a task source (optional, wrapper-only credentials) ----------------
 # Requires `jira` in sources: above. A human applying `ready_label` to a ticket is
 # the triage act: the adapter exports the ticket, an enrichment agent surveys the
