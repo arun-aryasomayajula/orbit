@@ -767,6 +767,18 @@ def do_mark(tid: str, outcome: str, note: str = "") -> str:
     _MERGED_CACHE.update(t=0.0)   # re-check ancestry on the next poll
     if r.returncode != 0:
         return f"ledger mark failed: {r.stderr.strip()}"
+    if outcome == "merged":
+        # Merge marker (best-effort): the anchor signal adapters use to attribute
+        # a production regression to the ship that likely caused it.
+        try:
+            led = load_ledger().get(tid, {})
+            marker = {"task_id": tid, "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                      "sha": led.get("sha") or "", "branch": led.get("branch") or "",
+                      "pr_url": led.get("pr_url") or "", "patch": led.get("patch") or ""}
+            with (AP_STATE / "merge_markers.jsonl").open("a") as f:
+                f.write(json.dumps(marker) + "\n")
+        except OSError:
+            pass
     extra = ("" if outcome == "merged" else
              f" Branch stays on origin — delete with: git push origin :refs/heads/<branch>.")
     return f"Task {tid} marked {outcome}.{extra}"

@@ -14,9 +14,11 @@ Usage:  python3 logwatch_to_backlog.py            # append new bug tasks
         python3 logwatch_to_backlog.py --dry-run
 """
 from __future__ import annotations
+import json
 import os
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import yaml
@@ -30,9 +32,13 @@ ORBIT_HOME = Path(os.environ.get("ORBIT_HOME") or Path(__file__).resolve().paren
 sys.path.insert(0, str(ORBIT_HOME / "engine"))
 from backlog_append import append_raw_blocks
 
+AP_STATE = Path(os.environ.get("AP_STATE") or AP_HOME / "state")
 REPO = AP_HOME.parent
 BACKLOG = AP_HOME / "backlog.yaml"
 SEEN = REPO / "ops" / "logwatch" / "SEEN.md"
+MARKERS = AP_STATE / "merge_markers.jsonl"    # written by the dashboard's merge action
+LEDGER = AP_STATE / "ledger.json"
+ATTRIBUTION_WINDOW_DAYS = 7                   # merge → first-seen gap that still reads as suspect
 
 
 def slug(s: str) -> str:
@@ -69,12 +75,61 @@ def yq(s: str) -> str:
     return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def render_task(row: dict, tid: str) -> str:
+def load_merge_markers() -> list[dict]:
+    """Ships the operator merged (dashboard writes one line per merge)."""
+    if not MARKERS.exists():
+        return []
+    out = []
+    for ln in MARKERS.read_text().splitlines():
+        try:
+            out.append(json.loads(ln))
+        except ValueError:
+            pass
+    return out
+
+
+def suspects_for(row: dict, markers: list[dict]) -> list[dict]:
+    """Merges that landed BEFORE this signature was first seen, within the
+    attribution window — suspicion with evidence, never a verdict."""
+    try:
+        seen = datetime.strptime(row["date"][:10], "%Y-%m-%d")
+    except (ValueError, KeyError):
+        return []
+    hits = []
+    for m in markers:
+        try:
+            merged = datetime.strptime((m.get("at") or "")[:10], "%Y-%m-%d")
+        except ValueError:
+            continue
+        if merged <= seen and (seen - merged).days <= ATTRIBUTION_WINDOW_DAYS:
+            hits.append((merged, m))
+    return [m for _, m in sorted(hits, key=lambda x: x[0], reverse=True)[:3]]
+
+
+def attribution_lines(suspects: list[dict]) -> str:
+    if not suspects:
+        return ""
+    lines = ["POSSIBLE REGRESSION — merged shortly before this was first seen "
+             "(suspicion, not a verdict; triage against each diff):"]
+    for m in suspects:
+        bits = [f"task {m.get('task_id')}", f"merged {(m.get('at') or '')[:10]}"]
+        if m.get("branch"):
+            bits.append(m["branch"])
+        if m.get("pr_url"):
+            bits.append(m["pr_url"])
+        if m.get("patch"):
+            bits.append(f"revert patch: {m['patch']}")
+        lines.append("  - " + ", ".join(bits))
+    return "\n" + "\n".join(lines)
+
+
+def render_task(row: dict, tid: str, suspects: list[dict] | None = None) -> str:
     ctx = (f"Auto-ingested from production logs (logwatch). App: {row['app']}, "
            f"count {row['count']}, first seen {row['date']}. Signature:\n"
            f"  {row['sig']}\n"
            f"See ops/logwatch/FINDINGS.md for the full analysis + code correlation. "
-           f"NOTE: a lead, not verified-open — triage first (it may already be fixed).")
+           f"NOTE: a lead, not verified-open — triage first (it may already be fixed)."
+           + attribution_lines(suspects or []))
     return f"""
   - id: {tid}
     title: {yq('[LOG] ' + row['sig'][:80])}
@@ -94,6 +149,7 @@ def main() -> int:
     dry = "--dry-run" in sys.argv
     rows = parse_seen()
     have = existing_ids()
+    markers = load_merge_markers()
     new_blocks, added = [], []
     seen_sigs = set()
     for r in rows:
@@ -101,7 +157,10 @@ def main() -> int:
         if tid in have or tid in seen_sigs:
             continue
         seen_sigs.add(tid)
-        new_blocks.append(render_task(r, tid))
+        sus = suspects_for(r, markers)
+        if sus:
+            print(f"  ! {tid}: first seen after {len(sus)} recent merge(s) — attributed in context")
+        new_blocks.append(render_task(r, tid, sus))
         added.append(tid)
 
     print(f"SEEN signatures: {len(rows)} | already in backlog: {len(rows)-len(added)} | new: {len(added)}")
