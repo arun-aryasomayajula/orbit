@@ -64,6 +64,142 @@ The one block that makes Orbit work on *your* repo is **`gates:`** in
 lint, typecheck). `install.sh` auto-detects a starter set from your stack; you
 confirm it. Everything else has sensible defaults.
 
+## Architecture
+
+Orbit is a **deterministic pipeline wrapped around one autonomous step**. The
+engine (bash + stdlib Python) encodes every stage, branch, and human gate in
+plain code; the single place where the path can't be known in advance —
+"implement this task in this codebase" — runs as a full agentic loop inside an
+isolated git worktree. Everything before and after that node is explicit,
+auditable, and testable.
+
+### The flow
+
+```mermaid
+flowchart TD
+    subgraph enter["Work enters — machines propose"]
+        intake["orbit intake<br/>repo survey"]
+        adapters["signal adapters<br/>logs · QA · scorecards · Jira"]
+        epics["epic planning<br/>spec → human approves → decompose"]
+    end
+    backlog["backlog.yaml<br/>status: proposed"]
+    promote{{"HUMAN GATE 1<br/>you queue it (dashboard/CLI)"}}
+    subgraph cycle["one cycle — run.sh, fresh worktree at origin/base"]
+        pick["pick top queued task<br/>(ledger skips worked ids)"]
+        route["route via router.yaml<br/>maker · model · skill · tracks"]
+        build["build ⇄ check<br/>(your gates = definition of done)"]
+        verify["verifier judges diff<br/>vs acceptance criteria"]
+        commit["one atomic commit<br/>+ review packet"]
+        rt["runtime check (opt-in)<br/>observe the running product"]
+    end
+    push["wrapper (never the agent) pushes<br/>origin/autopilot/task-id (+ PR)"]
+    gate{{"HUMAN GATE 2<br/>merge · reject · revert (dashboard)"}}
+    merged["merged<br/>+ merge marker"]
+    rejected["rejected<br/>reason required"]
+    reverted["reverted<br/>reason required, annotation"]
+    escal["escalated<br/>your answer re-queues it"]
+    learn["calibration miner → goldens/LEARNED.md<br/>briefed into every future cycle"]
+
+    intake --> backlog
+    adapters --> backlog
+    epics --> backlog
+    backlog --> promote --> pick --> route --> build --> verify --> commit --> rt
+    rt -- "contradiction → exit 3" --> escal
+    rt -- ok / not configured --> push --> gate
+    gate -- merge --> merged
+    gate -- reject --> rejected
+    merged -- "broke prod" --> reverted
+    escal -- answer --> promote
+    merged --> learn
+    rejected --> learn
+    reverted --> learn
+    merged -. "regression attribution ≤7 days<br/>(merge markers)" .-> adapters
+```
+
+Two human gates bound the loop: **nothing enters the queue and nothing merges
+without a click**. Every other arrow is machine-driven and leaves evidence
+(review packet, backup patch, ledger entry, log line).
+
+### The task lifecycle (the ledger state machine)
+
+Every task Orbit works has one entry in `state/ledger.json`; its `state` field
+moves through an explicit machine (`engine/lifecycle.py`) that every writer —
+the cycle agent, the wrapper, the dashboard, autoclose — is validated against.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> in_progress: claim (agent)
+    in_progress --> committed: committed (agent)
+    committed --> pushed: pushed (wrapper)
+    in_progress --> escalated: escalate
+    committed --> escalated: runtime check contradiction
+    pushed --> escalated: escalate
+    pushed --> merged: mark merged (human)
+    committed --> merged: mark / autoclose
+    escalated --> merged: autoclose — ship evidence required
+    pushed --> rejected: mark rejected (human, reason required)
+    committed --> rejected: mark rejected
+    escalated --> rejected: won't-do (reason required)
+    merged --> [*]
+    rejected --> [*]
+    note right of merged
+        reverted is an ANNOTATION on a merged entry
+        (state stays merged — git-ancestry
+        categorization keeps working)
+    end note
+```
+
+The machine distinguishes two kinds of event:
+
+- **Loop events** (`claim`, `committed`, `pushed`, `escalate`) record facts
+  that already happened in git — they are permissive, including late-recorded
+  facts (an agent that skipped `claim` still gets its `committed` recorded).
+- **Review events** (`merged`, `rejected`, `reverted`) record human judgments —
+  they are strict: only reachable from a reviewable state, and `merged` /
+  `reverted` additionally require ship evidence (a `sha`, `remote_ref`, or
+  `branch`). You cannot merge, reject, or revert work that never shipped, and
+  terminal states accept nothing further (a double-mark would write a duplicate
+  merge marker and poison regression attribution).
+
+An illegal transition prints why and **exits 3, writing nothing** — the
+dashboard surfaces the explanation, the wrapper logs a loud `WARN`. Operators
+can override any refusal with `ledger.py <verb> --force`, which stamps
+`forced: true` on the entry so overrides stay auditable. `ledger.py can <id>
+<event>` answers "would this be legal?" without side effects (the dashboard's
+rollback checks it *before* running `git revert`).
+
+Mid-cycle states can't rot: each iteration the wrapper **reaps** entries stuck
+at `in_progress` (claim-then-crash) or `committed` (died between commit and
+push) for longer than the cycle timeout, escalating them onto the operator
+gates — and a push that fails twice escalates immediately. Nothing sits in
+silent limbo.
+
+Two subtleties the machine encodes deliberately:
+
+- **Git ancestry is the authority for "merged."** A branch merged in the GitHub
+  UI never calls `mark`, so the ledger may lag at `pushed` — which is why
+  `reverted` is legal from `committed`/`pushed`/`merged`, and why the dashboard
+  categorizes by ancestry first.
+- **`escalated → merged` is legal only with ship evidence** — the autoclose
+  reconciler flips a task that committed, escalated at the runtime check, and
+  whose branch you merged anyway.
+
+The backlog layer has its own, simpler ladder in the task's `status` field —
+`proposed → queued → done` (plus the epic stages `planning → spec_ready →
+approved → decomposed`, guarded by `epic_plan.py`'s own transition table).
+The ledger machine picks up where the backlog hands a queued task to the loop.
+
+### Who writes what
+
+| actor | may write | may never |
+|-------|-----------|-----------|
+| intake / adapters / epic decompose | backlog `status: proposed` | queue work |
+| **you** (dashboard / CLI) | promote to `queued`; `merged` / `rejected` / `reverted` (with reasons) | — |
+| cycle agent (worktree) | `claim`, `committed`, `escalate` | push, merge, touch your checkout |
+| wrapper (`run.sh`) | `pushed`, `escalate`, PR metadata | push to base, `--force` push |
+| autoclose | `merged` (only with ancestry proof, via the same machine) | close rejected ships |
+
 ## Quickstart
 
 ```bash

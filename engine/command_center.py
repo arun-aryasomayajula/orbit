@@ -576,6 +576,13 @@ def do_rollback(tid: str, note: str = "") -> str:
         return f"No recorded commit sha for task {tid} — nothing to roll back."
     if not note.strip():
         return "A revert reason is required — it's recorded on the task and mined to tune the loop."
+    # Lifecycle gate BEFORE any git side effect: reverting an unshipped task is
+    # refused here, not discovered after a git revert has already run.
+    chk = subprocess.run(["python3", str(ENGINE / "ledger.py"), "can", tid, "reverted"],
+                         capture_output=True, text=True)
+    if chk.returncode != 0:
+        why = (chk.stderr.strip() or chk.stdout.strip()).splitlines()[-1] if (chk.stderr or chk.stdout) else "lifecycle check failed"
+        return f"Won't roll back {tid}: {why}"
     cur = subprocess.run(["git", "-C", str(REPO), "rev-parse", "--abbrev-ref", "HEAD"],
                          capture_output=True, text=True).stdout.strip()
     dirty = subprocess.run(["git", "-C", str(REPO), "status", "--porcelain", "-uno"],
@@ -593,9 +600,10 @@ def do_rollback(tid: str, note: str = "") -> str:
                            f"HEAD:refs/heads/{BASE_BRANCH}"], capture_output=True, text=True)
     if push.returncode != 0:
         return f"Reverted {sha} locally but PUSH failed (non-ff?):\n{push.stderr.strip()}"
-    subprocess.run(["python3", str(ENGINE / "ledger.py"), "reverted", tid, note],
-                   capture_output=True, text=True)
-    return f"Rolled back task {tid} (reverted {sha[:8]}) and pushed to origin/{BASE_BRANCH}."
+    rec = subprocess.run(["python3", str(ENGINE / "ledger.py"), "reverted", tid, note],
+                         capture_output=True, text=True)
+    warn = "" if rec.returncode == 0 else f" (WARNING: revert done but not recorded in the ledger: {rec.stderr.strip()})"
+    return f"Rolled back task {tid} (reverted {sha[:8]}) and pushed to origin/{BASE_BRANCH}.{warn}"
 
 
 _MERGED_CACHE = {"t": 0.0, "v": {}}

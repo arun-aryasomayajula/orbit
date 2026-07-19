@@ -43,10 +43,19 @@ def test_reject_without_reason_is_refused(cc):
 
 
 def test_reject_with_reason_lands_in_ledger(cc):
+    st = Path(os.environ["AP_STATE"])
+    (st / "ledger.json").write_text(json.dumps(          # a real shipped entry —
+        {"entries": {"t1": {"state": "pushed", "sha": "abc123"}}}))  # rejecting nothing is now illegal
     cc.do_mark("t1", "rejected", "asserts on mock, not behaviour")
-    led = json.loads((Path(os.environ["AP_STATE"]) / "ledger.json").read_text())
-    e = led["entries"]["t1"]
+    e = json.loads((st / "ledger.json").read_text())["entries"]["t1"]
     assert e["state"] == "rejected" and e["review_note"] == "asserts on mock, not behaviour"
+
+
+def test_mark_on_never_worked_task_is_refused(cc):
+    msg = cc.do_mark("ghost", "merged", "")
+    assert "illegal transition" in msg
+    assert not (Path(os.environ["AP_STATE"]) / "ledger.json").exists()
+    assert not (Path(os.environ["AP_STATE"]) / "merge_markers.jsonl").exists()
 
 
 def test_rollback_without_reason_is_refused(cc, monkeypatch):
@@ -59,6 +68,8 @@ def test_rollback_without_reason_is_refused(cc, monkeypatch):
 def test_ledger_reverted_records_note_without_touching_state(tmp_path, monkeypatch):
     monkeypatch.setenv("AP_STATE", str(tmp_path))
     env = dict(os.environ, AP_STATE=str(tmp_path))
+    (tmp_path / "ledger.json").write_text(json.dumps(    # shipped, then merged —
+        {"entries": {"t1": {"state": "pushed", "sha": "abc123"}}}))
     subprocess.run([sys.executable, str(ENGINE / "ledger.py"), "mark", "t1", "merged"],
                    env=env, check=True, capture_output=True)
     subprocess.run([sys.executable, str(ENGINE / "ledger.py"), "reverted", "t1", "broke prod search"],

@@ -197,6 +197,16 @@ run_cycle() {
 one_iteration() {
   gates_ready || { echo SKIP; return; }
   prepare_worktree || { echo FAIL; return; }
+  # Reap entries stuck mid-cycle (claim-then-crash in_progress, commit-then-die
+  # committed): no cycle is running at this point, so anything older than the
+  # cycle timeout (+margin for clock skew / a concurrent manual run) is dead.
+  # Escalating it puts the task on the operator gates instead of silent limbo.
+  local reaped
+  reaped="$(python3 "$ENGINE/ledger.py" reap "$((CYCLE_TIMEOUT + 600))" 2>>"$LOGDIR/orbit.log" || true)"
+  if [ -n "$reaped" ]; then
+    log "reaper: escalated stalled task(s): $reaped"
+    notify "🙋 Orbit needs you" "stalled mid-cycle task(s) escalated: $reaped — answer to re-queue" "$DASH"
+  fi
   # Auto-close verified no-ops (tasks whose shipped commit is already an ancestor
   # of the base branch) BEFORE regenerating the queue, so they never re-inject or
   # re-escalate into the operator inbox.
@@ -238,7 +248,8 @@ one_iteration() {
       python3 "$ENGINE/runtime_check.py" "$tid" "$WT" >>"$LOGDIR/orbit.log" 2>&1
       if [ "$?" = "3" ]; then
         log "runtime check contradicted the contract — escalating instead of shipping (patch kept: ${patch:-none})"
-        python3 "$ENGINE/ledger.py" escalate "$tid" "runtime check: observed behaviour contradicts acceptance criteria (see reviews/task-$tid-runtime.md)" >>"$LOGDIR/orbit.log" 2>&1 || true
+        python3 "$ENGINE/ledger.py" escalate "$tid" "runtime check: observed behaviour contradicts acceptance criteria (see reviews/task-$tid-runtime.md)" >>"$LOGDIR/orbit.log" 2>&1 \
+          || log "WARN: ledger escalate not recorded for $tid (lifecycle gate or write error — see orbit.log)"
         notify "🛑 Orbit runtime check" "task $tid: the running product contradicts the contract — escalated, nothing pushed" "$DASH"
         rm -f "$marker" "$STATE/.cycle-candidate" 2>/dev/null || true
         echo OK; return
@@ -251,17 +262,26 @@ one_iteration() {
     fi
     if [ -n "$branch" ]; then
       log "pushed origin/$branch ($sha) — review, then Merge/Reject"
-      [ -n "$tid" ] && { python3 "$ENGINE/ledger.py" pushed "$tid" "origin/$branch" 2>/dev/null || true
+      [ -n "$tid" ] && { python3 "$ENGINE/ledger.py" pushed "$tid" "origin/$branch" >>"$LOGDIR/orbit.log" 2>&1 \
+          || log "WARN: ledger pushed not recorded for $tid (lifecycle gate or write error — see orbit.log)"
         python3 "$ENGINE/review_packet.py" "$tid" "$WT" "$branch" "$ORBIT_BASE_BRANCH" >>"$LOGDIR/orbit.log" 2>&1 || true; }
       raise_pr "$tid" "$branch"
       notify "🔧 Orbit shipped" "task ${tid:-?} → $branch — review packet is ready; merge or reject" "$DASH"
     else
       log "WARN: push failed twice — patch kept: ${patch:-none}"
+      # A committed-but-unpushed ship is otherwise invisible (no gate surfaces
+      # 'committed') — escalate so the operator sees it now, not via the reaper.
+      if [ -n "$tid" ]; then
+        python3 "$ENGINE/ledger.py" escalate "$tid" "wrapper: push failed twice — commit exists only in the worktree; patch kept: ${patch:-none}" >>"$LOGDIR/orbit.log" 2>&1 \
+          || log "WARN: ledger escalate not recorded for $tid (lifecycle gate or write error — see orbit.log)"
+        notify "🙋 Orbit needs you" "task $tid: push failed twice — the ship never reached origin (patch kept)" "$DASH"
+      fi
     fi
   else
     log "cycle produced no commit (no-op / escalation)."
     if [ -n "$tid" ] && ! python3 "$ENGINE/ledger.py" worked-ids 2>/dev/null | tr ' ' '\n' | grep -qx "$tid"; then
-      python3 "$ENGINE/ledger.py" escalate "$tid" "wrapper: no commit (gate fail / too large / incomplete)" >>"$LOGDIR/orbit.log" 2>&1 || true
+      python3 "$ENGINE/ledger.py" escalate "$tid" "wrapper: no commit (gate fail / too large / incomplete)" >>"$LOGDIR/orbit.log" 2>&1 \
+        || log "WARN: ledger escalate not recorded for $tid (lifecycle gate or write error — see orbit.log)"
     fi
     # An escalated cycle is a stalled human gate — say so where the human is.
     if [ -n "$tid" ] && [ "$(python3 "$ENGINE/ledger.py" state "$tid" 2>/dev/null)" = "escalated" ]; then

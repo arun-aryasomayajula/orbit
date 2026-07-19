@@ -27,13 +27,18 @@ from pathlib import Path
 
 import yaml
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import lifecycle
+
 
 def reconcile(tasks: list, entries: dict, is_ancestor, now: str):
     """Pure core: decide which tasks to auto-close.
 
     A task is closed iff its ledger entry carries a target commit (sha, else the
-    remote branch ref) that is an ancestor of the base branch — and it is not a
-    human-rejected ship. Returns (closed_ids, kept_tasks, updated_entries).
+    remote branch ref) that is an ancestor of the base branch — and the lifecycle
+    machine permits `merged` from its current state (which excludes human-rejected
+    ships, terminal double-marks, and mid-cycle in_progress entries).
+    Returns (closed_ids, kept_tasks, updated_entries).
     """
     closed, kept = [], []
     out = dict(entries)
@@ -45,7 +50,7 @@ def reconcile(tasks: list, entries: dict, is_ancestor, now: str):
         # its origin/ prefix so it resolves) or a bare branch name → origin/<branch>.
         target = e.get("sha") or e.get("remote_ref") \
             or (f"origin/{e['branch']}" if e.get("branch") else None)
-        if state == "rejected" or not target:
+        if not target or lifecycle.check(state, "merged", e):
             kept.append(t)
             continue
         if is_ancestor(target):

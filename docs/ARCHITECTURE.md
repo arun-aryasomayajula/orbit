@@ -52,6 +52,16 @@ directed work (docs/deps/testing) where a smaller model is at parity — cheaper
   skill knows. The engine ships generic templates; a target fills them in under `.autopilot/tracks/`.
 
 ## State
+The ledger's `state` field moves through an explicit machine — `engine/lifecycle.py`, the single
+source of truth for legal transitions (in_progress → committed → pushed → merged|rejected, with
+escalated off-ramps; `reverted` is an annotation on merged, never a state). `ledger.py` gates every
+state-writing verb through it: illegal transitions exit 3 writing nothing; `--force` overrides and
+stamps `forced: true`; `ledger.py can <id> <event>` is the side-effect-free pre-check (used by the
+dashboard's rollback before it runs `git revert`). autoclose consults the same machine. Mid-cycle
+states can't rot: `ledger.py reap` (run by the wrapper each iteration) escalates entries stuck at
+in_progress/committed past the cycle timeout, and a twice-failed push escalates immediately. The
+full transition diagram + rationale live in the README's Architecture section.
+
 All runtime state lives in the target's `.autopilot/state/` (gitignored): `ledger.json` (worked
 record), `queue.json` (per-cycle, read-only to the agent), `STATE.md` (cross-cycle lessons),
 `reviews/` (packets), `diffs/` (backup patches), `logs/`, `NEEDS_YOU.md` (escalations). A repo thus
@@ -64,6 +74,7 @@ fully describes its own autopilot — clone it and the state comes along (or sta
 | `engine/config.py` | reads `.autopilot/config.yaml`, emits loop env, answers gates/needs, validates |
 | `engine/doctor.py` | read-only wiring validator + routing dry-run |
 | `engine/ledger.py` | worked-task record (incl. wrapper-opened PR URLs) |
+| `engine/lifecycle.py` | the task lifecycle state machine — legal-transition source of truth |
 | `engine/backlog_to_tasks.py` | backlog + signal adapters → queue.json |
 | `engine/backlog_append.py` | the ONE way engine code adds/edits backlog tasks (comment-preserving) |
 | `engine/intake.py` | zero-day onboarding: gate verification + survey → proposed backlog |
