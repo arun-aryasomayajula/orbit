@@ -934,12 +934,18 @@ def cycletail(max_lines: int = 120) -> dict:
 
 def _load_builds() -> list:
     # Raw worktree-agent build registry (feature_builds.json), or [] if absent.
+    # Legacy status "pushed" → "built" (renamed: it collided with the ledger's
+    # `pushed` lifecycle state — different store, different machine).
     if not FEATURE_BUILDS.exists():
         return []
     try:
-        return json.loads(FEATURE_BUILDS.read_text()).get("builds", []) or []
+        builds = json.loads(FEATURE_BUILDS.read_text()).get("builds", []) or []
     except Exception:
         return []
+    for b in builds:
+        if b.get("status") == "pushed":
+            b["status"] = "built"
+    return builds
 
 
 def feature_builds_annotated() -> list:
@@ -2100,13 +2106,13 @@ function renderFeatureBuilds(){
     band.innerHTML=head+`<div class="fb-empty">No worktree agents active yet.<br>Register one with <code>python3 feature_build.py start &lt;id&gt; "&lt;title&gt;" &lt;branch&gt;</code>, then <code>done</code>/<code>fail</code> as it ships.</div>`;
     return;
   }
-  const SC={running:['#0052cc','● building'],pushed:['#00875a','✓ pushed — review'],failed:['#de350b','✗ failed']};
+  const SC={running:['#0052cc','● building'],built:['#00875a','✓ built — branch on origin, review'],failed:['#de350b','✗ failed']};
   const rows=fb.map(b=>{
     const sc=SC[b.status]||['#8993a4',b.status];
     const when=b.status==='running'?('running '+relSince(b.started)):(b.finished?('finished '+relSince(b.finished)+' ago'):'');
     const act=b.merged
       ? `<span class="fb-merged">✓ on loop branch</span>`
-      : (b.status==='pushed' && b.branch)
+      : (b.status==='built' && b.branch)
         ? `<button class="fb-mergebtn" onclick="mergeToLoop('${esc(b.branch)}')">⧉ Merge → loop</button>`
         : '';
     return `<div class="fbuild"><span class="fb-dot ${b.status==='running'?'run':''}" style="background:${sc[0]}"></span>

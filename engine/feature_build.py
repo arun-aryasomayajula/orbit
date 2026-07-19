@@ -9,12 +9,15 @@ dashboard's "Merge into loop" button (POST /merge-to-loop) lands it later.
 
 State lives in <repo>/.autopilot/state/feature_builds.json ({"builds":[...]}),
 the same file the command center's renderAgents() reads. Each build row:
-  {id, title, branch, status(running|pushed|failed), started, finished, sha, note}
+  {id, title, branch, status(running|built|failed), started, finished, sha, note}
+  ("built" = branch pushed to origin, awaiting merge-to-loop. Named to avoid the
+  ledger's `pushed` lifecycle state — different store, different machine. Legacy
+  rows with status "pushed" are normalized to "built" on read.)
 
 CLI:
   feature_build.py start <id> "<title>" [branch]   # register + spawn detached worker
   feature_build.py run   <id> "<title>" [branch]   # the worker (usually auto-spawned)
-  feature_build.py done  <id> [--sha S --branch B]  # manual: mark pushed
+  feature_build.py done  <id> [--sha S --branch B]  # manual: mark built (branch on origin)
   feature_build.py fail  <id> [--note N]            # manual: mark failed
   feature_build.py list                             # dump the registry
 """
@@ -122,13 +125,19 @@ def _locked():
 
 
 def _load() -> list:
-    """Read the builds array (empty if the file is missing/corrupt)."""
+    """Read the builds array (empty if the file is missing/corrupt). Legacy
+    status "pushed" is normalized to "built" — the old name collided with the
+    ledger's `pushed` lifecycle state (different store, different meaning)."""
     if not FEATURE_BUILDS.exists():
         return []
     try:
-        return json.loads(FEATURE_BUILDS.read_text()).get("builds", []) or []
+        builds = json.loads(FEATURE_BUILDS.read_text()).get("builds", []) or []
     except Exception:
         return []
+    for b in builds:
+        if b.get("status") == "pushed":
+            b["status"] = "built"
+    return builds
 
 
 def _save(builds: list) -> None:
@@ -249,8 +258,8 @@ def cmd_start(bid: str, title: str, branch: str) -> str:
     for b in _load():
         if b.get("id") == bid and b.get("status") == "running":
             return f"'{bid}' is already building — see the Feature agents tab."
-        if b.get("id") == bid and b.get("status") == "pushed" and not b.get("merged"):
-            return (f"'{bid}' already has a pushed build ({b.get('branch')}) awaiting review — "
+        if b.get("id") == bid and b.get("status") == "built" and not b.get("merged"):
+            return (f"'{bid}' already has a built branch ({b.get('branch')}) awaiting review — "
                     f"merge or reject it first, don't rebuild it.")
     if _already_merged(bid):
         return f"'{bid}' is already merged on the base branch — nothing to build."
@@ -316,7 +325,7 @@ def cmd_run(bid: str, title: str, branch: str) -> None:
                     note=f"push failed: {push.stderr.strip()[:200]}")
             return
         sha = (_git(wt, "rev-parse", "--short", "HEAD").stdout or "").strip()
-        _upsert(bid, status="pushed", finished=_now(), sha=sha,
+        _upsert(bid, status="built", finished=_now(), sha=sha,
                 note=f"{ahead} commit(s) on origin/{branch} — review, then Merge into loop")
         # Best-effort review packet (same helper the loop uses).
         with contextlib.suppress(Exception):
@@ -330,14 +339,14 @@ def cmd_run(bid: str, title: str, branch: str) -> None:
 
 
 def cmd_done(bid: str, sha: str, branch: str) -> str:
-    """Manually mark a build pushed (for externally-driven agents)."""
-    fields = {"status": "pushed", "finished": _now()}
+    """Manually mark a build built — its branch is on origin (for externally-driven agents)."""
+    fields = {"status": "built", "finished": _now()}
     if sha:
         fields["sha"] = sha
     if branch:
         fields["branch"] = branch
     _upsert(bid, **fields)
-    return f"marked '{bid}' pushed."
+    return f"marked '{bid}' built (branch on origin)."
 
 
 def cmd_fail(bid: str, note: str) -> str:
