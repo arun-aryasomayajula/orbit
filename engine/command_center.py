@@ -76,6 +76,13 @@ LOGDIR = AP_STATE / "logs"
 APLOG = LOGDIR / "orbit.log"   # the loop's live log (run.sh writes here). Heartbeat + cycle stats read from it.
 CONVERTER = ENGINE / "backlog_to_tasks.py"
 
+# The lifecycle machine + lint vocabulary, in-process (same modules ledger.py
+# and the emit gate enforce) — the UI's action buttons and the task form are
+# driven by the SAME rules, never a client-side guess.
+sys.path.insert(0, str(ENGINE))
+import lifecycle  # noqa: E402
+from backlog_lint import KNOWN_CATEGORIES  # noqa: E402
+
 
 def _resolve_base_branch() -> str:
     # Trunk to build on + measure "merged?" against. Precedence: explicit env
@@ -322,6 +329,7 @@ def probe_runtime() -> dict:
         "cycle_timeout": CYCLE_TIMEOUT,
         "base_branch": BASE_BRANCH,
         "bb_src": BB_SRC,
+        "categories": sorted(KNOWN_CATEGORIES),   # the task form's vocabulary — same set the lint gate accepts
     }
 
 
@@ -522,6 +530,167 @@ def do_force(tid: str) -> str:
     _run_converter()
     return (f"⚠ Forced {tid} ({cat}) to the agent → now in ⏭ Next up. The loop will attempt a "
             f"fix on the branch for review, or escalate it if it's not code-fixable (rotation/infra).")
+
+
+# ── task CRUD from the dashboard ─────────────────────────────────────────────
+_TID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,79}$")
+
+
+def _block_indent(blocks: list) -> str:
+    # Match the file's existing list-item convention (flat "- id:" vs legacy
+    # "  - id:") — mixing indents under one `tasks:` key is invalid YAML.
+    return "  " if (blocks and blocks[0].startswith("  - id:")) else ""
+
+
+def _strip_field(block: str, field: str) -> str:
+    # Remove a field line PLUS its nested continuation lines (literal blocks,
+    # list items) — the multi-line counterpart of _set_field.
+    out, skipping = [], None
+    for ln in block.splitlines(keepends=True):
+        m = re.match(rf"^(\s*){re.escape(field)}:", ln)
+        if m and skipping is None:
+            skipping = len(m.group(1))
+            continue
+        if skipping is not None:
+            if not ln.strip() or (len(ln) - len(ln.lstrip())) > skipping:
+                continue
+            skipping = None
+        out.append(ln)
+    return "".join(out)
+
+
+def _upsert_scalar(block: str, field: str, value: str, fi: str) -> str:
+    if re.search(rf"(?m)^  (?:  )?{re.escape(field)}: ", block):
+        return _set_field(block, field, value)
+    return re.sub(r"(?m)^((?:  )?- id: .*)$",
+                  lambda m: f"{m.group(1)}\n{fi}{field}: {value}", block, count=1)
+
+
+def _split_acc(raw: str) -> list:
+    return [a.strip() for a in (raw or "").splitlines() if a.strip()]
+
+
+def do_task_new(tid: str, title: str, category: str, priority: str = "medium",
+                context: str = "", acc_raw: str = "", queue_now: bool = False) -> str:
+    """Create a backlog task from the dashboard — same contract bar as the lint
+    hard gate (category must be known, acceptance criteria required), so a task
+    born in the UI can never be silently held from the queue."""
+    tid = (tid or "").strip().lower()
+    if not _TID_RE.match(tid):
+        return "Task id must be a lowercase slug (letters/digits/._-, max 80 chars)."
+    if not (title or "").strip():
+        return "A title is required."
+    if category not in KNOWN_CATEGORIES:
+        return f"Unknown category '{category}' — one of: {', '.join(sorted(KNOWN_CATEGORIES))}."
+    acc = _split_acc(acc_raw)
+    if not acc:
+        return ("At least one acceptance criterion is required (one per line) — "
+                "without it the verifier has nothing objective to grade and the "
+                "lint gate would hold the task from the queue anyway.")
+    header, blocks, ids = _read_blocks()
+    if tid in ids:
+        return f"Task {tid} already exists on the backlog — edit it instead."
+    if load_ledger().get(tid):
+        return f"Task id '{tid}' was already worked (see Shipped/Escalated) — pick a fresh id."
+    ind = _block_indent(blocks)
+    status = "queued" if queue_now else "proposed"
+    gate = "allow" if (queue_now and category in EMITTABLE) else "human"
+    lines = [f"{ind}- id: {tid}",
+             f"{ind}  title: {json.dumps(' '.join(title.split()))}",
+             f"{ind}  category: {category}",
+             f"{ind}  autopilot: {gate}",
+             f"{ind}  status: {status}",
+             f"{ind}  priority: {priority if priority in ('high', 'medium', 'low') else 'medium'}",
+             f"{ind}  source: dashboard"]
+    ctx = (context or "").strip()
+    if ctx:
+        lines.append(f"{ind}  context: |")
+        lines += [f"{ind}    {ln}" for ln in ctx.splitlines()]
+    lines.append(f"{ind}  acceptance_criteria:")
+    lines += [f"{ind}    - {json.dumps(a)}" for a in acc]
+    blocks.append("\n".join(lines) + "\n")
+    _write_blocks(header, blocks)
+    _run_converter()
+    if status == "queued" and gate == "allow":
+        return f"Created {tid} → ⏭ Next up (the loop can pick it)."
+    if status == "queued":
+        return f"Created {tid} as queued — '{category}' is human-only, so the loop won't touch it."
+    return f"Created {tid} → 📋 Board as proposed. Promote it when it's ready for the loop."
+
+
+def do_task_edit(tid: str, title: str = "", category: str = "", priority: str = "",
+                 context: str = "", acc_raw: str = "") -> str:
+    """Edit a backlog task's contract in place, comment-preserving. Empty form
+    fields mean 'leave unchanged' — the UI can't blank a field by accident."""
+    header, blocks, ids = _read_blocks()
+    if tid not in ids:
+        return f"Task {tid} not found on the backlog."
+    i = ids.index(tid)
+    b = blocks[i]
+    fi = _block_indent(blocks) + "  "
+    changed = []
+    if (title or "").strip():
+        b = _upsert_scalar(b, "title", json.dumps(" ".join(title.split())), fi)
+        changed.append("title")
+    if category:
+        if category not in KNOWN_CATEGORIES:
+            return f"Unknown category '{category}'."
+        b = _upsert_scalar(b, "category", category, fi)
+        changed.append("category")
+    if priority in ("high", "medium", "low"):
+        b = _upsert_scalar(b, "priority", priority, fi)
+        changed.append("priority")
+    if (context or "").strip():
+        b = _strip_field(b, "context")
+        if not b.endswith("\n"):
+            b += "\n"
+        b += f"{fi}context: |\n" + "".join(f"{fi}  {ln}\n" for ln in context.strip().splitlines())
+        changed.append("context")
+    acc = _split_acc(acc_raw)
+    if acc:
+        b = _strip_field(b, "acceptance_criteria")
+        if not b.endswith("\n"):
+            b += "\n"
+        b += f"{fi}acceptance_criteria:\n" + "".join(f"{fi}  - {json.dumps(a)}\n" for a in acc)
+        changed.append("acceptance criteria")
+    if not changed:
+        return f"Nothing to change on {tid} (empty fields keep current values)."
+    blocks[i] = b
+    _write_blocks(header, blocks)
+    _run_converter()
+    return f"Updated {tid} ({', '.join(changed)})."
+
+
+def do_task_delete(tid: str) -> str:
+    """Delete an UN-WORKED task's block from the backlog. Worked tasks are
+    refused — their block is the contract behind a real ship/escalation; use
+    Skip to set them aside instead."""
+    header, blocks, ids = _read_blocks()
+    if tid not in ids:
+        return f"Task {tid} not found on the backlog."
+    led = load_ledger().get(tid) or {}
+    if led.get("state"):
+        return (f"Won't delete {tid}: it was worked (ledger state '{led['state']}') — "
+                f"the block documents a real ship/escalation. Skip it instead.")
+    blocks.pop(ids.index(tid))
+    _write_blocks(header, blocks)
+    if tid in load_skips():
+        kept = [ln for ln in SKIPS.read_text().splitlines() if ln.strip() != tid]
+        SKIPS.write_text("\n".join(kept) + ("\n" if kept else ""))
+    _run_converter()
+    return f"Deleted {tid} from the backlog."
+
+
+def do_reap() -> str:
+    """Manually reap tasks stuck mid-cycle (the wrapper does this each
+    iteration, but a paused loop never iterates — this button covers that)."""
+    r = subprocess.run(["python3", str(ENGINE / "ledger.py"), "reap", str(CYCLE_TIMEOUT + 600)],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return f"Reap failed: {r.stderr.strip()}"
+    reaped = r.stdout.strip()
+    return (f"Reaped {reaped.count(' ') + 1} stalled task(s) → Escalated: {reaped}" if reaped
+            else "Nothing stalled — no mid-cycle entry is older than the cycle timeout.")
 
 
 def do_runnow(tid: str) -> str:
@@ -760,18 +929,24 @@ def merged_map() -> dict:
     return out
 
 
-def do_mark(tid: str, outcome: str, note: str = "") -> str:
+def do_mark(tid: str, outcome: str, note: str = "", force: bool = False) -> str:
     """Record the human review outcome (merged / rejected) in the ledger — the
     raw data behind merge-rate-per-source. A reject REQUIRES a reason: it is
     the loop's only ground-truth on why a ship was wrong (the calibration
     miner learns from it). Reject keeps the branch on origin
-    (delete it manually if you want); the id stays worked so it isn't re-picked."""
+    (delete it manually if you want); the id stays worked so it isn't re-picked.
+    force=True passes --force past the lifecycle gate — reason required, and the
+    ledger stamps forced:true so the override stays auditable."""
     if outcome not in ("merged", "rejected"):
         return f"Invalid outcome '{outcome}'."
     if outcome == "rejected" and not note.strip():
         return "A reject reason is required — it's recorded on the task and mined to tune the loop."
-    r = subprocess.run(["python3", str(ENGINE / "ledger.py"), "mark", tid, outcome, note],
-                       capture_output=True, text=True)
+    if force and not note.strip():
+        return "Forcing past the lifecycle gate requires a reason — it's recorded on the entry."
+    cmd = ["python3", str(ENGINE / "ledger.py"), "mark", tid, outcome, note]
+    if force:
+        cmd.append("--force")
+    r = subprocess.run(cmd, capture_output=True, text=True)
     _MERGED_CACHE.update(t=0.0)   # re-check ancestry on the next poll
     if r.returncode != 0:
         return f"ledger mark failed: {r.stderr.strip()}"
@@ -1490,6 +1665,14 @@ def build_state() -> dict:
                 "branch": branch,
                 "merged": merged,
                 "rejected": st == "rejected",
+                # Lifecycle-driven action flags: the SAME machine ledger.py
+                # enforces decides which buttons render — no client-side guess.
+                "state": st,
+                "forced": bool(e.get("forced")),
+                "reverted": bool(e.get("reverted_at")),
+                "can_merge": lifecycle.check(st, "merged", e) is None,
+                "can_reject": lifecycle.check(st, "rejected", e) is None,
+                "can_revert": lifecycle.check(st, "reverted", e) is None,
                 "review_note": e.get("review_note", ""),
                 # A REAL PR the wrapper opened (config pull_requests) wins; else
                 # the prefilled PR-create link, only while it still makes sense
@@ -1505,6 +1688,8 @@ def build_state() -> dict:
             })
             done.append(row)
         elif st == "escalated":
+            row.update({"state": st, "forced": bool(e.get("forced")),
+                        "can_reject": lifecycle.check(st, "rejected", e) is None})
             escalated.append(row)
 
     # NEXT UP = the loop's real pick order: queue.json, safe + not worked/skipped,
@@ -1803,6 +1988,8 @@ opacity:0;transform:translateY(10px);transition:.25s;font-family:ui-monospace,SF
   <span class="pill">base <span class="branch">__BRANCH__</span></span>
   <span class="pill" id="stalePill" style="display:none">⚠ reconnecting…</span>
   <span class="spacer"></span>
+  <button class="btn btn-mv" onclick="newTaskForm()" title="create a backlog task right here — no YAML editing">＋ New task</button>
+  <button class="btn btn-skip" onclick="reapStalled()" title="escalate tasks stuck mid-cycle (claimed/committed by a dead cycle) onto the gates — the loop does this each iteration, but a paused loop can't">🧹 Reap stalled</button>
   <button class="btn btn-skip" id="feedBtn" onclick="toggleFeed()" title="when ON, auto-promote the next safe task whenever the queue empties">🔁 Auto-feed</button>
   <button class="btn" id="loopBtn" onclick="toggleLoop()">…</button>
 </header>
@@ -1826,6 +2013,27 @@ opacity:0;transform:translateY(10px);transition:.25s;font-family:ui-monospace,SF
   <h3 id="m2title" style="margin:0 0 8px;font-size:14px"></h3>
   <pre id="m2body" class="viewer"></pre>
   <div style="margin-top:10px"><button class="btn btn-skip btn-mini" onclick="closeModal2()">Close</button></div>
+</div></div>
+<div class="modal" id="modal3" onclick="closeModal3()"><div class="modalbox" onclick="event.stopPropagation()" style="max-width:560px">
+  <h3 id="m3title" style="margin:0 0 8px;font-size:14px"></h3>
+  <div id="m3hint" style="font-size:11px;color:#6b778c;margin-bottom:8px"></div>
+  <div style="display:flex;flex-direction:column;gap:6px">
+    <input id="tfId" placeholder="id — lowercase slug, e.g. fix-login-timeout" style="padding:6px">
+    <input id="tfTitle" placeholder="title — what done looks like, in one line" style="padding:6px">
+    <div style="display:flex;gap:6px">
+      <select id="tfCat" style="flex:1;padding:6px"></select>
+      <select id="tfPri" style="width:110px;padding:6px">
+        <option value="">priority…</option><option>high</option><option selected>medium</option><option>low</option>
+      </select>
+    </div>
+    <textarea id="tfCtx" rows="3" placeholder="context — the WHY the maker needs (edit: leave blank to keep current)" style="padding:6px"></textarea>
+    <textarea id="tfAcc" rows="4" placeholder="acceptance criteria — ONE PER LINE (required for new tasks; the verifier grades against these)" style="padding:6px"></textarea>
+    <label id="tfQueueRow" style="font-size:12px"><input type="checkbox" id="tfQueue"> queue immediately (skip 'proposed' triage — you ARE the triage)</label>
+  </div>
+  <div style="margin-top:10px;display:flex;gap:8px">
+    <button class="btn btn-go btn-mini" onclick="submitTaskForm()">💾 Save</button>
+    <button class="btn btn-skip btn-mini" onclick="closeModal3()">Cancel</button>
+  </div>
 </div></div>
 <div class="board" id="board"></div>
 <div class="runlog"><h3>Recent run log</h3><ul id="runlog"></ul></div>
@@ -1879,12 +2087,15 @@ function card(t,kind){
       btns+=`<button class="btn btn-skip btn-mini" title="waive the contract-quality gate for this task" onclick="post('/lintok',{id:'${esc(t.id)}'})">🧹 Lint OK</button>`;
     }
     btns+=`<button class="btn btn-mv btn-mini" title="raise priority" onclick="post('/priority',{id:'${esc(t.id)}',dir:'up'})">⬆ pri</button>
-      <button class="btn btn-skip btn-mini" onclick="post('/skip',{id:'${esc(t.id)}'})">Skip</button>`;
+      <button class="btn btn-mv btn-mini" title="edit the task's contract (title, category, priority, context, acceptance criteria)" onclick="editTaskForm('${esc(t.id)}')">✎ Edit</button>
+      <button class="btn btn-skip btn-mini" onclick="post('/skip',{id:'${esc(t.id)}'})">Skip</button>
+      <button class="btn btn-kill btn-mini" title="delete this un-worked task from the backlog" onclick="if(confirm('Delete ${esc(t.id)} from the backlog?\\n\\nOnly un-worked tasks can be deleted — worked ones are history.'))post('/task-del',{id:'${esc(t.id)}'})">🗑</button>`;
   } else if(kind==='skipped'){
     btns=`<button class="btn btn-go btn-mini" onclick="post('/unskip',{id:'${esc(t.id)}'})">↺ Un-skip</button>`;
   } else if(kind==='esc'){
     btns=`<button class="btn btn-go btn-mini" title="answer the escalation — the answer joins the contract and the task re-queues" onclick="answerTask('${esc(t.id)}')">💬 Answer &amp; re-queue</button>
       <button class="btn btn-skip btn-mini" onclick="post('/skip',{id:'${esc(t.id)}'})">Skip</button>`;
+    if(t.can_reject) btns+=` <button class="btn btn-kill btn-mini" title="close this escalation as won't-do (reason required — recorded and mined)" onclick="rejectTask('${esc(t.id)}')">✗ Won't do</button>`;
   } else if(kind==='done'){
     const ref=`${(t.sha||'').slice(0,8)} → ${esc(t.branch||t.remote_ref||'')}`;
     const when=t.committed_at?` · ${t.committed_at} (${relDays(t.committed_at)})`:'';
@@ -1892,15 +2103,18 @@ function card(t,kind){
     if(t.has_packet) btns+=`<button class="btn btn-pr btn-mini" title="the 2-minute review packet (contract + diffstat + verifier notes)" onclick="openText('🔍 Review packet — ${esc(t.id)}','/review?id=${encodeURIComponent(t.id)}',false)">🔍 Review</button>`;
     if(t.has_patch) btns+=`<button class="btn btn-mv btn-mini" title="full diff of the ship" onclick="openText('Δ Diff — ${esc(t.id)}','/diff?id=${encodeURIComponent(t.id)}',true)">Δ Diff</button>`;
     if(t.pr_url) btns+=`<a class="btn btn-pr btn-mini" style="text-decoration:none" href="${esc(t.pr_url)}" target="_blank" rel="noopener" title="prefilled Bitbucket PR-create page">⬆ Open PR</a>`;
-    if(!t.merged && !t.rejected){
-      btns+=`<button class="btn btn-go btn-mini" title="record that you merged this ship (feeds merge-rate metrics)" onclick="post('/mark',{id:'${esc(t.id)}',outcome:'merged'})">✓ Merged</button>
-        <button class="btn btn-kill btn-mini" title="record that you rejected this ship" onclick="rejectTask('${esc(t.id)}')">✗ Reject</button>`;
-    }
-    if(t.merged) btns+=`<button class="btn btn-rb btn-mini" onclick="if(confirm('Revert ${esc(t.id)} on the loop branch?'))post('/rollback',{id:'${esc(t.id)}'})">↩ Rollback</button>`;
+    // Action buttons are LIFECYCLE-DRIVEN: the server evaluates the same state
+    // machine ledger.py enforces (can_merge/can_reject/can_revert), so a button
+    // only renders when the transition is legal — no client-side guessing.
+    if(t.can_merge) btns+=`<button class="btn btn-go btn-mini" title="record that you merged this ship (feeds merge-rate metrics + the merge marker)" onclick="markShip('${esc(t.id)}','merged')">✓ Merged</button>`;
+    if(t.can_reject) btns+=`<button class="btn btn-kill btn-mini" title="record that you rejected this ship (reason required)" onclick="rejectTask('${esc(t.id)}')">✗ Reject</button>`;
+    if(t.merged && t.can_revert && !t.reverted) btns+=`<button class="btn btn-rb btn-mini" onclick="if(confirm('Revert ${esc(t.id)} on the loop branch? (a reason will be asked — it is recorded and mined)'))rollbackTask('${esc(t.id)}')">↩ Rollback</button>`;
     timer=`<div class="meta">${ref}${when}</div>`;
   }
   const pri = (kind==='next'||kind==='board') ? badge('p:'+(t.priority||'medium'), t.priority==='high'?'warn':'acc') : '';
-  const rev = (kind==='done') ? (t.merged?badge('merged','ok'):t.rejected?badge('rejected','stop'):badge('awaiting review','warn')) : '';
+  const rev = (kind==='done') ? (t.merged?badge('merged','ok'):t.rejected?badge('rejected','stop'):badge('awaiting review','warn'))
+            + (t.reverted?badge('reverted','stop'):'') + (t.forced?badge('forced','stop'):'')
+            + (t.state&&t.state!=='merged'&&t.state!=='rejected'?badge(t.state,'muted'):'') : (t.forced?badge('forced','stop'):'');
   const reason = t.reason? `<div class=reason>🚩 ${esc(t.reason)}</div>`:'';
   const lint = (kind==='board' && ((t.lint_hard&&t.lint_hard.length)||(t.lint_soft&&t.lint_soft.length)))?
     `<div class=lint>🧹 ${esc([...(t.lint_hard||[]).map(x=>'HELD: '+x),...(t.lint_soft||[])].join(' · '))}</div>`:'';
@@ -1993,8 +2207,79 @@ function answerTask(id){
 }
 function rejectTask(id){
   const note=prompt('Reject "'+id+'" — why? (recorded on the task; tunes what gets auto-fed)');
-  if(note!==null) post('/mark',{id:id,outcome:'rejected',note:note||''});
+  if(note!==null) markShip(id,'rejected',note||'');
 }
+// Mark with the lifecycle gate surfaced: if the ledger refuses the transition,
+// explain why and offer a FORCE (reason required; stamped forced:true, audited).
+function markShip(id,outcome,note){
+  const p={id:id,outcome:outcome}; if(note) p.note=note;
+  fetch('/mark',{method:'POST',headers:POST_HDRS,body:new URLSearchParams(p).toString()})
+    .then(r=>r.json()).then(j=>{
+      if((j.msg||'').includes('illegal transition')){
+        const why=prompt('The lifecycle gate refused:\n\n'+j.msg+'\n\nTo FORCE it anyway, type the reason (recorded on the entry as forced:true) — or Cancel.');
+        if(why&&why.trim()) post('/mark',{id:id,outcome:outcome,note:why.trim(),force:'1'});
+        else toast('Not forced — nothing recorded.');
+      } else { toast(j.msg||'done'); refresh(); }
+    }).catch(e=>toast('error: '+e));
+}
+function rollbackTask(id){
+  const note=prompt('Revert "'+id+'" — why? (required; recorded as the revert_note the calibration miner learns from)');
+  if(note&&note.trim()) post('/rollback',{id:id,note:note.trim()});
+  else if(note!==null) toast('A revert reason is required — nothing reverted.');
+}
+function reapStalled(){
+  if(confirm('Reap stalled tasks?\n\nAny task stuck mid-cycle (claimed or committed by a cycle that died) longer than the cycle timeout escalates onto the gates. Fresh/running work is never touched.'))
+    post('/reap',{});
+}
+// ── task create/edit form (modal3) ──
+let taskFormMode='new';
+function _catOptions(sel){
+  return ((S&&S.categories)||['bug','feature','refactor','testing','documentation']).map(c=>
+    `<option${c===sel?' selected':''}>${esc(c)}</option>`).join('');
+}
+function newTaskForm(){
+  taskFormMode='new';
+  document.getElementById('m3title').textContent='＋ New task';
+  document.getElementById('m3hint').textContent='Same bar as the lint gate: a known category and at least one acceptance criterion — a task the verifier can actually grade.';
+  document.getElementById('tfId').value=''; document.getElementById('tfId').disabled=false;
+  document.getElementById('tfTitle').value=''; document.getElementById('tfCtx').value='';
+  document.getElementById('tfAcc').value=''; document.getElementById('tfQueue').checked=false;
+  document.getElementById('tfCat').innerHTML=_catOptions('bug');
+  document.getElementById('tfPri').value='medium';
+  document.getElementById('tfQueueRow').style.display='';
+  document.getElementById('modal3').style.display='flex';
+}
+function editTaskForm(id){
+  const t=(S.board||[]).concat(S.next_up||[]).find(x=>x.id===id); if(!t){toast('task not found');return;}
+  taskFormMode='edit';
+  document.getElementById('m3title').textContent='✎ Edit '+id;
+  document.getElementById('m3hint').textContent='Empty fields keep their current value — you cannot blank a field by accident.';
+  document.getElementById('tfId').value=id; document.getElementById('tfId').disabled=true;
+  document.getElementById('tfTitle').value=t.title||'';
+  document.getElementById('tfCtx').value='';
+  document.getElementById('tfAcc').value=(t.acceptance_criteria||[]).join('\n');
+  document.getElementById('tfCat').innerHTML=_catOptions(t.category||'');
+  document.getElementById('tfPri').value=t.priority||'';
+  document.getElementById('tfQueueRow').style.display='none';
+  document.getElementById('modal3').style.display='flex';
+}
+function submitTaskForm(){
+  const p={id:document.getElementById('tfId').value.trim(),
+           title:document.getElementById('tfTitle').value.trim(),
+           category:document.getElementById('tfCat').value,
+           priority:document.getElementById('tfPri').value,
+           context:document.getElementById('tfCtx').value,
+           acc:document.getElementById('tfAcc').value};
+  if(taskFormMode==='new') p.queue=document.getElementById('tfQueue').checked?'1':'0';
+  fetch(taskFormMode==='new'?'/task-new':'/task-edit',
+        {method:'POST',headers:POST_HDRS,body:new URLSearchParams(p).toString()})
+    .then(r=>r.json()).then(j=>{
+      toast(j.msg||'done');
+      // Validation misses keep the form open with your input intact; success closes.
+      if((j.msg||'').startsWith('Created')||(j.msg||'').startsWith('Updated')){ closeModal3(); refresh(); }
+    }).catch(e=>toast('error: '+e));
+}
+function closeModal3(){ document.getElementById('modal3').style.display='none'; }
 function openText(title,url,isDiff){
   fetch(url).then(r=>{ if(!r.ok) throw new Error('HTTP '+r.status); return r.text(); }).then(txt=>{
     document.getElementById('m2title').textContent=title;
@@ -2328,7 +2613,25 @@ class Handler(BaseHTTPRequestHandler):
                 msg = do_answer(tid, (data.get("text", [""])[0]).strip())
             elif path == "/mark":
                 msg = do_mark(tid, (data.get("outcome", [""])[0]).strip(),
-                              (data.get("note", [""])[0]).strip())
+                              (data.get("note", [""])[0]).strip(),
+                              force=(data.get("force", ["0"])[0]).strip() == "1")
+            elif path == "/task-new":
+                msg = do_task_new(tid, (data.get("title", [""])[0]).strip(),
+                                  (data.get("category", [""])[0]).strip(),
+                                  (data.get("priority", ["medium"])[0]).strip(),
+                                  data.get("context", [""])[0],
+                                  data.get("acc", [""])[0],
+                                  queue_now=(data.get("queue", ["0"])[0]).strip() == "1")
+            elif path == "/task-edit":
+                msg = do_task_edit(tid, (data.get("title", [""])[0]).strip(),
+                                   (data.get("category", [""])[0]).strip(),
+                                   (data.get("priority", [""])[0]).strip(),
+                                   data.get("context", [""])[0],
+                                   data.get("acc", [""])[0])
+            elif path == "/task-del":
+                msg = do_task_delete(tid)
+            elif path == "/reap":
+                msg = do_reap()
             elif path == "/lintok":
                 msg = do_lintok(tid)
             elif path == "/epic-action":

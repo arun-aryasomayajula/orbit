@@ -246,9 +246,15 @@ Full walkthrough with prerequisites, first-cycle verification, and troubleshooti
 ## The dashboard
 
 `engine/command_center.py` serves a live control panel (stdlib-only, default
-`http://127.0.0.1:8787`): watch the in-flight task, reorder or promote backlog
-items, answer escalations, review finished branches, merge/reject/revert ships,
-and manage `autopilot/*` branches — all without disturbing the running loop.
+`http://127.0.0.1:8787`): watch the in-flight task, **create / edit / delete
+backlog tasks** (same contract bar as the lint gate — no YAML editing), reorder
+or promote items, answer escalations, review finished branches,
+merge/reject/revert ships, and manage `autopilot/*` branches — all without
+disturbing the running loop. Review buttons are **lifecycle-driven**: the
+server evaluates the same state machine `ledger.py` enforces, so an action only
+renders when the transition is legal, and a gate refusal offers an audited
+force-with-reason override. A **Reap stalled** button covers what the wrapper's
+per-iteration reaper can't reach while the loop is paused.
 What each section means and how to operate it: **[docs/OPERATOR-GUIDE.md](docs/OPERATOR-GUIDE.md)**.
 
 ## Requirements
