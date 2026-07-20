@@ -278,6 +278,9 @@ ul.acc{margin:6px 0 0 16px;padding:0;font-size:11.5px;color:var(--dim)}
 .modalbox h3{margin:0 0 10px;font:600 14px var(--disp);letter-spacing:.03em}
 .modalbox textarea{width:100%;height:300px;font:400 11.5px/1.6 var(--mono);border:1px solid var(--line2);
   border-radius:8px;padding:11px;color:var(--ink);background:var(--void);resize:vertical}
+.tfin{width:100%;font:400 12px/1.5 var(--mono);border:1px solid var(--line2);border-radius:8px;
+  padding:8px 10px;color:var(--ink);background:var(--void)}
+textarea.tfin{height:auto;resize:vertical}
 .toast{position:fixed;right:18px;bottom:18px;max-width:480px;background:var(--panel);border:1px solid var(--blue);
   border-radius:10px;padding:12px 16px;font:500 12px/1.6 var(--mono);white-space:pre-wrap;
   box-shadow:0 12px 40px rgba(0,0,0,.5);opacity:0;transform:translateY(10px);transition:.25s;z-index:200;color:var(--ink)}
@@ -521,6 +524,7 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
   <div class="railfoot">
     <button class="btn" id="loopBtn" onclick="toggleLoop()">…</button>
     <button class="btn btn-ghost" id="feedBtn" onclick="toggleFeed()" title="When on, the loop promotes the next safe task itself whenever the queue runs dry.">Auto-feed</button>
+    <button class="btn btn-ghost" onclick="newTaskForm()" title="create a backlog task right here — no YAML editing">＋ New task</button>
     <button class="btn btn-ghost" onclick="reapStalled()" title="escalate tasks stuck mid-cycle (claimed/committed by a dead cycle) onto the gates — the loop does this each iteration, but a paused loop can't">🧹 Reap stalled</button>
     <div class="meter" id="budgetMeter"></div>
   </div>
@@ -664,6 +668,26 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
   </div>
   <div style="margin-top:10px"><button class="btn btn-mini" onclick="closeModal4()">Close</button></div>
 </div></div>
+<div class="modal" id="modal5" onclick="closeModal5()"><div class="modalbox" onclick="event.stopPropagation()">
+  <h3 id="m5title"></h3>
+  <div class="m3ctx" id="m5hint"></div>
+  <div style="display:flex;flex-direction:column;gap:6px">
+    <input id="tfId" class="tfin" placeholder="id — lowercase slug, e.g. fix-login-timeout" autocomplete="off">
+    <input id="tfTitle" class="tfin" placeholder="title — what done looks like, in one line" autocomplete="off">
+    <div style="display:flex;gap:6px">
+      <select id="tfCat" class="tfin" style="flex:1"></select>
+      <select id="tfPri" class="tfin" style="width:130px">
+        <option value="">priority…</option><option>high</option><option selected>medium</option><option>low</option>
+      </select>
+    </div>
+    <textarea id="tfCtx" class="tfin" rows="3" placeholder="context — the WHY the maker needs (edit: leave blank to keep current)"></textarea>
+    <textarea id="tfAcc" class="tfin" rows="4" placeholder="acceptance criteria — ONE PER LINE (required for new tasks; the verifier grades against these)"></textarea>
+    <label id="tfQueueRow" style="font:500 12px var(--mono);color:var(--dim)"><input type="checkbox" id="tfQueue"> queue immediately (skip 'proposed' triage — you ARE the triage)</label>
+  </div>
+  <div style="margin-top:10px;display:flex;gap:8px">
+    <button class="btn btn-go btn-mini" onclick="submitTaskForm()">Save</button>
+    <button class="btn btn-mini" onclick="closeModal5()">Cancel</button></div>
+</div></div>
 <div id="palette" onclick="closePalette()"><div class="palbox" onclick="event.stopPropagation()">
   <input id="palinput" placeholder="Find a task, ship, or escalation… (or type an action)" autocomplete="off">
   <div id="pallist"></div>
@@ -698,7 +722,7 @@ function go(v){
   if(v==='settings')loadSettings();   // fetch fresh config each time the tab opens
 }
 document.addEventListener('keydown',e=>{
-  if(e.key==='Escape'){closePalette();closeModal();closeModal2();closeModal3();closeModal4();return;}
+  if(e.key==='Escape'){closePalette();closeModal();closeModal2();closeModal3();closeModal4();closeModal5();return;}
   if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();openPalette();return;}
   if(e.target.tagName==='TEXTAREA'||e.target.tagName==='INPUT')return;
   if(e.key==='/'){e.preventDefault();openPalette();return;}
@@ -758,14 +782,17 @@ function card(t,kind){
       btns+=`<button class="btn btn-mini" title="let it through despite the thin contract" onclick="post('/lintok',{id:'${esc(t.id)}'})">Waive lint</button>`;
     }
     btns+=`<button class="btn btn-mini" title="raise priority" onclick="post('/priority',{id:'${esc(t.id)}',dir:'up'})">Pri +</button>
+      <button class="btn btn-mini" title="edit the task's contract (title, category, priority, context, acceptance criteria)" onclick="editTaskForm('${esc(t.id)}')">✎ Edit</button>
       <button class="btn btn-ghost btn-mini" title="park it in the graveyard orbit" onclick="post('/skip',{id:'${esc(t.id)}'})">Park</button>
-      <button class="btn btn-vio btn-mini" title="build this as a dedicated feature agent in its own worktree off the loop branch" onclick="featureBuild('${esc(t.id)}')">⚡ Feature agent</button>`;
+      <button class="btn btn-vio btn-mini" title="build this as a dedicated feature agent in its own worktree off the loop branch" onclick="featureBuild('${esc(t.id)}')">⚡ Feature agent</button>
+      <button class="btn btn-stop btn-mini" title="delete this un-worked task from the backlog" onclick="if(confirm('Delete ${esc(t.id)} from the backlog?\\n\\nOnly un-worked tasks can be deleted — worked ones are history.'))post('/task-del',{id:'${esc(t.id)}'})">🗑</button>`;
   }else if(kind==='skipped'){
     btns=`<button class="btn btn-go btn-mini" onclick="post('/unskip',{id:'${esc(t.id)}'})">Bring back</button>`;
   }else if(kind==='esc'){
     btns=`<button class="btn btn-go btn-mini" title="your answer joins the contract and the task re-queues" onclick="answerTask('${esc(t.id)}')">Answer &amp; re-queue</button>
       <button class="btn btn-ghost btn-mini" title="park it in the graveyard orbit" onclick="post('/skip',{id:'${esc(t.id)}'})">Park</button>
       <button class="btn btn-vio btn-mini" title="build this as a dedicated feature agent in its own worktree off the loop branch" onclick="featureBuild('${esc(t.id)}')">⚡ Feature agent</button>`;
+    if(t.can_reject)btns+=`<button class="btn btn-stop btn-mini" title="close this escalation as won't-do (reason required — recorded and mined)" onclick="rejectTask('${esc(t.id)}',1)">✗ Won't do</button>`;
   }else if(kind==='done'){
     const ref=`${(t.sha||'').slice(0,8)} → ${esc(t.branch||t.remote_ref||'')}`;
     const when=t.committed_at?` · ${t.committed_at} (${relDays(t.committed_at)})`:'';
@@ -773,15 +800,18 @@ function card(t,kind){
     if(t.has_packet)btns+=`<button class="btn btn-blue btn-mini" title="the 2-minute read: contract, diffstat, verifier evidence" onclick="openText('Review packet — ${esc(t.id)}','/review?id=${encodeURIComponent(t.id)}',false)">Review packet</button>`;
     if(t.has_patch)btns+=`<button class="btn btn-mini" title="the full diff" onclick="openText('Diff — ${esc(t.id)}','/diff?id=${encodeURIComponent(t.id)}',true)">Diff</button>`;
     if(t.pr_url)btns+=`<a class="btn btn-blue btn-mini" href="${esc(t.pr_url)}" target="_blank" rel="noopener" title="${t.pr_open?'the wrapper already opened this PR — review and merge there':'opens your git host with source and target prefilled'}">${t.pr_open?'View PR':'Open PR'} ↗</a>`;
-    if(!t.merged&&!t.rejected){
-      btns+=`<button class="btn btn-go btn-mini" title="record that this ship landed" onclick="post('/mark',{id:'${esc(t.id)}',outcome:'merged'})">Mark merged</button>
-        <button class="btn btn-stop btn-mini" onclick="rejectTask('${esc(t.id)}')">Reject</button>`;
-    }
-    if(t.merged)btns+=`<button class="btn btn-vio btn-mini" onclick="revertTask('${esc(t.id)}')">Revert</button>`;
+    // Action buttons are LIFECYCLE-DRIVEN: the server evaluates the same state
+    // machine ledger.py enforces (can_merge/can_reject/can_revert), so a button
+    // only renders when the transition is legal — no client-side guessing.
+    if(t.can_merge)btns+=`<button class="btn btn-go btn-mini" title="record that this ship landed" onclick="markShip('${esc(t.id)}','merged')">Mark merged</button>`;
+    if(t.can_reject)btns+=`<button class="btn btn-stop btn-mini" onclick="rejectTask('${esc(t.id)}')">Reject</button>`;
+    if(t.merged&&t.can_revert&&!t.reverted)btns+=`<button class="btn btn-vio btn-mini" onclick="revertTask('${esc(t.id)}')">Revert</button>`;
     timer=`<div class="meta">${ref}${when}</div>`;
   }
   const pri=(kind==='next'||kind==='board')?badge((t.priority||'medium')+' priority',t.priority==='high'?'warn':'acc'):'';
-  const rev=(kind==='done')?(t.merged?badge('merged','ok'):t.rejected?badge('rejected','stop'):badge('needs review','warn')):'';
+  const rev=(kind==='done')?(t.merged?badge('merged','ok'):t.rejected?badge('rejected','stop'):badge('needs review','warn'))
+    +(t.reverted?badge('reverted','stop'):'')+(t.forced?badge('forced','stop'):'')
+    +(t.state&&t.state!=='merged'&&t.state!=='rejected'?badge(t.state,'muted'):''):(t.forced?badge('forced','stop'):'');
   // Escalations: lead with the plain-language brief + recommendation (the raw
   // engineer reason stays available, collapsed). Cards without a brief fall
   // back to the reason as before.
@@ -1331,15 +1361,32 @@ function answerTask(id){
   document.getElementById('m3go').className='btn btn-go btn-mini';
   document.getElementById('modal3').style.display='flex'; ta.focus();
 }
-function rejectTask(id){
+function rejectTask(id,isEsc){
   const t=findTask(id); m3={id:id,mode:'reject'};
-  document.getElementById('m3title').textContent='Reject this ship';
-  document.getElementById('m3ctx').innerHTML=`<b>${esc(t.title)}</b><br>${esc((t.sha||'').slice(0,8))} → ${esc(t.branch||'')}`;
+  document.getElementById('m3title').textContent=isEsc?"Close as won't-do":'Reject this ship';
+  document.getElementById('m3ctx').innerHTML=isEsc
+    ?`<b>${esc(t.title)}</b>`+(t.reason?`<br><span class=rr>⚠ ${esc(t.reason)}</span>`:'')
+    :`<b>${esc(t.title)}</b><br>${esc((t.sha||'').slice(0,8))} → ${esc(t.branch||'')}`;
   const ta=document.getElementById('m3text');
-  ta.value=''; ta.placeholder='Why is it rejected? The reason is recorded on the task and tunes what gets auto-fed.';
-  document.getElementById('m3go').textContent='Reject ship';
+  ta.value=''; ta.placeholder=isEsc
+    ?"Why won't we do this? The reason is recorded on the task and tunes what gets auto-fed."
+    :'Why is it rejected? The reason is recorded on the task and tunes what gets auto-fed.';
+  document.getElementById('m3go').textContent=isEsc?"Won't do":'Reject ship';
   document.getElementById('m3go').className='btn btn-stop btn-mini';
   document.getElementById('modal3').style.display='flex'; ta.focus();
+}
+// Mark with the lifecycle gate surfaced: if the ledger refuses the transition,
+// explain why and offer a FORCE (reason required; stamped forced:true, audited).
+function markShip(id,outcome,note){
+  const p={id:id,outcome:outcome}; if(note)p.note=note;
+  fetch('/mark',{method:'POST',headers:POST_HDRS,body:new URLSearchParams(p).toString()})
+    .then(r=>r.json()).then(j=>{
+      if((j.msg||'').includes('illegal transition')){
+        const why=prompt('The lifecycle gate refused:\n\n'+j.msg+'\n\nTo FORCE it anyway, type the reason (recorded on the entry as forced:true) — or Cancel.');
+        if(why&&why.trim()) post('/mark',{id:id,outcome:outcome,note:why.trim(),force:'1'});
+        else toast('Not forced — nothing recorded.');
+      } else { toast(j.msg||'done'); refresh(); }
+    }).catch(e=>toast('error: '+e));
 }
 function revertTask(id){
   const t=findTask(id); m3={id:id,mode:'revert'};
@@ -1358,11 +1405,63 @@ function submitAction(){
   else if(m3.mode==='revert'){ if(!txt){toast('Give a reason — it is recorded on the task and mined to tune the loop.');return;}
     post('/rollback',{id:m3.id,note:txt}); }
   else{ if(!txt){toast('Give a reason — it is recorded on the task and mined to tune the loop.');return;}
-    post('/mark',{id:m3.id,outcome:'rejected',note:txt}); }
+    markShip(m3.id,'rejected',txt); }
   closeModal3();
 }
 function closeModal3(){document.getElementById('modal3').style.display='none';}
 function closeModal4(){document.getElementById('modal4').style.display='none';}
+
+/* ── task create/edit form (modal5) ─────────────────────────────────────── */
+let tfMode='new';
+function _catOptions(sel){
+  return ((S&&S.categories)||['bug','feature','refactor','testing','documentation']).map(c=>
+    `<option${c===sel?' selected':''}>${esc(c)}</option>`).join('');
+}
+function newTaskForm(){
+  tfMode='new';
+  document.getElementById('m5title').textContent='＋ New task';
+  document.getElementById('m5hint').textContent='Same bar as the lint gate: a known category and at least one acceptance criterion — a task the verifier can actually grade.';
+  document.getElementById('tfId').value=''; document.getElementById('tfId').disabled=false;
+  document.getElementById('tfTitle').value=''; document.getElementById('tfCtx').value='';
+  document.getElementById('tfAcc').value=''; document.getElementById('tfQueue').checked=false;
+  document.getElementById('tfCat').innerHTML=_catOptions('bug');
+  document.getElementById('tfPri').value='medium';
+  document.getElementById('tfQueueRow').style.display='';
+  document.getElementById('modal5').style.display='flex';
+  document.getElementById('tfId').focus();
+}
+function editTaskForm(id){
+  const t=findTask(id); if(!t||!t.title||t.title===id&&!t.category){toast('task not found');return;}
+  tfMode='edit';
+  document.getElementById('m5title').textContent='✎ Edit '+id;
+  document.getElementById('m5hint').textContent='Empty fields keep their current value — you cannot blank a field by accident.';
+  document.getElementById('tfId').value=id; document.getElementById('tfId').disabled=true;
+  document.getElementById('tfTitle').value=t.title||'';
+  document.getElementById('tfCtx').value='';
+  document.getElementById('tfAcc').value=(t.acceptance_criteria||[]).join('\n');
+  document.getElementById('tfCat').innerHTML=_catOptions(t.category||'');
+  document.getElementById('tfPri').value=t.priority||'';
+  document.getElementById('tfQueueRow').style.display='none';
+  document.getElementById('modal5').style.display='flex';
+  document.getElementById('tfTitle').focus();
+}
+function submitTaskForm(){
+  const p={id:document.getElementById('tfId').value.trim(),
+           title:document.getElementById('tfTitle').value.trim(),
+           category:document.getElementById('tfCat').value,
+           priority:document.getElementById('tfPri').value,
+           context:document.getElementById('tfCtx').value,
+           acc:document.getElementById('tfAcc').value};
+  if(tfMode==='new') p.queue=document.getElementById('tfQueue').checked?'1':'0';
+  fetch(tfMode==='new'?'/task-new':'/task-edit',
+        {method:'POST',headers:POST_HDRS,body:new URLSearchParams(p).toString()})
+    .then(r=>r.json()).then(j=>{
+      toast(j.msg||'done');
+      // Validation misses keep the form open with your input intact; success closes.
+      if((j.msg||'').startsWith('Created')||(j.msg||'').startsWith('Updated')){ closeModal5(); refresh(); }
+    }).catch(e=>toast('error: '+e));
+}
+function closeModal5(){document.getElementById('modal5').style.display='none';}
 
 /* ── command palette ────────────────────────────────────────────────────── */
 let palSel=0;
