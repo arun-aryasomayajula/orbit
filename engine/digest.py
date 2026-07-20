@@ -60,9 +60,20 @@ def build(target: Path) -> tuple[str, str, str]:
     dash = cfg.get("dashboard_url") or "http://127.0.0.1:8787"
 
     entries = _load_json(state / "ledger.json", {}).get("entries") or {}
+    # Parked tasks (skips.txt, the dashboard's "Set aside") are deliberate
+    # operator decisions — they must not count as "blocked on you" or be
+    # offered as the next action. Ships stay regardless: they're reviewed
+    # via merge/reject, not parked (same rule the dashboard applies).
+    try:
+        skips = {ln.strip() for ln in (state / "skips.txt").read_text().splitlines()
+                 if ln.strip() and not ln.startswith("#")}
+    except OSError:
+        skips = set()
     ships = [(tid, e) for tid, e in entries.items() if e.get("state") == "pushed"]
-    escalated = [(tid, e) for tid, e in entries.items() if e.get("state") == "escalated"]
-    in_flight = [(tid, e) for tid, e in entries.items() if e.get("state") in ("in_progress", "committed")]
+    escalated = [(tid, e) for tid, e in entries.items()
+                 if e.get("state") == "escalated" and tid not in skips]
+    in_flight = [(tid, e) for tid, e in entries.items()
+                 if e.get("state") in ("in_progress", "committed") and tid not in skips]
 
     queue = _load_json(state / "queue.json", {})
     qtasks = queue.get("tasks") or []

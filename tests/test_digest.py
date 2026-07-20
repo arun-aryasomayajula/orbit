@@ -19,13 +19,15 @@ _spec.loader.exec_module(digest)
 DASH = "http://dash.example:8787"
 
 
-def _target(tmp_path, entries=None, queue=None):
+def _target(tmp_path, entries=None, queue=None, skips=None):
     ap = tmp_path / ".autopilot"
     state = ap / "state"
     state.mkdir(parents=True)
     (ap / "config.yaml").write_text(yaml.safe_dump({"dashboard_url": DASH}))
     (state / "ledger.json").write_text(json.dumps({"entries": entries or {}}))
     (state / "queue.json").write_text(json.dumps({"tasks": queue or []}))
+    if skips:
+        (state / "skips.txt").write_text("\n".join(skips) + "\n")
     return tmp_path
 
 
@@ -72,6 +74,20 @@ def test_unblocked_loop_says_nothing_needed(tmp_path):
     nxt = _next_line(body)
     assert "nothing" in nxt
     assert body.splitlines()[0].startswith("✅")
+
+
+def test_parked_escalation_is_not_blocked_on_you(tmp_path):
+    # "Set aside" (skips.txt) is a deliberate operator decision — a parked
+    # escalation must not be counted, listed, or offered as the next action.
+    entries = {
+        "t-parked": {"state": "escalated", "updated_at": "2026-06-01T00:00:00Z", "reason": "parked"},
+        "t-live": {"state": "escalated", "updated_at": "2026-07-10T00:00:00Z", "reason": "real"},
+    }
+    tgt = _target(tmp_path, entries, skips=["t-parked"])
+    _, body, _ = digest.build(tgt)
+    assert "t-parked" not in body
+    nxt = _next_line(body)
+    assert "t-live" in nxt
 
 
 def test_in_flight_task_is_restated(tmp_path):
