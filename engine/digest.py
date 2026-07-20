@@ -36,6 +36,21 @@ def _age_days(iso: str) -> str:
         return "?"
 
 
+def _next_action(escalated, ships, pickable, in_flight, dash: str) -> str:
+    """The digest ends with ONE concrete action doable in under two minutes —
+    the single highest-leverage gate, not a list. Escalations block a task
+    outright, so they outrank ships; ships outrank an empty queue."""
+    if escalated:
+        tid, _ = min(escalated, key=lambda x: x[1].get("updated_at") or "")
+        return f"→ next: answer escalation {tid} — {dash}"
+    if ships:
+        tid, e = min(ships, key=lambda x: x[1].get("updated_at") or "")
+        return f"→ next: review & merge {tid} — {e.get('pr_url') or dash}"
+    if not pickable and not in_flight:
+        return f"→ next: queue a task — {dash}"
+    return "→ next: nothing — the loop is unblocked."
+
+
 def build(target: Path) -> tuple[str, str, str]:
     """→ (title, body, dashboard_url)."""
     ap = target / ".autopilot"
@@ -47,6 +62,7 @@ def build(target: Path) -> tuple[str, str, str]:
     entries = _load_json(state / "ledger.json", {}).get("entries") or {}
     ships = [(tid, e) for tid, e in entries.items() if e.get("state") == "pushed"]
     escalated = [(tid, e) for tid, e in entries.items() if e.get("state") == "escalated"]
+    in_flight = [(tid, e) for tid, e in entries.items() if e.get("state") in ("in_progress", "committed")]
 
     queue = _load_json(state / "queue.json", {})
     qtasks = queue.get("tasks") or []
@@ -74,9 +90,14 @@ def build(target: Path) -> tuple[str, str, str]:
             lines.append(f"  · {tid} ({_age_days(e.get('updated_at'))}) — {e.get('reason') or ''}")
     if needs_info:
         lines.append(f"❓ {len(needs_info)} Jira ticket(s) waiting on info: " + ", ".join(sorted(needs_info)))
+    if in_flight:
+        lines.append("🔧 in flight: " + ", ".join(
+            f"{tid} ({e.get('state')}, {_age_days(e.get('updated_at'))})"
+            for tid, e in sorted(in_flight)))
     lines.append(f"📋 queue: {len(pickable)} pickable / {len(qtasks)} emitted · spend today ${spend:.2f}")
     if not ships and not escalated and not needs_info:
         lines.insert(0, "✅ no human gate is blocking the loop.")
+    lines.append(_next_action(escalated, ships, pickable, in_flight, dash))
 
     return f"Orbit digest — {target.name}", "\n".join(lines), dash
 
