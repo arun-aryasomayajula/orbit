@@ -521,6 +521,7 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
   <div class="railfoot">
     <button class="btn" id="loopBtn" onclick="toggleLoop()">…</button>
     <button class="btn btn-ghost" id="feedBtn" onclick="toggleFeed()" title="When on, the loop promotes the next safe task itself whenever the queue runs dry.">Auto-feed</button>
+    <button class="btn btn-ghost" onclick="reapStalled()" title="escalate tasks stuck mid-cycle (claimed/committed by a dead cycle) onto the gates — the loop does this each iteration, but a paused loop can't">🧹 Reap stalled</button>
     <div class="meter" id="budgetMeter"></div>
   </div>
 </aside>
@@ -684,6 +685,9 @@ function post(path,params){const b=new URLSearchParams(params).toString();
     .then(r=>r.json()).then(j=>{toast(j.msg||'done');refresh();}).catch(e=>toast('error: '+e));}
 function toast(m){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');
   clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),6000);}
+function reapStalled(){
+  if(confirm('Reap stalled tasks?\n\nAny task stuck mid-cycle (claimed or committed by a cycle that died) longer than the cycle timeout escalates onto the gates. Fresh/running work is never touched.'))
+    post('/reap',{});}
 
 /* ── navigation ─────────────────────────────────────────────────────────── */
 const VIEWS=['overview','inbox','queue','deepspace','ships','branches','agents','insights','settings'];
