@@ -101,16 +101,16 @@ def _git_head_sha(repo: Path) -> str | None:
         return None
 
 
-def _first_nonempty_line(path: Path) -> str | None:
-    for line in path.read_text().splitlines():
+def _first_nonempty_line(text: str) -> str | None:
+    for line in text.splitlines():
         if line.strip():
             return line.strip()
     return None
 
 
-def _has_endpoints_data_row(path: Path) -> bool:
+def _has_endpoints_data_row(text: str) -> bool:
     header = re.sub(r"\s+", " ", ENDPOINTS_HEADER)
-    for line in path.read_text().splitlines():
+    for line in text.splitlines():
         s = line.strip()
         if not s.startswith("|"):
             continue
@@ -120,6 +120,33 @@ def _has_endpoints_data_row(path: Path) -> bool:
             continue                                 # a `|---|---|` separator row
         return True
     return False
+
+
+def _read_text(path: Path) -> tuple[str | None, str | None]:
+    """(text, None) on success, (None, reason) on any read/decode failure — turns
+    a raw traceback (non-UTF8, permission, gone-between-check-and-read) into a
+    clean VALIDATE: line instead."""
+    try:
+        return path.read_text(), None
+    except (OSError, ValueError) as e:            # ValueError covers UnicodeDecodeError
+        return None, str(e)
+
+
+def _unsafe_doc_reason(kdir: Path, doc) -> str | None:
+    """None = doc resolves safely under kdir. Otherwise a human-readable reason
+    it was rejected — an agent-controlled manifest.json must never be able to
+    point validation (or a future reader) at a path outside knowledge/."""
+    if not isinstance(doc, str) or not doc:
+        return "not a valid relative path"
+    if os.path.isabs(doc):
+        return "absolute paths are not allowed — must be relative to knowledge/"
+    try:
+        resolved = (kdir / doc).resolve()
+    except OSError as e:
+        return f"could not resolve path ({e})"
+    if not resolved.is_relative_to(kdir.resolve()):
+        return "escapes knowledge/ (path traversal)"
+    return None
 
 
 def validate(kdir: Path, repo: Path) -> list[str]:
@@ -165,33 +192,55 @@ def validate(kdir: Path, repo: Path) -> list[str]:
                     f"manifest.json has no base_sha and `git -C {repo} rev-parse HEAD` failed")
 
         for doc in docs:
-            if not (kdir / doc).exists():
+            # containment BEFORE any existence check or read — an agent-written
+            # manifest.json is untrusted input; it must never make validation
+            # (or any future consumer) touch a path outside knowledge/.
+            unsafe = _unsafe_doc_reason(kdir, doc)
+            if unsafe:
+                failures.append(f"manifest.json lists doc '{doc}' which is unsafe ({unsafe}) — rejected")
+            elif not (kdir / doc).exists():
                 failures.append(f"manifest.json lists doc '{doc}' but it does not exist under {kdir}/")
 
     index_path = kdir / "INDEX.md"
     if not index_path.exists():
         failures.append(f"INDEX.md missing under {kdir}/")
     else:
-        n = len(index_path.read_text().splitlines())
-        if n > 80:
-            failures.append(f"INDEX.md is {n} lines, must be <= 80")
+        text, err = _read_text(index_path)
+        if err:
+            failures.append(f"INDEX.md could not be read ({err})")
+        else:
+            n = len(text.splitlines())
+            if n > 80:
+                failures.append(f"INDEX.md is {n} lines, must be <= 80")
 
     er_path = kdir / "er.mmd"
     if er_path.exists():
-        first = _first_nonempty_line(er_path)
-        if first != "erDiagram":
-            failures.append(f"er.mmd first non-empty line must be exactly 'erDiagram', got {first!r}")
+        text, err = _read_text(er_path)
+        if err:
+            failures.append(f"er.mmd could not be read ({err})")
+        else:
+            first = _first_nonempty_line(text)
+            if first != "erDiagram":
+                failures.append(f"er.mmd first non-empty line must be exactly 'erDiagram', got {first!r}")
 
     mindmap_path = kdir / "mindmap.mmd"
     if mindmap_path.exists():
-        first = _first_nonempty_line(mindmap_path)
-        if first != "mindmap":
-            failures.append(f"mindmap.mmd first non-empty line must be exactly 'mindmap', got {first!r}")
+        text, err = _read_text(mindmap_path)
+        if err:
+            failures.append(f"mindmap.mmd could not be read ({err})")
+        else:
+            first = _first_nonempty_line(text)
+            if first != "mindmap":
+                failures.append(f"mindmap.mmd first non-empty line must be exactly 'mindmap', got {first!r}")
 
     endpoints_path = kdir / "endpoints.md"
-    if endpoints_path.exists() and not _has_endpoints_data_row(endpoints_path):
-        failures.append("endpoints.md has no data rows (only a header/separator) under "
-                         f"{kdir}/")
+    if endpoints_path.exists():
+        text, err = _read_text(endpoints_path)
+        if err:
+            failures.append(f"endpoints.md could not be read ({err})")
+        elif not _has_endpoints_data_row(text):
+            failures.append("endpoints.md has no data rows (only a header/separator) under "
+                             f"{kdir}/")
 
     return failures
 

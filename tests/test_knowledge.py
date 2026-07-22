@@ -6,6 +6,7 @@
 # be recognized-but-unimplemented here.
 #
 # Run: python3.11 -m pytest tests/test_knowledge.py -v   (from orbit/)
+import base64
 import json
 import os
 import subprocess
@@ -83,11 +84,13 @@ def _head_sha(repo):
 
 def _agent_script(tmp_path):
     """Fake survey agent: writes knowledge/ files + manifest.json from a JSON spec
-    named by $FAKE_SPEC. `files`: {relpath: content}. `manifest`: dict, or omit the
-    key entirely to skip writing manifest.json altogether."""
+    named by $FAKE_SPEC. `files`: {relpath: content} (text). `binary_files`:
+    {relpath: base64} for content that must land as raw, possibly non-UTF8,
+    bytes. `manifest`: dict, or omit the key entirely to skip writing
+    manifest.json altogether."""
     script = tmp_path / "agent.py"
     script.write_text(textwrap.dedent("""\
-        import json, os
+        import base64, json, os
         from pathlib import Path
         spec = json.loads(Path(os.environ["FAKE_SPEC"]).read_text())
         kdir = Path(os.environ["AP_HOME"]) / "knowledge"
@@ -96,6 +99,10 @@ def _agent_script(tmp_path):
             p = kdir / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content)
+        for rel, b64 in spec.get("binary_files", {}).items():
+            p = kdir / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(base64.b64decode(b64))
         if "manifest" in spec:
             (kdir / "manifest.json").write_text(json.dumps(spec["manifest"]))
         """))
@@ -105,10 +112,12 @@ def _agent_script(tmp_path):
 NO_MANIFEST = object()   # sentinel: skip writing manifest.json at all (not "write it as null")
 
 
-def _spec(tmp_path, name, files, manifest):
+def _spec(tmp_path, name, files, manifest, binary_files=None):
     """Write the JSON spec the fake agent reads. Pass `manifest=NO_MANIFEST` to
     make the fake agent write every doc but never write manifest.json."""
     doc = {"files": files}
+    if binary_files:
+        doc["binary_files"] = binary_files
     if manifest is not NO_MANIFEST:
         doc["manifest"] = manifest
     p = tmp_path / name
@@ -130,12 +139,12 @@ def _full_manifest(docs=None, base_sha="deadbeefcafe", extra=None):
     return m
 
 
-def _full_files(endpoints=VALID_ENDPOINTS, er=VALID_ER, index=VALID_INDEX):
+def _full_files(endpoints=VALID_ENDPOINTS, er=VALID_ER, index=VALID_INDEX, mindmap=VALID_MINDMAP):
     return {
         "INDEX.md": index,
         "endpoints.md": endpoints,
         "er.mmd": er,
-        "mindmap.mmd": VALID_MINDMAP,
+        "mindmap.mmd": mindmap,
         "flows/checkout.md": VALID_FLOW,
         "conventions.md": VALID_CONVENTIONS,
     }
@@ -180,6 +189,52 @@ def test_build_fails_when_er_mmd_wrong_first_line(tmp_path):
     r = run(t, _agent_script(tmp_path), spec)
     assert r.returncode == 1
     assert "er.mmd" in (r.stdout + r.stderr)
+
+
+def test_build_fails_when_mindmap_mmd_wrong_first_line(tmp_path):
+    t = _target(tmp_path)
+    spec = _spec(tmp_path, "spec.json", _full_files(mindmap="graph TD\n  A --> B\n"), _full_manifest())
+    r = run(t, _agent_script(tmp_path), spec)
+    assert r.returncode == 1
+    assert "mindmap.mmd" in (r.stdout + r.stderr)
+
+
+def test_build_rejects_absolute_path_in_manifest_docs(tmp_path):
+    t = _target(tmp_path)
+    docs = list(ALL_DOCS) + ["/etc/passwd"]
+    spec = _spec(tmp_path, "spec.json", _full_files(), _full_manifest(docs=docs))
+    r = run(t, _agent_script(tmp_path), spec)
+    assert r.returncode == 1
+    assert "/etc/passwd" in (r.stdout + r.stderr)
+    assert "VALIDATE" in r.stdout
+
+
+def test_build_rejects_path_traversal_in_manifest_docs(tmp_path):
+    t = _target(tmp_path)
+    # a real file just outside knowledge/ — proves containment, not just
+    # nonexistence, is what rejects this entry
+    (t / ".autopilot" / "state").mkdir(parents=True, exist_ok=True)
+    (t / ".autopilot" / "state" / "secret.txt").write_text("do not surface this")
+    docs = list(ALL_DOCS) + ["../state/secret.txt"]
+    spec = _spec(tmp_path, "spec.json", _full_files(), _full_manifest(docs=docs))
+    r = run(t, _agent_script(tmp_path), spec)
+    assert r.returncode == 1
+    assert "../state/secret.txt" in (r.stdout + r.stderr)
+    assert "traversal" in (r.stdout + r.stderr) or "escapes" in (r.stdout + r.stderr)
+
+
+def test_build_reports_clean_validate_line_for_unreadable_er_mmd(tmp_path):
+    t = _target(tmp_path)
+    files = _full_files()
+    del files["er.mmd"]                              # written as raw bytes below instead
+    bad_bytes = base64.b64encode(b"\xff\xfeInvalidUTF8\n").decode()
+    spec = _spec(tmp_path, "spec.json", files, _full_manifest(),
+                binary_files={"er.mmd": bad_bytes})
+    r = run(t, _agent_script(tmp_path), spec)
+    assert r.returncode == 1
+    assert "VALIDATE" in r.stdout
+    assert "er.mmd" in (r.stdout + r.stderr)
+    assert "Traceback" not in r.stderr                # no raw traceback — a clean failure line
 
 
 def test_build_fails_when_endpoints_has_no_data_rows(tmp_path):
