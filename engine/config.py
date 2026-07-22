@@ -111,6 +111,49 @@ def validate(target):
                     errs.append(f"plan.categories must be a list of non-empty strings, got {cats!r}")
             if "model" in pl and (not isinstance(pl["model"], str) or not pl["model"]):
                 errs.append(f"plan.model must be a non-empty string, got {pl.get('model')!r}")
+    if "qa" in raw and raw["qa"] is not None:
+        qa = raw["qa"]
+        if not isinstance(qa, dict):
+            errs.append(f"qa must be a mapping, got {qa!r}")
+        else:
+            if "services" in qa:
+                svcs = qa["services"]
+                if not isinstance(svcs, list):
+                    errs.append(f"qa.services must be a list, got {svcs!r}")
+                else:
+                    for i, svc in enumerate(svcs):
+                        if not isinstance(svc, dict):
+                            errs.append(f"qa.services[{i}] must be a mapping, got {svc!r}")
+                            continue
+                        if not isinstance(svc.get("launch"), str) or not svc.get("launch"):
+                            errs.append(f"qa.services[{i}].launch must be a non-empty string, got {svc.get('launch')!r}")
+                        for field in ("name", "cwd", "ready"):
+                            if field in svc and not isinstance(svc[field], str):
+                                errs.append(f"qa.services[{i}].{field} must be a string, got {svc[field]!r}")
+            for field in ("base_url", "model", "browser"):
+                if field in qa and (not isinstance(qa[field], str) or not qa[field]):
+                    errs.append(f"qa.{field} must be a non-empty string, got {qa.get(field)!r}")
+            if "mcp_config" in qa and qa["mcp_config"] is not None and not isinstance(qa["mcp_config"], str):
+                errs.append(f"qa.mcp_config must be a string or null, got {qa.get('mcp_config')!r}")
+            for field in ("ready_timeout_seconds", "timeout_seconds"):
+                if field in qa and (not isinstance(qa[field], int) or isinstance(qa[field], bool) or qa[field] <= 0):
+                    errs.append(f"qa.{field} must be a positive integer, got {qa.get(field)!r}")
+            if "headless" in qa and not isinstance(qa["headless"], bool):
+                errs.append(f"qa.headless must be a boolean, got {qa.get('headless')!r}")
+            if "max_bounces" in qa and (not isinstance(qa["max_bounces"], int) or isinstance(qa["max_bounces"], bool) or qa["max_bounces"] < 0):
+                errs.append(f"qa.max_bounces must be a non-negative integer, got {qa.get('max_bounces')!r}")
+            if "gate_categories" in qa:
+                gc = qa["gate_categories"]
+                if not isinstance(gc, dict):
+                    errs.append(f"qa.gate_categories must be a mapping, got {gc!r}")
+                else:
+                    for k, v in gc.items():
+                        if not isinstance(k, str) or not k or v not in ("required", "evidence"):
+                            errs.append(f"qa.gate_categories entries must map non-empty strings to \"required\" or \"evidence\", got {k!r}: {v!r}")
+            if "env" in qa:
+                envv = qa["env"]
+                if not isinstance(envv, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in envv.items()):
+                    errs.append(f"qa.env must be a mapping of string to string, got {envv!r}")
     if errs:
         print("\n".join("  ✗ " + e for e in errs)); sys.exit(1)
     print("  ✓ config valid")

@@ -198,6 +198,37 @@ if plan_cfg:
         check("plan.categories are known router categories", not unknown,
               "" if not unknown else "UNKNOWN: " + ", ".join(unknown))
 
+# 5e. QA runtime environment (optional — presence of a `qa:` config block is
+# the switch; feature unused → zero behavior change, same convention as 5c/5d).
+# Read-only: doctor never launches Playwright MCP or the target app — it only
+# confirms the environment CAN run qa_check.py once Task 14 lands. Playwright
+# MCP itself is fetched by `npx` at QA-run time (never an engine dependency),
+# so node+npx resolving on PATH is the actual precondition; whether Playwright
+# is already cached is advisory only (`npx playwright install` is an operator
+# act, not something doctor can or should do).
+qa_cfg = cfg.get("qa") if isinstance(cfg.get("qa"), dict) else None
+if qa_cfg is not None:
+    node = shutil.which("node")
+    npx = shutil.which("npx")
+    check("qa: node on PATH", bool(node), node or "NOT FOUND — install Node.js (qa: requires it)")
+    check("qa: npx on PATH", bool(npx), npx or "NOT FOUND — install Node.js (bundles npx; qa: requires it)")
+    if npx:
+        # Bounded + non-interactive: doctor must stay fast and read-only. An
+        # uncached Playwright can make npx try to resolve/download it from the
+        # registry (slow, or a hang on a flaky/offline network) — a short
+        # timeout turns that into the same advisory line as any other miss,
+        # never a doctor hang.
+        try:
+            pw_ok = subprocess.run([npx, "playwright", "--version"], capture_output=True,
+                                    stdin=subprocess.DEVNULL, timeout=10).returncode == 0
+        except (subprocess.TimeoutExpired, OSError):
+            pw_ok = False
+        if not pw_ok:
+            print("  · qa: `npx playwright --version` failed — it will be fetched on first QA run "
+                  "(or install ahead of time: npx playwright install)")
+    if cfg.get("runtime_check"):
+        print("  · qa: supersedes runtime_check: as the post-commit gate")
+
 # 6. dry-run routing over the queue (if present)
 qf = os.path.join(AP, "state", "queue.json")
 if os.path.exists(qf):
