@@ -80,8 +80,12 @@ this task's business.
     pairs with `contradicts: true`.
   - `contradicts` mirrors fail-with-contradiction (legacy-compatible field):
     `true` iff `verdict == "fail"`.
-  - `ran: false` ONLY when `verdict == "unable"` stopped you before you could
-    drive anything; otherwise `true`.
+  - `ran: false` iff `verdict == "unable"` — symmetric with the rule above,
+    regardless of whether the environment died before or mid-drive.
+  - Precedence: if you already confirmed a `contradicted` criterion WITH
+    evidence and the environment THEN fails, the verdict is still `fail` — a
+    real observed contradiction outweighs later environment trouble.
+    `unable` is only for runs where NO criterion could be decisively judged.
   - `screenshots`/`logs` paths are RELATIVE to `$AP_STATE/qa/` (e.g.
     `task-<id>/01-login.png`), never absolute.
 
@@ -98,6 +102,7 @@ this task's business.
   live, in a real browser or via real requests against it.
 
 ## Clean up and exit
-Kill every process you started; leave the worktree exactly as you found it
-(`git status` clean apart from your outputs, which live OUTSIDE the
-worktree). Print one line: `<id>: verdict=<pass|fail|unable> contradicts=<bool>`.
+Kill every process you started; leave the worktree exactly as you found it —
+`git status` clean apart from `ops/qa/SEEN.md` (the one sanctioned
+in-worktree write); your other outputs live OUTSIDE the worktree. Print one
+line: `<id>: verdict=<pass|fail|unable> contradicts=<bool>`.
