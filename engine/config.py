@@ -98,6 +98,19 @@ def validate(target):
             for field in ("stale_after_merges", "timeout_seconds"):
                 if field in kb and (not isinstance(kb[field], int) or isinstance(kb[field], bool) or kb[field] <= 0):
                     errs.append(f"knowledge.{field} must be a positive integer, got {kb.get(field)!r}")
+    if "plan" in raw and raw["plan"] is not None:
+        pl = raw["plan"]
+        if not isinstance(pl, dict):
+            errs.append(f"plan must be a mapping, got {pl!r}")
+        else:
+            if "enforce" in pl and pl["enforce"] not in ("verifier", "block"):
+                errs.append(f"plan.enforce must be \"verifier\" or \"block\", got {pl.get('enforce')!r}")
+            if "categories" in pl:
+                cats = pl["categories"]
+                if not isinstance(cats, list) or not all(isinstance(c, str) and c for c in cats):
+                    errs.append(f"plan.categories must be a list of non-empty strings, got {cats!r}")
+            if "model" in pl and (not isinstance(pl["model"], str) or not pl["model"]):
+                errs.append(f"plan.model must be a non-empty string, got {pl.get('model')!r}")
     if errs:
         print("\n".join("  ✗ " + e for e in errs)); sys.exit(1)
     print("  ✓ config valid")

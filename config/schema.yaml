@@ -110,6 +110,16 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
 #   stale_after_merges: 3        # auto: refresh once >=N merged ships touch mapped files
 #   timeout_seconds: 1800        # cap on the headless survey call
 
+# --- task-level planning (optional) -------------------------------------------
+# Before the build loop, a planner subagent writes a justified per-task plan
+# (approach, file-scope fence, applicable standards) into the review packet;
+# the maker is briefed with it and the verifier fails any off-plan diff.
+# plan:
+#   categories: [bug, feature, refactor, code_quality, testing]  # which tasks get planned
+#   enforce: "verifier"        # "verifier" (LLM judges the fence) | "block" (wrapper refuses
+#                              #  to push off-plan commits — exit 3 → escalate)
+#   model: "sonnet"            # planner model (router defaults.planner overrides)
+
 # --- pull requests (optional, wrapper-only) ------------------------------------
 # "github" → after pushing a ship, the WRAPPER (never the agent) runs `gh pr create`
 # against base_branch with the review packet as the PR body, and records the URL in

@@ -80,6 +80,13 @@ gates:
 workable_categories: [bug, feature, refactor, code_quality, testing, documentation, dependencies, developer_experience]
 sources: [backlog]
 
+# task-level planning: a planner subagent writes a justified per-task plan
+# (approach, file-scope fence, standards) before the build loop; the verifier
+# fails any off-plan diff. Remove this block to opt out.
+plan:
+  categories: [bug, feature, refactor, code_quality, testing]
+  enforce: "verifier"
+
 env:
   passthrough: []            # env var names to export into each cycle (values from your shell)
 
