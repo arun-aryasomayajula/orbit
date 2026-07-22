@@ -21,6 +21,10 @@ mapping (each of edit/create/forbid/allow_incidental, if present, a list of
 strings). Among candidates, the LAST one in the file wins — the planner's
 amendment protocol appends a complete new fence rather than editing the
 first, so this is "latest amendment governs", not a merge of all fences.
+Enforcement always uses the last VALID candidate — but if ANY fence in the
+file looked like a plan_scope block and failed to parse, that WARNs even when
+an earlier still-valid fence keeps enforcing: a botched amendment must leave
+a signal that it didn't take.
 
 Matching: a committed path is allowed if it matches any entry in
 edit ∪ create ∪ allow_incidental. Entry semantics: exact match; directory
@@ -75,9 +79,14 @@ REVIEWS = AP_STATE / "reviews"
 
 def _load_config() -> dict:
     try:
-        return yaml.safe_load((AP_HOME / "config.yaml").read_text()) or {}
+        cfg = yaml.safe_load((AP_HOME / "config.yaml").read_text())
     except (OSError, yaml.YAMLError):
         return {}
+    # A syntactically-valid YAML document whose top level isn't a mapping
+    # (a bare list/string/int) is not a config we understand — treat it the
+    # same as a missing/corrupt file (feature off) rather than let `.get()`
+    # below raise on it.
+    return cfg if isinstance(cfg, dict) else {}
 
 
 def _parse_scope_fence(fence_text: str) -> tuple[dict | None, str | None]:
@@ -105,10 +114,12 @@ def _parse_scope_fence(fence_text: str) -> tuple[dict | None, str | None]:
 
 def _extract_scope(text: str) -> tuple[dict | None, str | None]:
     """Scan ALL ```yaml fences in the plan file; the LAST well-formed
-    plan_scope candidate wins. Returns (None, warn) when no fence ever
-    qualifies — warn is set only when at least one fence looked like a
-    plan_scope block but was malformed, so the caller can WARN instead of
-    silently shipping."""
+    plan_scope candidate wins — enforcement is always against the last VALID
+    fence, never a merge. `warn` is set whenever ANY fence in the file looked
+    like a plan_scope candidate but failed to parse, REGARDLESS of whether a
+    later fence recovers with a valid one: an agent that botches an amendment
+    must leave a signal that the botched fence didn't take, even though an
+    earlier still-valid fence keeps enforcing."""
     winner = None
     warn = None
     for fence in _YAML_FENCE_RE.findall(text):
@@ -117,7 +128,7 @@ def _extract_scope(text: str) -> tuple[dict | None, str | None]:
             winner = scope
         elif reason:
             warn = reason
-    return winner, (warn if winner is None else None)
+    return winner, warn
 
 
 def _matches_any(path: str, entries: list[str]) -> bool:
@@ -171,9 +182,13 @@ def main(argv: list[str]) -> int:
         return SHIP                      # no plan file — never block blind
 
     scope, warn = _extract_scope(text)
-    if scope is None:
-        if warn:
+    if warn:
+        if scope is None:
             print(f"WARN: plan_gate: {warn} — shipping without scope enforcement")
+        else:
+            print(f"WARN: plan_gate: {warn} — amendment did not take; "
+                  f"enforcing the last VALID plan_scope fence instead")
+    if scope is None:
         return SHIP
 
     changed, reason = _changed_paths(worktree)

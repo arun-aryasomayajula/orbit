@@ -197,6 +197,53 @@ def test_fence_with_non_list_entry_ships_with_warning(tmp_path):
     assert "WARN" in r.stdout
 
 
+def test_non_dict_config_ships_without_traceback(tmp_path):
+    """A syntactically-valid config.yaml whose top level isn't a mapping (a
+    bare list) must never crash main() with an AttributeError on `.get()` —
+    it's treated the same as a missing/corrupt config (feature off)."""
+    repo = make_repo(tmp_path, {"README.md": "x"}, {"anything.py": "code"})
+    ap = tmp_path / ".autopilot"
+    (ap / "state" / "reviews").mkdir(parents=True)
+    (ap / "config.yaml").write_text("- some\n- top-level\n- list\n")
+    (ap / "state" / "reviews" / "task-t1-plan.md").write_text(
+        plan_md(scope_fence(edit=["src/app.py"])))
+    r = run_gate(ap, repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Traceback" not in r.stderr
+    assert "AttributeError" not in r.stderr
+
+
+def test_malformed_amendment_warns_but_first_valid_fence_still_enforces(tmp_path):
+    """Two fences: a valid one, then a botched amendment that fails to parse.
+    Enforcement stays on the last VALID fence (the first one here) — but the
+    botched amendment must still leave a WARN signal that it didn't take."""
+    repo = make_repo(tmp_path, {"README.md": "x"},
+                      {"a.py": "code", "b.py": "code"})
+    body = plan_md(scope_fence(edit=["a.py"]))
+    body += "\n## Amendment 1\n```yaml\nplan_scope: [unterminated\n```\n"
+    ap = make_target(tmp_path, body)
+    r = run_gate(ap, repo)
+    # b.py is outside fence 1's scope → still enforced as a violation.
+    assert r.returncode == 3, r.stdout + r.stderr
+    text = gate_file_text(ap)
+    assert text is not None and "b.py" in text and "a.py" not in text
+    # ...and the botched amendment left a WARN even though fence 1 still ran.
+    assert "WARN" in r.stdout
+
+
+def test_git_show_failure_ships_with_warning(tmp_path):
+    """An empty git repo (no commits yet) makes `git show HEAD` fail — never
+    block blind on a git-layer failure, and never dump a traceback."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    ap = make_target(tmp_path, plan_md(scope_fence(edit=["src/app.py"])))
+    r = run_gate(ap, repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "WARN" in r.stdout
+    assert "Traceback" not in r.stderr
+
+
 # --- usage / task id ----------------------------------------------------------
 
 def test_bad_task_id_exits_2(tmp_path):
