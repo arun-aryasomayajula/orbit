@@ -113,7 +113,7 @@ def build(target: Path) -> tuple[str, str, str]:
     staleness = _load_json(state / "knowledge-staleness.json", None)
     stale_docs = staleness.get("stale_docs") if isinstance(staleness, dict) else None
     if isinstance(stale_docs, list) and stale_docs:
-        lines.append(f"📚 knowledge stale: {len(stale_docs)} doc(s) — orbit knowledge refresh")
+        lines.append(f"📚 knowledge stale: {len(stale_docs)} doc(s) — orbit knowledge <target> refresh")
 
     if not ships and not escalated and not needs_info:
         lines.insert(0, "✅ no human gate is blocking the loop.")

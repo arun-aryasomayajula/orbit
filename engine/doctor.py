@@ -123,7 +123,7 @@ kdir = os.path.join(AP, "knowledge")
 kb_cfg = cfg.get("knowledge") if isinstance(cfg.get("knowledge"), dict) else {}
 if not os.path.isdir(kdir):
     if kb_cfg.get("refresh") == "auto":
-        check("knowledge.refresh: auto but no knowledge base — run `orbit knowledge build`", False)
+        check("knowledge.refresh: auto but no knowledge base — run `orbit knowledge <target> build`", False)
     # else: feature unused — print nothing (zero behavior change)
 else:
     manifest_path = os.path.join(kdir, "manifest.json")
@@ -159,7 +159,7 @@ else:
         except (OSError, ValueError):
             stale = None
         if isinstance(stale, list) and stale:
-            print(f"  · knowledge: {len(stale)} doc(s) stale — orbit knowledge refresh")
+            print(f"  · knowledge: {len(stale)} doc(s) stale — orbit knowledge <target> refresh")
 
 # 6. dry-run routing over the queue (if present)
 qf = os.path.join(AP, "state", "queue.json")

@@ -107,7 +107,7 @@ def test_knowledge_stale_line_present_with_count(tmp_path):
         "merges_considered": 5,
     }))
     _, body, _ = digest.build(tgt)
-    assert "📚 knowledge stale: 2 doc(s) — orbit knowledge refresh" in body
+    assert "📚 knowledge stale: 2 doc(s) — orbit knowledge <target> refresh" in body
 
 
 def test_knowledge_stale_line_absent_without_file(tmp_path):

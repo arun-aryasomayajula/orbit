@@ -809,4 +809,4 @@ def test_doctor_reports_stale_docs_informationally(tmp_path):
         "checked_at": "2026-07-22T00:00:00Z", "generated_at": "2026-07-01T00:00:00Z",
         "stale_docs": ["INDEX.md"], "merges_considered": 2}))
     r = _run_doctor(t)
-    assert "knowledge: 1 doc(s) stale — orbit knowledge refresh" in r.stdout, r.stdout
+    assert "knowledge: 1 doc(s) stale — orbit knowledge <target> refresh" in r.stdout, r.stdout
