@@ -241,6 +241,22 @@ one_iteration() {
   if [ "$ahead" -gt 0 ]; then
     local sha branch; sha="$(git -C "$WT" rev-parse --short HEAD 2>/dev/null || echo '?')"
     branch="$ORBIT_BRANCH_PREFIX/task-${tid:-cycle-$(date '+%Y%m%dT%H%M%S')}"
+    # Scope-fence gate (opt-in `plan.enforce: "block"`): refuse to push a commit
+    # that touches files outside the planner's plan_scope fence. Only exit code
+    # 3 — plan file + fence + enforce mode all present/parseable AND the commit
+    # strays outside it — blocks the ship; every other outcome (feature off,
+    # missing/unparseable plan, in-scope) ships.
+    if [ -n "$tid" ]; then
+      python3 "$ENGINE/plan_gate.py" "$tid" "$WT" >>"$LOGDIR/orbit.log" 2>&1
+      if [ "$?" = "3" ]; then
+        log "plan gate: commit touches files outside the plan's scope — escalating instead of shipping (patch kept: ${patch:-none})"
+        python3 "$ENGINE/ledger.py" escalate "$tid" "plan gate: commit touches files outside the plan's scope (see reviews/task-$tid-plan-gate.txt)" >>"$LOGDIR/orbit.log" 2>&1 \
+          || log "WARN: ledger escalate not recorded for $tid (lifecycle gate or write error — see orbit.log)"
+        notify "🛑 Orbit plan gate" "task $tid: commit touches files outside the plan's scope — escalated, nothing pushed" "$DASH"
+        rm -f "$marker" "$STATE/.cycle-candidate" 2>/dev/null || true
+        echo OK; return
+      fi
+    fi
     # Runtime verification (opt-in `runtime_check:` config): observe the change in
     # the RUNNING product before pushing. Only exit code 3 — the check RAN and
     # observed behaviour contradicting a `required` category's contract — blocks
