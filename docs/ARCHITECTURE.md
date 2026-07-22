@@ -39,6 +39,18 @@ the service's KeepAlive + backoff). Each iteration:
    - **atomic commit** on the detached HEAD; write a review packet.
 4. **Push** — the wrapper (not the agent) pushes the commit to `origin/<branch_prefix>/task-<id>`, records it in the ledger, notifies.
 
+**Task-level planning (optional, step 2.8)** — when the target's config carries a
+`plan:` block, a **planner** subagent runs before the maker, for every task whose
+category is in `plan.categories` (absent = every workable category), writing a
+justified per-task plan — approach, a `plan_scope` file-scope fence, applicable
+standards — to `reviews/task-<id>-plan.md`; the maker/checker/verifier are all
+briefed with it, and the maker is told to touch only the fenced `edit`/`create`
+paths. The verify-spec step (3.5) always judges a diff outside that fence as
+NONCONFORMING once a plan exists; `plan.enforce: "block"` additionally has the
+wrapper run `engine/plan_gate.py` — a deterministic scope-fence gate — right
+before push (ahead of runtime verification), refusing to ship (escalating
+instead) any commit touching a file outside the plan's scope.
+
 ## Model tiering (grounded in evidence, not vibes)
 The router assigns opus to hard-judgment categories (bug/feature/refactor/security) and sonnet to
 directed work (docs/deps/testing) where a smaller model is at parity — cheaper without quality loss.

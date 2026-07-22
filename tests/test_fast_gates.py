@@ -111,6 +111,72 @@ def test_review_packet_decision_header(tmp_path, monkeypatch):
     assert "git revert" in text and "/p/x.patch" in text    # undo is one copy-paste away
 
 
+def _plan_repo_setup(tmp_path):
+    """A state dir with a queue/ledger for task t1 + a reviews/ dir ready for a
+    planner-written plan file, plus a tiny shipped repo — the common fixture
+    for the review-packet plan-section tests below."""
+    st = tmp_path / "state"
+    (st / "reviews").mkdir(parents=True)
+    (st / "queue.json").write_text(json.dumps({"tasks": [
+        {"id": "t1", "task": "add guard", "category": "feature", "priority": "high"}]}))
+    (st / "ledger.json").write_text(json.dumps({"entries": {"t1": {"patch": "/p/x.patch"}}}))
+    return st, _ship_repo(tmp_path)
+
+
+def test_review_packet_includes_plan_section_when_present(tmp_path, monkeypatch):
+    st, repo = _plan_repo_setup(tmp_path)
+    monkeypatch.setenv("AP_STATE", str(st))
+    plan_text = ("# Plan — task t1\ngenerated: 2026-07-22T00:00:00Z · category: feature\n\n"
+                 "## Approach (justified)\n1. add the guard — because app.py:1 has none\n")
+    (st / "reviews" / "task-t1-plan.md").write_text(plan_text)
+
+    rp = _mod("review_packet")
+    out = rp.build("t1", str(repo), "autopilot/task-t1", "main")
+    text = out.read_text()
+
+    assert "## The plan (scope fence + approach)" in text
+    assert "## Approach (justified)" in text          # plan body reproduced verbatim
+    assert "add the guard — because app.py:1 has none" in text
+    assert "- [ ] Diff stayed inside the plan's file scope (see plan section)" in text
+    # placement: between the contract section and the commit section
+    assert (text.index("## The contract") < text.index("## The plan")
+            < text.index("## The commit"))
+
+
+def test_review_packet_includes_plan_gate_violations_when_present(tmp_path, monkeypatch):
+    st, repo = _plan_repo_setup(tmp_path)
+    monkeypatch.setenv("AP_STATE", str(st))
+    (st / "reviews" / "task-t1-plan.md").write_text(
+        "# Plan — task t1\n\n## Approach (justified)\n1. add the guard\n")
+    (st / "reviews" / "task-t1-plan-gate.txt").write_text("secret.py\tout-of-scope\n")
+
+    rp = _mod("review_packet")
+    out = rp.build("t1", str(repo), "autopilot/task-t1", "main")
+    text = out.read_text()
+
+    assert "plan gate:" in text
+    assert "secret.py" in text and "out-of-scope" in text
+    # the gate content lives inside the plan section, not before it
+    assert text.index("## The plan") < text.index("plan gate:") < text.index("## The commit")
+
+
+def test_review_packet_omits_plan_section_when_absent(tmp_path, monkeypatch):
+    st, repo = _plan_repo_setup(tmp_path)
+    monkeypatch.setenv("AP_STATE", str(st))
+
+    rp = _mod("review_packet")
+    out = rp.build("t1", str(repo), "autopilot/task-t1", "main")
+    text = out.read_text()
+
+    assert "## The plan" not in text
+    assert "plan gate:" not in text
+    assert "Diff stayed inside the plan's file scope" not in text
+    # byte-identical shape to today: contract section is immediately followed
+    # by the commit section, nothing spliced in between
+    between = text[text.index("## The contract"):text.index("## The commit")]
+    assert "## The plan" not in between
+
+
 def test_digest_surfaces_every_stalled_gate(tmp_path):
     ap = tmp_path / "repo" / ".autopilot"
     (ap / "state").mkdir(parents=True)

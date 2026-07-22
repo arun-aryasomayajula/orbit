@@ -161,6 +161,43 @@ else:
         if isinstance(stale, list) and stale:
             print(f"  · knowledge: {len(stale)} doc(s) stale — orbit knowledge <target> refresh")
 
+# 5d. task-level planning (optional — presence of a `plan:` config block is the
+# switch). Read-only surfacing: engine/config.py's `validate` subcommand already
+# checks enforce/categories/model *shapes* (run in section 1 above); this section
+# additionally (a) confirms the planner agent file actually resolves somewhere
+# Claude Code will load it from, and (b) checks every plan.categories entry names
+# a category the router actually knows about — a membership check config.py has
+# no way to make (it never reads router.yaml). Category source: `cats` (the
+# router.yaml `categories:` keys loaded in section 3 above) — the same source
+# section 6 below already uses to validate queue task categories against, so
+# plan.categories is held to the identical bar doctor already applies elsewhere.
+plan_cfg = cfg.get("plan") if isinstance(cfg.get("plan"), dict) else None
+if plan_cfg:
+    engine_planner = os.path.join(ORBIT_HOME, "agents", "planner.md")
+    target_agents_dir = os.path.join(TARGET, ".claude", "agents")
+    target_planner = os.path.join(target_agents_dir, "planner.md")
+    if os.path.exists(target_planner):
+        check("plan: agents/planner.md resolves", True, f"target: {target_planner}")
+    elif os.path.exists(engine_planner):
+        detail = f"engine: {engine_planner}"
+        if os.path.isdir(target_agents_dir):
+            detail += " (not yet synced into target .claude/agents/ — run `orbit sync`)"
+        check("plan: agents/planner.md resolves", True, detail)
+    else:
+        check("plan: agents/planner.md resolves", False,
+              f"missing — checked target ({target_planner}) and engine ({engine_planner})")
+
+    enforce = plan_cfg.get("enforce", "verifier")
+    check('plan.enforce is "verifier" or "block"', enforce in ("verifier", "block"),
+          "" if enforce in ("verifier", "block")
+          else f"got {enforce!r} (config validate also flags this)")
+
+    plan_cats = plan_cfg.get("categories")
+    if isinstance(plan_cats, list) and all(isinstance(c, str) for c in plan_cats):
+        unknown = sorted({c for c in plan_cats if c not in cats})
+        check("plan.categories are known router categories", not unknown,
+              "" if not unknown else "UNKNOWN: " + ", ".join(unknown))
+
 # 6. dry-run routing over the queue (if present)
 qf = os.path.join(AP, "state", "queue.json")
 if os.path.exists(qf):

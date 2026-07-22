@@ -12,7 +12,7 @@ work entering the queue, and work merging.
 
 ```
 intake ─▶ backlog ─▶ (epic? plan ─▶ you approve ─▶ decompose) ─▶ you queue
-one cycle:  pick task ─▶ route (maker · model · skill · tracks) ─▶ build ⇄ check ─▶ verify-spec ─▶ commit ─▶ push review branch (+PR) ─▶ you merge
+one cycle:  pick task ─▶ route (maker · model · skill · tracks) ─▶ plan ─▶ build ⇄ check ─▶ verify-spec ─▶ commit ─▶ push review branch (+PR) ─▶ you merge
 signals (logs · QA · scorecards) ─▶ proposed tasks ─▶ back to triage
 ```
 

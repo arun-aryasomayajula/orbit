@@ -813,6 +813,64 @@ def test_doctor_reports_stale_docs_informationally(tmp_path):
     assert "knowledge: 1 doc(s) stale — orbit knowledge <target> refresh" in r.stdout, r.stdout
 
 
+# === Task 11: doctor's plan wiring checks (read-only surfacing of the `plan:`
+# config block — engine/config.py's `validate` already checks enforce/categories/
+# model *shapes*; doctor additionally confirms the planner agent resolves and
+# that plan.categories names real router categories, a check config.py can't
+# make because it never reads router.yaml) =================================
+
+def _configure_plan(t, categories=None, enforce=None, model=None):
+    lines = ['repo: "."\n', 'base_branch: "main"\n', 'gates:\n', '  test: {cmd: "true", cwd: "."}\n',
+             'plan:\n']
+    if categories is not None:
+        lines.append(f'  categories: {json.dumps(categories)}\n')
+    if enforce is not None:
+        lines.append(f'  enforce: "{enforce}"\n')
+    if model is not None:
+        lines.append(f'  model: "{model}"\n')
+    (t / ".autopilot" / "config.yaml").write_text("".join(lines))
+
+
+def test_doctor_valid_plan_block_shows_ok_lines(tmp_path):
+    t = _target(tmp_path)
+    _configure_plan(t, categories=["bug", "feature"], enforce="verifier")
+    r = _run_doctor(t)
+    oks = _check_lines(r.stdout, "✓")
+    assert any(ln.startswith("✓ plan: agents/planner.md resolves") for ln in oks), r.stdout
+    assert any(ln.startswith('✓ plan.enforce is "verifier" or "block"') for ln in oks), r.stdout
+    assert any(ln.startswith("✓ plan.categories are known router categories") for ln in oks), r.stdout
+    assert not any(ln.startswith("✗ plan") for ln in _check_lines(r.stdout, "✗")), r.stdout
+
+
+def test_doctor_plan_unknown_category_shows_fail_line(tmp_path):
+    t = _target(tmp_path)
+    _configure_plan(t, categories=["bug", "not_a_real_category"])
+    r = _run_doctor(t)
+    fails = _check_lines(r.stdout, "✗")
+    assert any(ln.startswith("✗ plan.categories are known router categories")
+               and "not_a_real_category" in ln for ln in fails), r.stdout
+
+
+def test_doctor_plan_bad_enforce_value_shows_fail_line(tmp_path):
+    t = _target(tmp_path)
+    _configure_plan(t, enforce="sometimes")
+    r = _run_doctor(t)
+    fails = _check_lines(r.stdout, "✗")
+    assert any(ln.startswith('✗ plan.enforce is "verifier" or "block"') for ln in fails), r.stdout
+
+
+def test_doctor_no_task_scope_config_prints_nothing_new(tmp_path):
+    # feature unused (no `plan:` block) → zero behavior change: doctor emits no
+    # ✓/✗/informational plan line. (Test name deliberately avoids the literal
+    # word "plan" — tmp_path's directory is derived from the test id and would
+    # otherwise leak into unrelated ✓ lines' path details, e.g. "config.yaml
+    # present <path>", the same false-positive risk noted above for "knowledge".)
+    t = _target(tmp_path)
+    r = _run_doctor(t)
+    assert not any("plan" in ln.lower() for ln in _check_lines(r.stdout, "✓")
+                   + _check_lines(r.stdout, "✗") + _check_lines(r.stdout, "·"))
+
+
 # === Final whole-branch review fixes ========================================
 
 def test_status_sha_flag_injection_is_rejected_and_falls_back_with_warning(tmp_path):

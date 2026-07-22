@@ -119,6 +119,38 @@ Trust rule: the knowledge base is human-reviewed like code, but **code wins over
 knowledge** — a maker who finds the two disagree trusts the code and notes the
 discrepancy.
 
+## 6.6. Task-level planning (optional)
+Before the build loop, a **planner** subagent writes a justified per-task plan —
+approach, a `plan_scope` file-scope fence, applicable standards — to
+`$AP_STATE/reviews/task-<id>-plan.md` (cycle step 2.8); the maker, checker, and
+verifier are all briefed with it. When a plan exists it also shows up in that
+task's review packet, verbatim, in a `## The plan (scope fence + approach)`
+section between the contract and the commit. Config (`.autopilot/config.yaml`,
+all optional):
+```yaml
+# --- task-level planning (optional) -------------------------------------------
+# Before the build loop, a planner subagent writes a justified per-task plan
+# (approach, file-scope fence, applicable standards) into the review packet;
+# the maker is briefed with it and the verifier fails any off-plan diff.
+# plan:
+#   categories: [bug, feature, refactor, code_quality, testing]  # which tasks get planned
+#   enforce: "verifier"        # "verifier" (LLM judges the fence) | "block" (wrapper refuses
+#                              #  to push off-plan commits — exit 3 → escalate)
+#   model: "sonnet"            # planner model (router defaults.planner overrides)
+```
+`categories` absent means every workable category gets a plan. The `enforce` ladder:
+**`verifier`** (default) — the spec-conformance verifier (step 3.5) judges any diff
+outside the plan's file scope as NONCONFORMING, one more review signal that feeds
+back to the maker like any other verifier finding; **`block`** — additionally has the
+wrapper run `engine/plan_gate.py`, a deterministic backstop right before the push
+that refuses to ship (escalating instead) any commit touching a file outside the
+plan's `edit`/`create`/`allow_incidental` scope, or inside `forbid`. Amendment
+protocol: if the maker hits a genuinely out-of-plan file, the planner is
+re-dispatched once with that reason and appends a new `## Amendment <n>` section —
+a complete new file-scope fence, the last one in the file always wins — to the
+SAME plan file rather than editing what's already there; a second out-of-plan stop
+on the same task escalates.
+
 ## Opt-in task sources (signal adapters)
 Beyond the native `backlog.yaml`, every extra name in `sources:` runs a matching
 `<name>_to_backlog.py` each cycle — resolved from YOUR repo's `.autopilot/adapters/` first,
