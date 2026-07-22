@@ -354,29 +354,32 @@ def _unsafe_patch_reason(ap_state: Path, patch) -> str | None:
     return None
 
 
-def _changed_paths_for_marker(repo: Path, ap_state: Path, sha: str, patch) -> list[str] | None:
-    """Changed paths for one merge marker, or None if BOTH the git lookup and
-    the patch-file fallback failed (caller warns + skips). An empty list is a
-    real, successful answer ("this merge touched nothing"), not a failure."""
+def _changed_paths_for_marker(repo: Path, ap_state: Path, sha: str,
+                               patch) -> tuple[list[str] | None, str | None]:
+    """(paths, None) on success — paths may be empty ("this merge touched
+    nothing", not a failure). (None, reason) when BOTH the git lookup and the
+    patch-file fallback failed — the caller turns `reason` into its WARN line
+    so a rejected/traversal patch reads differently from a merely-missing
+    one."""
     if sha:
         try:
             p = subprocess.run(["git", "-C", str(repo), "show", "--name-only", "--format=", sha],
                                capture_output=True, text=True, timeout=GIT_TIMEOUT)
             if p.returncode == 0:
-                return [ln.strip() for ln in p.stdout.splitlines() if ln.strip()]
+                return [ln.strip() for ln in p.stdout.splitlines() if ln.strip()], None
         except (OSError, subprocess.TimeoutExpired):
             pass
     # git failed (unreachable sha) or no sha at all — fall back to the backup patch.
     reason = _unsafe_patch_reason(ap_state, patch)
     if reason:
-        return None
+        return None, reason
     patch_path = (ap_state / patch).resolve()
     if not patch_path.is_file():
-        return None
+        return None, f"patch file not found ({patch_path})"
     text, err = _read_text(patch_path)
     if err:
-        return None
-    return [ln[len("+++ b/"):].strip() for ln in text.splitlines() if ln.startswith("+++ b/")]
+        return None, f"patch file could not be read ({err})"
+    return [ln[len("+++ b/"):].strip() for ln in text.splitlines() if ln.startswith("+++ b/")], None
 
 
 def _map_path_to_docs(path: str, files_map: dict) -> set[str]:
@@ -449,11 +452,11 @@ def compute_staleness(manifest: dict, repo: Path, ap_state: Path) -> dict:
     for m in considered:
         sha = m.get("sha") or ""
         task_id = m.get("task_id") or "?"
-        changed = _changed_paths_for_marker(repo, ap_state, sha, m.get("patch"))
+        changed, reason = _changed_paths_for_marker(repo, ap_state, sha, m.get("patch"))
         if changed is None:
             warnings.append(
                 f"WARN: merge marker for task {task_id} (sha {sha or '(none)'}) is unreachable "
-                "in git and has no readable backup patch — skipped")
+                f"in git and its patch fallback failed ({reason}) — skipped")
             continue
         for path in changed:
             docs = _map_path_to_docs(path, files_map)
@@ -575,7 +578,8 @@ def cmd_autorefresh(target: Path, cfg: dict, ap: Path, ap_state: Path, timeout: 
 
         repo = _resolve_repo(target, cfg)
         result = compute_staleness(manifest, repo, ap_state)
-        threshold = int(kb_cfg.get("stale_after_merges") or DEFAULT_STALE_AFTER_MERGES)
+        raw_threshold = kb_cfg.get("stale_after_merges")
+        threshold = int(raw_threshold) if raw_threshold is not None else DEFAULT_STALE_AFTER_MERGES
         if len(result["stale_docs"]) < threshold:
             if not quiet:
                 print(f"autorefresh: {len(result['stale_docs'])} stale doc(s), below threshold "
@@ -608,6 +612,52 @@ def _usage_exit(msg: str) -> int:
     return 2
 
 
+def _load_config(target: Path) -> tuple[dict | None, str | None]:
+    """(cfg, None) on success; (None, message) on any failure — missing
+    .autopilot/config.yaml, unparseable YAML, or a non-mapping top level.
+    Callers decide how the failure surfaces: a usage error (exit 2) for
+    build/status/refresh, or a swallowed WARN for autorefresh, whose
+    contract is unconditional exit 0 even when config.yaml is mid-hand-edit."""
+    cfg_path = target / ".autopilot" / "config.yaml"
+    if not cfg_path.exists():
+        return None, f"no {cfg_path} — run `orbit init {target}` first"
+    try:
+        cfg = yaml.safe_load(cfg_path.read_text()) or {}
+    except yaml.YAMLError as e:
+        return None, f"unreadable config at {cfg_path}: {e}"
+    if not isinstance(cfg, dict):
+        return None, f"unreadable config at {cfg_path}: expected a mapping, got {cfg!r}"
+    return cfg, None
+
+
+def _timeout_from(cfg: dict, argv: list[str]) -> int:
+    kb_cfg = cfg.get("knowledge") if isinstance(cfg.get("knowledge"), dict) else {}
+    timeout = int(kb_cfg.get("timeout_seconds") or DEFAULT_TIMEOUT)
+    for i, a in enumerate(argv):
+        if a == "--timeout" and i + 1 < len(argv):
+            timeout = int(argv[i + 1])
+    return timeout
+
+
+def cmd_autorefresh_entry(target: Path, argv: list[str], quiet: bool) -> int:
+    """autorefresh's ALWAYS-exit-0 contract must hold even before
+    `cmd_autorefresh` itself runs — a missing or malformed
+    `.autopilot/config.yaml` (e.g. a concurrent hand-edit mid-loop) is exactly
+    the transient failure this subcommand must survive, unlike build/status/
+    refresh, for which the same condition is a genuine usage error (exit 2)."""
+    try:
+        cfg, err = _load_config(target)
+        if err:
+            print(f"WARN: knowledge autorefresh: {err} — skipping this cycle")
+            return 0
+        ap = target / ".autopilot"
+        timeout = _timeout_from(cfg, argv)
+        return cmd_autorefresh(target, cfg, ap, ap / "state", timeout, quiet)
+    except Exception as e:                          # noqa: BLE001 — loop safety, see cmd_autorefresh
+        print(f"WARN: knowledge autorefresh crashed ({e}) — continuing")
+        return 0
+
+
 def main(argv: list[str]) -> int:
     args = [a for a in argv if not a.startswith("--")]
     if len(args) < 2:
@@ -617,36 +667,26 @@ def main(argv: list[str]) -> int:
     subcmd = args[1]
     quiet = "--quiet" in argv
 
-    ap = target / ".autopilot"
-    cfg_path = ap / "config.yaml"
-    if not cfg_path.exists():
-        return _usage_exit(f"no {cfg_path} — run `orbit init {target}` first")
-    try:
-        cfg = yaml.safe_load(cfg_path.read_text()) or {}
-    except yaml.YAMLError as e:
-        return _usage_exit(f"unreadable config at {cfg_path}: {e}")
-    if not isinstance(cfg, dict):
-        return _usage_exit(f"unreadable config at {cfg_path}: expected a mapping, got {cfg!r}")
+    if subcmd == "autorefresh":
+        return cmd_autorefresh_entry(target, argv, quiet)
 
-    if subcmd not in ("build", "status", "refresh", "autorefresh"):
+    cfg, err = _load_config(target)
+    if err:
+        return _usage_exit(err)
+
+    if subcmd not in ("build", "status", "refresh"):
         print(__doc__, file=sys.stderr)
         return 2
 
-    kb_cfg = cfg.get("knowledge") if isinstance(cfg.get("knowledge"), dict) else {}
-    timeout = int(kb_cfg.get("timeout_seconds") or DEFAULT_TIMEOUT)
-    for i, a in enumerate(argv):
-        if a == "--timeout" and i + 1 < len(argv):
-            timeout = int(argv[i + 1])
-
+    ap = target / ".autopilot"
+    timeout = _timeout_from(cfg, argv)
     ap_state = ap / "state"
 
     if subcmd == "build":
         return cmd_build(target, cfg, ap, timeout, quiet)
     if subcmd == "status":
         return cmd_status(target, cfg, ap, ap_state)
-    if subcmd == "refresh":
-        return cmd_refresh(target, cfg, ap, ap_state, timeout, quiet)
-    return cmd_autorefresh(target, cfg, ap, ap_state, timeout, quiet)
+    return cmd_refresh(target, cfg, ap, ap_state, timeout, quiet)
 
 
 if __name__ == "__main__":

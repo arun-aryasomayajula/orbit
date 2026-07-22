@@ -656,3 +656,66 @@ def test_autorefresh_stale_marker_over_24h_still_acts(tmp_path):
     })
     assert r.returncode == 0, r.stdout + r.stderr
     assert call_log.exists() and len(call_log.read_text().splitlines()) == 1
+
+
+def test_autorefresh_no_config_exits_0_with_warn(tmp_path):
+    # no .autopilot/ at all — autorefresh's contract is unconditional exit 0,
+    # unlike build/status/refresh, which correctly usage-error (exit 2) here
+    r = run_sub(tmp_path, "autorefresh")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "WARN" in (r.stdout + r.stderr)
+
+
+def test_autorefresh_malformed_config_exits_0_with_warn(tmp_path):
+    ap = tmp_path / ".autopilot"
+    (ap / "state").mkdir(parents=True)
+    (ap / "config.yaml").write_text("repo: [unterminated\n")   # invalid YAML
+    r = run_sub(tmp_path, "autorefresh")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "WARN" in (r.stdout + r.stderr)
+
+
+def test_status_no_config_still_exits_2(tmp_path):
+    # unchanged: status is NOT autorefresh — a missing target is a genuine
+    # usage error, same as build's existing test_build_exits_2_without_autopilot
+    r = run_sub(tmp_path, "status")
+    assert r.returncode == 2, r.stdout + r.stderr
+
+
+def test_autorefresh_stale_after_merges_zero_still_acts(tmp_path):
+    # stale_after_merges: 0 must NOT fall back to the default of 3 — `0 or
+    # DEFAULT` would silently turn "refresh on any staleness" into "refresh at
+    # 3+", which is the opposite of what an operator asking for 0 wants.
+    t = _target(tmp_path)
+    _build_kb(tmp_path, t, "2026-07-10T00:00:00Z", {"routes.py": ["endpoints.md"]})
+    _configure_knowledge(t, refresh="auto", stale_after_merges=0)
+    sha = _commit_file(t, "routes.py", "print('changed')\n")
+    _write_markers(t, [_marker("task-16", "2026-07-15T00:00:00Z", sha=sha)])
+
+    call_log = tmp_path / "calls.jsonl"
+    refresh_spec = _spec(tmp_path, "refresh-spec.json", _full_files(), _full_manifest())
+    r = run_sub(t, "autorefresh", env_extra={
+        "ORBIT_KNOWLEDGE_CMD": _agent_script(tmp_path),
+        "FAKE_SPEC": str(refresh_spec),
+        "FAKE_CALL_LOG": str(call_log),
+    })
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert call_log.exists() and len(call_log.read_text().splitlines()) == 1
+
+
+def test_status_unreachable_sha_and_traversal_patch_warns_with_reason(tmp_path):
+    # a patch path that escapes diffs/ must be distinguishable in the WARN
+    # line from a merely-missing patch — Minor B from the task-4 review
+    t = _target(tmp_path)
+    _build_kb(tmp_path, t, "2026-07-10T00:00:00Z", {"src/*.py": ["conventions.md"]})
+    (t / ".autopilot" / "state" / "diffs").mkdir(parents=True)
+    outside = t / ".autopilot" / "state" / "secret.patch"
+    outside.write_text("+++ b/src/app.py\n")
+    _write_markers(t, [_marker("task-17", "2026-07-15T00:00:00Z",
+                               sha="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                               patch="../secret.patch")])
+
+    r = run_sub(t, "status")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "WARN" in r.stdout
+    assert "traversal" in r.stdout or "escapes" in r.stdout
