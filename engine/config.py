@@ -88,6 +88,16 @@ def validate(target):
             errs.append(f"gate '{name}' has no cmd")
     if cfg.get("pull_requests") not in ("off", "github"):
         errs.append(f"pull_requests must be \"off\" or \"github\", got {cfg.get('pull_requests')!r}")
+    if "knowledge" in raw and raw["knowledge"] is not None:
+        kb = raw["knowledge"]
+        if not isinstance(kb, dict):
+            errs.append(f"knowledge must be a mapping, got {kb!r}")
+        else:
+            if "refresh" in kb and kb["refresh"] not in ("manual", "auto"):
+                errs.append(f"knowledge.refresh must be \"manual\" or \"auto\", got {kb.get('refresh')!r}")
+            for field in ("stale_after_merges", "timeout_seconds"):
+                if field in kb and (not isinstance(kb[field], int) or isinstance(kb[field], bool) or kb[field] <= 0):
+                    errs.append(f"knowledge.{field} must be a positive integer, got {kb.get(field)!r}")
     if errs:
         print("\n".join("  ✗ " + e for e in errs)); sys.exit(1)
     print("  ✓ config valid")
