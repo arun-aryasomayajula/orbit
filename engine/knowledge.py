@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""knowledge.py — headless wrapper for the /orbit-knowledge survey skill: builds
-and deterministically validates the project knowledge base under
-`$AP_HOME/knowledge/`.
+"""knowledge.py — headless wrapper for the /orbit-knowledge survey skill: builds,
+validates, and keeps fresh the project knowledge base under `$AP_HOME/knowledge/`.
 
 `build` runs ONE headless Claude Code call (the survey skill), then
 post-validates what it wrote:
@@ -25,9 +24,26 @@ leaves every file on disk for inspection, and exits 1 — a knowledge base a
 human can't trust must not look done. Success prints a one-line summary and
 exits 0.
 
-`refresh|status|autorefresh` are recognized subcommands reserved for a later
-task; they currently print a message and exit 2 so Task 4 can fill them in
-without touching this dispatch.
+`status` is deterministic Python — no agent call. It reads manifest.json and
+`$AP_STATE/merge_markers.jsonl` (dashboard-written on every human merge), maps
+each merge landed after the manifest's `generated_at` to changed files (via
+`git show`, or a patch-file fallback when the sha is unreachable), and maps
+those files to `manifest.files` entries to find which docs are now stale.
+Writes `$AP_STATE/knowledge-staleness.json`. Exits 0 fresh, 4 stale — never
+mutates knowledge/.
+
+`refresh` computes staleness exactly like `status`; if fresh it exits 0
+without running the agent. If stale, it writes
+`$AP_STATE/knowledge/refresh-scope.json` (the stale docs + the changed files
+that caused them), runs the survey agent with the `refresh` skill argument,
+then applies the same post-validation as `build`.
+
+`autorefresh` is the every-cycle loop hook (wired into run.sh in a later
+task): acts only when config `knowledge.refresh == "auto"`, a manifest
+exists, stale-doc count >= `knowledge.stale_after_merges` (default 3), and
+`$AP_STATE/.knowledge-refreshed` is absent or >24h old. It ALWAYS exits 0 —
+loop safety over completeness — printing a `WARN:` line on any failure
+(including unexpected exceptions) instead of ever propagating one.
 
 Test hook: ORBIT_KNOWLEDGE_CMD replaces the claude call (shell, same env/cwd)
 — see engine/runtime_check.py for the identical pattern.
@@ -36,6 +52,7 @@ Usage: knowledge.py <target> build|refresh|status|autorefresh [--timeout N] [--q
 """
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -43,6 +60,8 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -52,27 +71,34 @@ ORBIT_HOME = Path(os.environ.get("ORBIT_HOME") or ENGINE.parent)
 
 DEFAULT_TIMEOUT = 1800      # default cap for the survey call
 GIT_TIMEOUT = 30
-
-NOT_IMPLEMENTED = ("refresh", "status", "autorefresh")
+DEFAULT_STALE_AFTER_MERGES = 3
+AUTOREFRESH_COOLDOWN_SECONDS = 24 * 3600
 
 ENDPOINTS_HEADER = ("| method + path | handler (file:symbol) | calls "
                     "| tables read | tables written | auth? |")
 
 
-def run_survey_agent(target: Path, cfg: dict, timeout: int, quiet: bool) -> bool:
-    """One headless Claude Code call: /orbit-knowledge (full build, no args)."""
+def run_survey_agent(target: Path, cfg: dict, timeout: int, quiet: bool,
+                      skill: str | None = None) -> bool:
+    """One headless Claude Code call: /orbit-knowledge (full build, no args) or
+    /orbit-knowledge <skill> (e.g. "refresh") for an incremental pass.
+    ORBIT_KNOWLEDGE_SKILL is exported too and `skill` is appended to an
+    ORBIT_KNOWLEDGE_CMD override's argv — either lets a test fake tell which
+    skill it was invoked with without parsing the real --print string."""
     override = os.environ.get("ORBIT_KNOWLEDGE_CMD")
     ap = target / ".autopilot"
     env = dict(os.environ)
-    env.update(AP_HOME=str(ap), AP_STATE=str(ap / "state"), ORBIT_HOME=str(ORBIT_HOME))
+    env.update(AP_HOME=str(ap), AP_STATE=str(ap / "state"), ORBIT_HOME=str(ORBIT_HOME),
+               ORBIT_KNOWLEDGE_SKILL=skill or "build")
     if override:
-        cmd = shlex.split(override)
+        cmd = shlex.split(override) + ([skill] if skill else [])
     else:
         claude = shutil.which("claude")
         if not claude:
             print("  ✗ claude not on PATH — cannot run the survey agent")
             return False
-        cmd = [claude, "--print", "/orbit-knowledge",
+        skill_arg = f"/orbit-knowledge {skill}" if skill else "/orbit-knowledge"
+        cmd = [claude, "--print", skill_arg,
                "--permission-mode", cfg.get("permission_mode", "acceptEdits"),
                "--settings", str(ORBIT_HOME / "config" / "orbit.settings.json"),
                "--model", cfg.get("model", "claude-opus-4-8"),
@@ -245,6 +271,338 @@ def validate(kdir: Path, repo: Path) -> list[str]:
     return failures
 
 
+def _resolve_repo(target: Path, cfg: dict) -> Path:
+    repo_rel = cfg.get("repo") or "."
+    return (target / repo_rel).resolve() if not os.path.isabs(repo_rel) else Path(repo_rel)
+
+
+def cmd_build(target: Path, cfg: dict, ap: Path, timeout: int, quiet: bool) -> int:
+    kdir = ap / "knowledge"
+    kdir.mkdir(parents=True, exist_ok=True)
+
+    if not quiet:
+        print(f"ORBIT KNOWLEDGE BUILD — {target}\n")
+
+    if not run_survey_agent(target, cfg, timeout, quiet):
+        print("  ✗ survey agent failed — knowledge build aborted (nothing further validated)",
+              file=sys.stderr)
+        return 1
+
+    repo = _resolve_repo(target, cfg)
+    failures = validate(kdir, repo)
+    if failures:
+        for f in failures:
+            print(f"VALIDATE: {f}")
+        return 1
+
+    docs = json.loads((kdir / "manifest.json").read_text()).get("docs") or []
+    print(f"  ✓ knowledge build complete — {len(docs)} docs written to {kdir}")
+    return 0
+
+
+# --- staleness: status/refresh/autorefresh ----------------------------------
+# Deterministic Python over merge markers ($AP_STATE/merge_markers.jsonl,
+# written by command_center.do_mark on every human merge) + git — no agent
+# call. Shared by `status` (read-only report) and `refresh` (acts on it).
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_iso(s) -> "datetime | None":
+    if not isinstance(s, str) or not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _read_manifest_for_staleness(kdir: Path) -> dict | None:
+    """None = no usable manifest (missing, unreadable, or not an object) —
+    status/refresh/autorefresh all treat that the same way: nothing to check."""
+    manifest_path = kdir / "manifest.json"
+    if not manifest_path.exists():
+        return None
+    text, err = _read_text(manifest_path)
+    if err:
+        return None
+    try:
+        loaded = json.loads(text)
+    except ValueError:
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def _unsafe_patch_reason(ap_state: Path, patch) -> str | None:
+    """None = patch resolves safely under $AP_STATE/diffs/ (where the wrapper
+    always writes backup patches — see run.sh's DIFFDIR). Mirrors
+    `_unsafe_doc_reason`'s containment discipline: a merge marker's `patch`
+    field is written by the dashboard from ledger data — untrusted enough that
+    a future-corrupted/hand-edited entry must never make us read outside
+    diffs/."""
+    if not isinstance(patch, str) or not patch:
+        return "no patch path recorded"
+    diffdir = ap_state / "diffs"
+    try:
+        resolved = (ap_state / patch).resolve()
+        diffdir_resolved = diffdir.resolve()
+    except OSError as e:
+        return f"could not resolve path ({e})"
+    if not resolved.is_relative_to(diffdir_resolved):
+        return "escapes diffs/ (path traversal)"
+    return None
+
+
+def _changed_paths_for_marker(repo: Path, ap_state: Path, sha: str, patch) -> list[str] | None:
+    """Changed paths for one merge marker, or None if BOTH the git lookup and
+    the patch-file fallback failed (caller warns + skips). An empty list is a
+    real, successful answer ("this merge touched nothing"), not a failure."""
+    if sha:
+        try:
+            p = subprocess.run(["git", "-C", str(repo), "show", "--name-only", "--format=", sha],
+                               capture_output=True, text=True, timeout=GIT_TIMEOUT)
+            if p.returncode == 0:
+                return [ln.strip() for ln in p.stdout.splitlines() if ln.strip()]
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    # git failed (unreachable sha) or no sha at all — fall back to the backup patch.
+    reason = _unsafe_patch_reason(ap_state, patch)
+    if reason:
+        return None
+    patch_path = (ap_state / patch).resolve()
+    if not patch_path.is_file():
+        return None
+    text, err = _read_text(patch_path)
+    if err:
+        return None
+    return [ln[len("+++ b/"):].strip() for ln in text.splitlines() if ln.startswith("+++ b/")]
+
+
+def _map_path_to_docs(path: str, files_map: dict) -> set[str]:
+    """manifest.files key match for one changed path: exact, directory prefix
+    (key ends with "/"), else fnmatch glob. Every matching key's docs are
+    unioned in (a path can legitimately fall under more than one mapping)."""
+    docs: set[str] = set()
+    for key, val in (files_map or {}).items():
+        if not isinstance(key, str):
+            continue
+        matched = (key == path) or (key.endswith("/") and path.startswith(key)) \
+            or fnmatch.fnmatch(path, key)
+        if matched:
+            if isinstance(val, list):
+                docs.update(v for v in val if isinstance(v, str))
+            elif isinstance(val, str):
+                docs.add(val)
+    return docs
+
+
+def _load_merge_markers(ap_state: Path) -> list[dict]:
+    markers_path = ap_state / "merge_markers.jsonl"
+    if not markers_path.exists():
+        return []
+    text, err = _read_text(markers_path)
+    if err:
+        return []
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            m = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(m, dict):
+            out.append(m)
+    return out
+
+
+def compute_staleness(manifest: dict, repo: Path, ap_state: Path) -> dict:
+    """Deterministic staleness over merge markers + git — shared by `status`
+    and `refresh`. Read-only: never touches knowledge/.
+
+    Returns {generated_at, stale_docs (sorted), changed_files (sorted, only
+    those that mapped to a doc), merges_considered (markers newer than
+    generated_at), causes ({doc: [task_ids]}), warnings ([str])}."""
+    generated_at = manifest.get("generated_at")
+    gen_dt = _parse_iso(generated_at)
+    files_map = manifest.get("files") if isinstance(manifest.get("files"), dict) else {}
+
+    considered = []
+    for m in _load_merge_markers(ap_state):
+        at_dt = _parse_iso(m.get("at"))
+        if gen_dt is None or at_dt is None:
+            continue
+        try:
+            newer = at_dt > gen_dt
+        except TypeError:
+            continue      # aware/naive mismatch — treat as unparseable, not stale
+        if newer:
+            considered.append(m)
+
+    stale_docs: set[str] = set()
+    causes: dict[str, set[str]] = {}
+    changed_files: set[str] = set()
+    warnings: list[str] = []
+
+    for m in considered:
+        sha = m.get("sha") or ""
+        task_id = m.get("task_id") or "?"
+        changed = _changed_paths_for_marker(repo, ap_state, sha, m.get("patch"))
+        if changed is None:
+            warnings.append(
+                f"WARN: merge marker for task {task_id} (sha {sha or '(none)'}) is unreachable "
+                "in git and has no readable backup patch — skipped")
+            continue
+        for path in changed:
+            docs = _map_path_to_docs(path, files_map)
+            if docs:
+                changed_files.add(path)
+                for d in docs:
+                    stale_docs.add(d)
+                    causes.setdefault(d, set()).add(task_id)
+
+    return {
+        "generated_at": generated_at,
+        "stale_docs": sorted(stale_docs),
+        "changed_files": sorted(changed_files),
+        "merges_considered": len(considered),
+        "causes": {d: sorted(v) for d, v in causes.items()},
+        "warnings": warnings,
+    }
+
+
+def _write_staleness_json(ap_state: Path, result: dict) -> None:
+    doc = {
+        "checked_at": _now_iso(),
+        "generated_at": result["generated_at"],
+        "stale_docs": result["stale_docs"],
+        "merges_considered": result["merges_considered"],
+    }
+    ap_state.mkdir(parents=True, exist_ok=True)
+    (ap_state / "knowledge-staleness.json").write_text(json.dumps(doc, indent=2) + "\n")
+
+
+def cmd_status(target: Path, cfg: dict, ap: Path, ap_state: Path) -> int:
+    """Read-only: never mutates knowledge/. Exit 0 fresh, 4 stale."""
+    kdir = ap / "knowledge"
+    manifest = _read_manifest_for_staleness(kdir)
+    if manifest is None:
+        print("no knowledge base (run: orbit knowledge build)")
+        return 0
+
+    repo = _resolve_repo(target, cfg)
+    result = compute_staleness(manifest, repo, ap_state)
+    for w in result["warnings"]:
+        print(w)
+    _write_staleness_json(ap_state, result)
+
+    if not result["stale_docs"]:
+        print(f"knowledge is fresh — {result['merges_considered']} merge(s) since "
+              f"{result['generated_at']} touched nothing tracked")
+        return 0
+
+    print(f"STALE — {len(result['stale_docs'])} doc(s) out of date:")
+    for d in result["stale_docs"]:
+        who = ", ".join(result["causes"].get(d, [])) or "an unattributed merge"
+        print(f"  - {d}  (caused by: {who})")
+    return 4
+
+
+def cmd_refresh(target: Path, cfg: dict, ap: Path, ap_state: Path, timeout: int, quiet: bool) -> int:
+    kdir = ap / "knowledge"
+    manifest = _read_manifest_for_staleness(kdir)
+    if manifest is None:
+        print("no knowledge base (run: orbit knowledge build)")
+        return 0
+
+    repo = _resolve_repo(target, cfg)
+    result = compute_staleness(manifest, repo, ap_state)
+    for w in result["warnings"]:
+        print(w)
+
+    if not result["stale_docs"]:
+        print("knowledge is fresh")
+        return 0
+
+    scope_path = ap_state / "knowledge" / "refresh-scope.json"
+    scope_path.parent.mkdir(parents=True, exist_ok=True)
+    scope_path.write_text(json.dumps({
+        "stale_docs": result["stale_docs"],
+        "changed_files": result["changed_files"],
+    }, indent=2) + "\n")
+
+    if not quiet:
+        print(f"ORBIT KNOWLEDGE REFRESH — {target}\n")
+        print(f"  · {len(result['stale_docs'])} doc(s) stale: {', '.join(result['stale_docs'])}")
+
+    if not run_survey_agent(target, cfg, timeout, quiet, skill="refresh"):
+        print("  ✗ survey agent failed — knowledge refresh aborted (nothing further validated)",
+              file=sys.stderr)
+        return 1
+
+    failures = validate(kdir, repo)
+    if failures:
+        for f in failures:
+            print(f"VALIDATE: {f}")
+        return 1
+
+    docs = json.loads((kdir / "manifest.json").read_text()).get("docs") or []
+    print(f"  ✓ knowledge refresh complete — {len(docs)} docs written to {kdir}")
+    return 0
+
+
+def _refreshed_recently(marker_path: Path, cooldown_seconds: int = AUTOREFRESH_COOLDOWN_SECONDS) -> bool:
+    try:
+        return (time.time() - marker_path.stat().st_mtime) < cooldown_seconds
+    except OSError:
+        return False
+
+
+def cmd_autorefresh(target: Path, cfg: dict, ap: Path, ap_state: Path, timeout: int, quiet: bool) -> int:
+    """The every-cycle loop hook — MUST always exit 0. Loop safety over
+    completeness: any failure (expected or not) becomes a WARN: line, never a
+    propagated exception or a nonzero exit."""
+    try:
+        kb_cfg = cfg.get("knowledge") if isinstance(cfg.get("knowledge"), dict) else {}
+        if kb_cfg.get("refresh") != "auto":
+            return 0
+
+        manifest = _read_manifest_for_staleness(ap / "knowledge")
+        if manifest is None:
+            return 0
+
+        repo = _resolve_repo(target, cfg)
+        result = compute_staleness(manifest, repo, ap_state)
+        threshold = int(kb_cfg.get("stale_after_merges") or DEFAULT_STALE_AFTER_MERGES)
+        if len(result["stale_docs"]) < threshold:
+            if not quiet:
+                print(f"autorefresh: {len(result['stale_docs'])} stale doc(s), below threshold "
+                      f"{threshold} — no action")
+            return 0
+
+        marker_path = ap_state / ".knowledge-refreshed"
+        if _refreshed_recently(marker_path):
+            if not quiet:
+                print("autorefresh: refreshed within the last 24h — no action")
+            return 0
+
+        if not quiet:
+            print(f"autorefresh: {len(result['stale_docs'])} stale doc(s) >= threshold "
+                  f"{threshold} — refreshing")
+        rc = cmd_refresh(target, cfg, ap, ap_state, timeout, quiet)
+        if rc == 0:
+            ap_state.mkdir(parents=True, exist_ok=True)
+            marker_path.write_text(_now_iso() + "\n")
+        else:
+            print(f"WARN: knowledge autorefresh: refresh exited {rc} — will retry next cycle")
+        return 0
+    except Exception as e:                          # noqa: BLE001 — loop safety, see docstring
+        print(f"WARN: knowledge autorefresh crashed ({e}) — continuing")
+        return 0
+
+
 def _usage_exit(msg: str) -> int:
     print(msg, file=sys.stderr)
     return 2
@@ -270,9 +628,7 @@ def main(argv: list[str]) -> int:
     if not isinstance(cfg, dict):
         return _usage_exit(f"unreadable config at {cfg_path}: expected a mapping, got {cfg!r}")
 
-    if subcmd in NOT_IMPLEMENTED:
-        return _usage_exit(f"knowledge {subcmd}: not implemented (Task 4)")
-    if subcmd != "build":
+    if subcmd not in ("build", "status", "refresh", "autorefresh"):
         print(__doc__, file=sys.stderr)
         return 2
 
@@ -282,29 +638,15 @@ def main(argv: list[str]) -> int:
         if a == "--timeout" and i + 1 < len(argv):
             timeout = int(argv[i + 1])
 
-    kdir = ap / "knowledge"
-    kdir.mkdir(parents=True, exist_ok=True)
+    ap_state = ap / "state"
 
-    if not quiet:
-        print(f"ORBIT KNOWLEDGE BUILD — {target}\n")
-
-    if not run_survey_agent(target, cfg, timeout, quiet):
-        print("  ✗ survey agent failed — knowledge build aborted (nothing further validated)",
-              file=sys.stderr)
-        return 1
-
-    repo_rel = cfg.get("repo") or "."
-    repo = (target / repo_rel).resolve() if not os.path.isabs(repo_rel) else Path(repo_rel)
-
-    failures = validate(kdir, repo)
-    if failures:
-        for f in failures:
-            print(f"VALIDATE: {f}")
-        return 1
-
-    docs = json.loads((kdir / "manifest.json").read_text()).get("docs") or []
-    print(f"  ✓ knowledge build complete — {len(docs)} docs written to {kdir}")
-    return 0
+    if subcmd == "build":
+        return cmd_build(target, cfg, ap, timeout, quiet)
+    if subcmd == "status":
+        return cmd_status(target, cfg, ap, ap_state)
+    if subcmd == "refresh":
+        return cmd_refresh(target, cfg, ap, ap_state, timeout, quiet)
+    return cmd_autorefresh(target, cfg, ap, ap_state, timeout, quiet)
 
 
 if __name__ == "__main__":
