@@ -44,12 +44,23 @@ The router assigns opus to hard-judgment categories (bug/feature/refactor/securi
 directed work (docs/deps/testing) where a smaller model is at parity — cheaper without quality loss.
 `verification-before-completion` is mandatory on every task: execute the gate, show real output.
 
-## Skills vs tracks (no duplication)
+## Four reference types (no duplication)
 - **Skills** carry *general method* — invoked by the orchestrator (it holds the Skill tool; the
   restricted-tool makers don't), folded into the maker brief. e.g. bug→systematic-debugging,
   testing→test-driven-development, refactor→simplify, docs→write-docs, security→security-review.
 - **Tracks** carry *repo-specific facts* — gotchas, invariants, pattern-file pointers no general
   skill knows. The engine ships generic templates; a target fills them in under `.autopilot/tracks/`.
+- **Goldens** carry *graded exemplars* of good output — what "good" looks like for a category,
+  mined from this repo's own ledger (`goldens/LEARNED.md`) alongside the engine's calibration.
+- **Knowledge** carries *mapped project structure* — the endpoints→tables map, ER diagram, flows,
+  and conventions `orbit knowledge build` surveys once and keeps fresh (`engine/knowledge.py`),
+  committed under `.autopilot/knowledge/`. Loaded at cycle step 2.7 (only what a task
+  implicates, not the whole base) whenever `knowledge/INDEX.md` exists — zero behaviour change
+  otherwise. Staleness is tracked via merge markers, not file mtimes: `orbit knowledge status`
+  maps merges landed after the manifest's `generated_at` to the files they touched, and those
+  files to the docs the manifest says they feed, so a maker is warned before trusting a doc a
+  later merge invalidated. Human-reviewed like code, but code wins — a contradiction is noted,
+  not silently trusted.
 
 ## State
 The ledger's `state` field moves through an explicit machine — `engine/lifecycle.py`, the single

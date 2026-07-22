@@ -53,8 +53,8 @@ orbit/  (engine — install once)        <your-repo>/.autopilot/  (profile — p
 ├── agents/    builder/checker/verifier  ├── router.yaml   optional routing override
 ├── skills/    the /orbit-cycle command  ├── tracks/       your repo's playbooks
 ├── router/    default routing           ├── backlog.yaml  the task queue
-├── tracks/    generic templates         └── state/        ledger, queue, reviews (gitignored)
-├── goldens/   graded output exemplars
+├── tracks/    generic templates         ├── state/        ledger, queue, reviews (gitignored)
+├── goldens/   graded output exemplars   └── knowledge/    endpoint maps · ER diagram · flows (committed)
 ├── adapters/  opt-in task sources
 └── install/   launchd + systemd service
 ```
@@ -236,6 +236,7 @@ Full walkthrough with prerequisites, first-cycle verification, and troubleshooti
 | `doctor` | validate config + router + tracks + skills; dry-run routing (read-only) |
 | `run` | run the loop in the foreground |
 | `install` | install the background service |
+| `knowledge` | survey the repo into `.autopilot/knowledge/` (endpoints→tables map, ER diagram, flows, conventions) — briefed into every cycle; `status` reports staleness |
 | `sync` | re-copy the engine's command + agents into the target (after an engine `git pull`) |
 | `pause` / `resume` | kill switch (touch / remove the STOP file) |
 | `status` | queue + ledger + today's spend |

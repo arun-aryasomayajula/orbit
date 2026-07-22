@@ -118,6 +118,7 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
             shutil.copy(os.path.join(ORBIT_HOME, "agents", a), os.path.join(ag_dir, a))
     print("  ✓ installed /orbit-cycle command + agents into .claude/")
     print(f"\n  next: review {AP}/config.yaml (esp. gates), then `orbit doctor` and `orbit install`")
+    print(f"  once gates are confirmed: `orbit knowledge {TARGET} build` surveys the repo into .autopilot/knowledge/ (optional, briefed into every cycle)")
 
 if __name__ == "__main__":
     main()
