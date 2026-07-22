@@ -138,6 +138,9 @@ all optional):
 #                              #  to push off-plan commits — exit 3 → escalate)
 #   model: "sonnet"            # planner model (router defaults.planner overrides)
 ```
+`model` only takes effect if a target router override omits `defaults.planner` — the
+engine router already defines it, so that wins by default.
+
 `categories` absent means every workable category gets a plan. The `enforce` ladder:
 **`verifier`** (default) — the spec-conformance verifier (step 3.5) judges any diff
 outside the plan's file scope as NONCONFORMING, one more review signal that feeds

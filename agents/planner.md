@@ -64,7 +64,7 @@ plan_scope:
 ````
 
 ## Amendment protocol
-If re-dispatched carrying a maker's out-of-plan stop reason, append a new `## Amendment <n>` section to the SAME file containing a complete NEW `plan_scope` yaml fence (the LAST such fence in the file always wins downstream) plus one line of justification. Never rewrite or delete an earlier section — plans are append-only once written.
+If re-dispatched carrying a maker's out-of-plan stop reason, append a new `## Amendment <n>` section to the SAME file containing a complete NEW `plan_scope` yaml fence (the LAST such fence in the file always wins downstream) plus one line of justification. Never rewrite or delete an earlier section — plans are append-only once written. On a FRESH dispatch (no stop reason carried), overwrite any existing plan file for this task; append-only applies to amendments within a cycle.
 
 ## Report format (one line)
 End with exactly one line: `PLANNER: READY — <n> files in scope` or `PLANNER: STOP — <reason>`.

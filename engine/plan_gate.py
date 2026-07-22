@@ -172,6 +172,16 @@ def main(argv: list[str]) -> int:
               f"max 80 chars), got {tid!r}", file=sys.stderr)
         return USAGE
 
+    # Same precedent as runtime_check.py:121-125 — unlink any stale verdict
+    # from a PRIOR run of this tid before doing anything else, so an
+    # escalate→answer→re-pick→clean-ship flow never folds an old run's
+    # violations into review_packet for a later, actually-clean commit.
+    gate_file = REVIEWS / f"task-{tid}-plan-gate.txt"
+    try:
+        gate_file.unlink(missing_ok=True)
+    except OSError:
+        pass
+
     plan_cfg = _load_config().get("plan")
     if not isinstance(plan_cfg, dict) or plan_cfg.get("enforce") != "block":
         return SHIP                      # feature off / verifier-only → nothing to enforce here
@@ -191,13 +201,24 @@ def main(argv: list[str]) -> int:
     if scope is None:
         return SHIP
 
+    allowed = scope["edit"] + scope["create"] + scope["allow_incidental"]
+    forbid = scope["forbid"]
+
+    if not allowed:
+        # An empty-but-valid fence (`plan_scope: {}` or all-null/empty keys)
+        # has no edit/create/allow_incidental entries at all — enforcing it
+        # would escalate EVERY path, a block-always from one degenerate
+        # planner output. Owner ruling: treat this as malformed rather than
+        # a real "touch nothing" scope — never-block-blind spirit; verifier
+        # mode still catches real scope creep as a review signal.
+        print("WARN: plan_gate: plan_scope's edit/create/allow_incidental union is "
+              "empty — treating as a degenerate fence, shipping without scope enforcement")
+        return SHIP
+
     changed, reason = _changed_paths(worktree)
     if changed is None:
         print(f"WARN: plan_gate: {reason} — shipping without scope enforcement")
         return SHIP
-
-    allowed = scope["edit"] + scope["create"] + scope["allow_incidental"]
-    forbid = scope["forbid"]
 
     violations = []
     for path in changed:
@@ -211,9 +232,8 @@ def main(argv: list[str]) -> int:
 
     for path, rule in violations:
         print(f"plan gate: {path} — violates {rule}")
-    out = REVIEWS / f"task-{tid}-plan-gate.txt"
     try:
-        out.write_text("\n".join(f"{path}\t{rule}" for path, rule in violations) + "\n")
+        gate_file.write_text("\n".join(f"{path}\t{rule}" for path, rule in violations) + "\n")
     except OSError:
         pass
     return ESCALATE

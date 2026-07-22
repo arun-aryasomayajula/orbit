@@ -244,6 +244,42 @@ def test_git_show_failure_ships_with_warning(tmp_path):
     assert "Traceback" not in r.stderr
 
 
+# --- stale gate-file cleanup (Finding 1) --------------------------------------
+
+def test_stale_gate_file_removed_on_clean_rerun(tmp_path):
+    """escalate -> answer/re-pick -> clean-ship, same tid: the ESCALATE run's
+    violations file must not survive into a later clean run's review_packet —
+    every run starts clean (same precedent as runtime_check.py's verdict
+    file), regardless of exit code."""
+    repo = make_repo(tmp_path, {"README.md": "x"}, {"extra/oops.py": "oops"})
+    ap = make_target(tmp_path, plan_md(scope_fence(edit=["src/app.py"])))
+
+    r1 = run_gate(ap, repo)
+    assert r1.returncode == 3, r1.stdout + r1.stderr
+    assert gate_file_text(ap) is not None
+
+    # Next cycle, same tid: a fresh commit that IS in scope.
+    _write_files(repo, {"src/app.py": "code"})
+    _git(repo, "commit", "-q", "-m", "clean fix")
+    r2 = run_gate(ap, repo)
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    assert gate_file_text(ap) is None
+
+
+# --- degenerate empty fence (Finding 2) ----------------------------------------
+
+def test_empty_fence_ships_with_warning(tmp_path):
+    """A fence with no edit/create/allow_incidental entries at all
+    (`plan_scope: {}`) would otherwise escalate every path — a block-always
+    from one degenerate planner output. Owner ruling: treat it as malformed
+    — WARN + SHIP, never-block-blind spirit."""
+    repo = make_repo(tmp_path, {"README.md": "x"}, {"anything.py": "code"})
+    ap = make_target(tmp_path, plan_md(scope_fence()))
+    r = run_gate(ap, repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "WARN" in r.stdout
+
+
 # --- usage / task id ----------------------------------------------------------
 
 def test_bad_task_id_exits_2(tmp_path):
