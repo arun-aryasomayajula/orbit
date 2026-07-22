@@ -4,6 +4,9 @@
 #   orbit intake <target>    survey the repo: verify gates, fill tracks, propose a starter
 #                            backlog (proposed/human — triage on the dashboard). Flags:
 #                            --no-agent --dry-run --timeout N
+#   orbit knowledge <target> build|refresh|status|autorefresh
+#                            project knowledge base (endpoints/ER/flows/conventions) under
+#                            .autopilot/knowledge/. Flags: --timeout N --quiet
 #   orbit epic <target> plan|approve|decompose|status <id>
 #                            planning tier: epic → spec → human approval → child tasks
 #   orbit doctor <target>    validate wiring (read-only, no cycle)
@@ -23,6 +26,7 @@ export ORBIT_HOME
 case "$verb" in
   init)    "$ORBIT_HOME/install.sh" "$target" ;;
   intake)  python3 "$ORBIT_HOME/engine/intake.py" "$target" "${@:3}" ;;
+  knowledge) python3 "$ORBIT_HOME/engine/knowledge.py" "$target" "${@:3}" ;;
   epic)    python3 "$ORBIT_HOME/engine/epic_plan.py" "$target" "${@:3}" ;;
   doctor)  python3 "$ORBIT_HOME/engine/doctor.py" "$target" "${3:-}" ;;
   run)     "$ORBIT_HOME/engine/run.sh" "$target" ;;
