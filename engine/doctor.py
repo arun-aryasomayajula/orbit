@@ -115,6 +115,52 @@ gfile = g.get("file", "goldens/CALIBRATION.md")
 gpath = find(gfile) or (os.path.join(ORBIT_HOME, gfile) if os.path.exists(os.path.join(ORBIT_HOME, gfile)) else None)
 check("golden calibration resolves", bool(gpath), gpath or f"missing ({gfile})")
 
+# 5c. project knowledge base (optional — presence of knowledge/ is the switch).
+# Read-only: doctor never runs the survey. knowledge.py already does the real
+# (containment-checked) validation on build/refresh — this just re-confirms
+# the manifest still parses and its docs still exist, in doctor's own style.
+kdir = os.path.join(AP, "knowledge")
+kb_cfg = cfg.get("knowledge") if isinstance(cfg.get("knowledge"), dict) else {}
+if not os.path.isdir(kdir):
+    if kb_cfg.get("refresh") == "auto":
+        check("knowledge.refresh: auto but no knowledge base — run `orbit knowledge build`", False)
+    # else: feature unused — print nothing (zero behavior change)
+else:
+    manifest_path = os.path.join(kdir, "manifest.json")
+    problem = None
+    docs = []
+    if not os.path.exists(manifest_path):
+        problem = f"manifest.json missing under {kdir}/"
+    else:
+        try:
+            manifest = json.load(open(manifest_path))
+        except (OSError, ValueError) as e:
+            manifest = None
+            problem = f"manifest.json is not valid JSON ({e})"
+        if manifest is not None:
+            if not isinstance(manifest, dict):
+                problem = "manifest.json must be a JSON object"
+            else:
+                docs = manifest.get("docs")
+                if not isinstance(docs, list) or not docs:
+                    problem = "manifest.json 'docs' must be a non-empty list"
+                    docs = []
+                else:
+                    missing = [d for d in docs if not isinstance(d, str) or not os.path.exists(os.path.join(kdir, d))]
+                    if missing:
+                        problem = "docs missing on disk: " + ", ".join(missing)
+    check("knowledge base", problem is None, problem or f"{len(docs)} doc(s)")
+
+    staleness_path = os.path.join(AP, "state", "knowledge-staleness.json")
+    if os.path.exists(staleness_path):
+        try:
+            staleness = json.load(open(staleness_path))
+            stale = staleness.get("stale_docs") if isinstance(staleness, dict) else None
+        except (OSError, ValueError):
+            stale = None
+        if isinstance(stale, list) and stale:
+            print(f"  · knowledge: {len(stale)} doc(s) stale — orbit knowledge refresh")
+
 # 6. dry-run routing over the queue (if present)
 qf = os.path.join(AP, "state", "queue.json")
 if os.path.exists(qf):

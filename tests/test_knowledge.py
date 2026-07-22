@@ -18,6 +18,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 KNOWLEDGE = ROOT / "engine" / "knowledge.py"
+DOCTOR = ROOT / "engine" / "doctor.py"
 
 VALID_INDEX = "# Fake Project\n\nA tiny fake project used by tests.\n\n" + "\n".join(
     f"line {i}" for i in range(10)
@@ -719,3 +720,93 @@ def test_status_unreachable_sha_and_traversal_patch_warns_with_reason(tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     assert "WARN" in r.stdout
     assert "traversal" in r.stdout or "escapes" in r.stdout
+
+
+# === Task 5: doctor's knowledge-base check (read-only — no doctor test conventions
+# existed yet, so these are subprocess smoke cases per the task-5 brief) =====
+#
+# NOTE: assertions anchor on the check-line's own "✓ "/"✗ " prefix (after
+# stripping leading whitespace) rather than a loose "knowledge" substring —
+# pytest's tmp_path directory is derived from the test function name (e.g.
+# .../test_doctor_valid_knowledge_manifest_shows_ok_line0/...) and doctor
+# prints that path inline in unrelated ✓ lines (config.yaml present, etc.),
+# which would otherwise false-positive the match.
+
+def _run_doctor(target):
+    return subprocess.run([sys.executable, str(DOCTOR), str(target)],
+                          capture_output=True, text=True, env=dict(os.environ))
+
+
+def _check_lines(stdout, mark):
+    return [ln.strip() for ln in stdout.splitlines() if ln.strip().startswith(mark)]
+
+
+def test_doctor_valid_manifest_shows_ok_line(tmp_path):
+    # (test name deliberately avoids the word "knowledge" — see the note above
+    # _run_doctor: tmp_path's directory is derived from the test id and would
+    # otherwise leak into unrelated ✓ lines' path details.)
+    t = _target(tmp_path)
+    kdir = t / ".autopilot" / "knowledge"
+    kdir.mkdir(parents=True)
+    (kdir / "INDEX.md").write_text("# index\n")
+    (kdir / "manifest.json").write_text(json.dumps({
+        "version": 1, "generated_at": "2026-07-01T00:00:00Z",
+        "base_sha": "deadbeef", "docs": ["INDEX.md"], "files": {}}))
+    r = _run_doctor(t)
+    assert any(ln.startswith("✓ knowledge base") for ln in _check_lines(r.stdout, "✓")), r.stdout
+    assert not any("knowledge" in ln for ln in _check_lines(r.stdout, "✗")), r.stdout
+
+
+def test_doctor_broken_manifest_shows_fail_line(tmp_path):
+    t = _target(tmp_path)
+    kdir = t / ".autopilot" / "knowledge"
+    kdir.mkdir(parents=True)
+    (kdir / "manifest.json").write_text("{not valid json")
+    r = _run_doctor(t)
+    assert any("knowledge" in ln for ln in _check_lines(r.stdout, "✗")), r.stdout
+
+
+def test_doctor_manifest_lists_missing_doc_shows_fail_line(tmp_path):
+    t = _target(tmp_path)
+    kdir = t / ".autopilot" / "knowledge"
+    kdir.mkdir(parents=True)
+    (kdir / "manifest.json").write_text(json.dumps({
+        "version": 1, "generated_at": "2026-07-01T00:00:00Z",
+        "base_sha": "deadbeef", "docs": ["missing.md"], "files": {}}))
+    r = _run_doctor(t)
+    assert any("knowledge" in ln for ln in _check_lines(r.stdout, "✗")), r.stdout
+
+
+def test_doctor_refresh_auto_without_knowledge_dir_fails(tmp_path):
+    t = _target(tmp_path)
+    _configure_knowledge(t, refresh="auto")
+    r = _run_doctor(t)
+    assert any("knowledge.refresh: auto" in ln for ln in _check_lines(r.stdout, "✗")), r.stdout
+
+
+def test_doctor_feature_unused_prints_nothing_new(tmp_path):
+    # feature unused (no kb dir, refresh not "auto") → zero behavior change:
+    # doctor emits no ✓/✗/informational knowledge line, and the run stays
+    # exactly as green/red as it was before this task.
+    # (test name deliberately avoids the word "knowledge" — tmp_path's
+    # directory is derived from the test id, and pytest_id substrings leak
+    # into unrelated ✓ lines' path details, e.g. "config.yaml present <path>".)
+    t = _target(tmp_path)
+    r = _run_doctor(t)
+    assert not any("knowledge" in ln for ln in _check_lines(r.stdout, "✓")
+                   + _check_lines(r.stdout, "✗") + _check_lines(r.stdout, "·"))
+
+
+def test_doctor_reports_stale_docs_informationally(tmp_path):
+    t = _target(tmp_path)
+    kdir = t / ".autopilot" / "knowledge"
+    kdir.mkdir(parents=True)
+    (kdir / "INDEX.md").write_text("# index\n")
+    (kdir / "manifest.json").write_text(json.dumps({
+        "version": 1, "generated_at": "2026-07-01T00:00:00Z",
+        "base_sha": "deadbeef", "docs": ["INDEX.md"], "files": {}}))
+    (t / ".autopilot" / "state" / "knowledge-staleness.json").write_text(json.dumps({
+        "checked_at": "2026-07-22T00:00:00Z", "generated_at": "2026-07-01T00:00:00Z",
+        "stale_docs": ["INDEX.md"], "merges_considered": 2}))
+    r = _run_doctor(t)
+    assert "knowledge: 1 doc(s) stale — orbit knowledge refresh" in r.stdout, r.stdout

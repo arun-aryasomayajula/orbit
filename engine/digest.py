@@ -106,6 +106,15 @@ def build(target: Path) -> tuple[str, str, str]:
             f"{tid} ({e.get('state')}, {_age_days(e.get('updated_at'))})"
             for tid, e in sorted(in_flight)))
     lines.append(f"📋 queue: {len(pickable)} pickable / {len(qtasks)} emitted · spend today ${spend:.2f}")
+
+    # Project knowledge base staleness (written by `knowledge.py status`, kept
+    # fresh by run.sh's autorefresh hook). Missing/unparseable file → no line —
+    # this must never crash the digest for a repo that hasn't built one yet.
+    staleness = _load_json(state / "knowledge-staleness.json", None)
+    stale_docs = staleness.get("stale_docs") if isinstance(staleness, dict) else None
+    if isinstance(stale_docs, list) and stale_docs:
+        lines.append(f"📚 knowledge stale: {len(stale_docs)} doc(s) — orbit knowledge refresh")
+
     if not ships and not escalated and not needs_info:
         lines.insert(0, "✅ no human gate is blocking the loop.")
     lines.append(_next_action(escalated, ships, pickable, in_flight, dash))

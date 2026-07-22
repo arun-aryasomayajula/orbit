@@ -96,3 +96,40 @@ def test_in_flight_task_is_restated(tmp_path):
     assert any("in flight" in l and "t-12" in l and "in_progress" in l for l in body.splitlines())
     # a task in flight means the loop is working — not "queue a task"
     assert "queue a task" not in _next_line(body)
+
+
+def test_knowledge_stale_line_present_with_count(tmp_path):
+    tgt = _target(tmp_path)
+    (tgt / ".autopilot" / "state" / "knowledge-staleness.json").write_text(json.dumps({
+        "checked_at": "2026-07-22T00:00:00Z",
+        "generated_at": "2026-07-01T00:00:00Z",
+        "stale_docs": ["endpoints.md", "flows/checkout.md"],
+        "merges_considered": 5,
+    }))
+    _, body, _ = digest.build(tgt)
+    assert "📚 knowledge stale: 2 doc(s) — orbit knowledge refresh" in body
+
+
+def test_knowledge_stale_line_absent_without_file(tmp_path):
+    tgt = _target(tmp_path)
+    _, body, _ = digest.build(tgt)
+    assert "knowledge stale" not in body
+
+
+def test_knowledge_stale_line_absent_on_malformed_json(tmp_path):
+    tgt = _target(tmp_path)
+    (tgt / ".autopilot" / "state" / "knowledge-staleness.json").write_text("{not valid json")
+    _, body, _ = digest.build(tgt)
+    assert "knowledge stale" not in body
+
+
+def test_knowledge_stale_line_absent_when_stale_docs_empty(tmp_path):
+    tgt = _target(tmp_path)
+    (tgt / ".autopilot" / "state" / "knowledge-staleness.json").write_text(json.dumps({
+        "checked_at": "2026-07-22T00:00:00Z",
+        "generated_at": "2026-07-01T00:00:00Z",
+        "stale_docs": [],
+        "merges_considered": 0,
+    }))
+    _, body, _ = digest.build(tgt)
+    assert "knowledge stale" not in body

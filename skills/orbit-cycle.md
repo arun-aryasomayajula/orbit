@@ -45,6 +45,16 @@ From the router, load the category's `tracks:` ∪ every `path_tracks:` entry wh
 ## 2.6. Load GOLDEN calibration (graded exemplars of good output)
 The router's `goldens:` block points at `goldens/CALIBRATION.md` (target `.autopilot/goldens/` overrides `$ORBIT_HOME/goldens/`). Read it and pull the **`always` card** (applies to every task) PLUS the card named by `goldens.by_category[<category>]`. Fold these into the maker, checker, AND verifier briefs: "Match this graded exemplar of a strong <category> output; avoid the flaws it lists." If the card names an exemplar file, tell the maker it MAY Read `$ORBIT_HOME/goldens/<exemplar>` for a concrete model. The golden calibration is what "good" looks like; skills are how, tracks are repo facts. **Also read `$AP_HOME/goldens/LEARNED.md` if it exists** — THIS repo's own graded lessons, mined from its ledger and human-approved on the dashboard: fold its `## always` section plus the task category's section into the same maker/checker/verifier briefs, ALONGSIDE (never instead of) the engine calibration. Record the card(s) used for step 3.6.
 
+## 2.7. Load PROJECT KNOWLEDGE (if $AP_HOME/knowledge/INDEX.md exists)
+Read INDEX.md (it is short). From it, Read ONLY what this task implicates: the
+endpoints.md sections and flows/<slug>.md docs whose paths/terms match the task
+text or the files it will touch, plus er.mmd when the task touches persistence.
+Fold a compact extract into the maker, checker AND verifier briefs: "This repo's
+mapped surface for this task: <endpoints → handlers → tables; relevant flow
+summary>. The knowledge base is human-reviewed but code wins — if the code
+contradicts it, trust the code and note the discrepancy in the review notes."
+Record the docs read for step 3.6. No knowledge/ dir → skip (zero behaviour change).
+
 ## 3. Build → Check loop (max 5 cycles)
 1. Dispatch the chosen **maker** (Task) with the brief (cycle 1) or the checker's failure report. Brief it with the router `skill` method + track Read-instruction + the **golden calibration** (step 2.6) + the **gate commands** (run `python3 "$ORBIT_HOME/engine/config.py" gates "$(dirname "$AP_HOME")"` — each line is `name<TAB>cwd<TAB>cmd`).
 2. Dispatch the **checker** (Task, `checker`, sonnet) — it runs the config gates and reports pass/fail with real output.
@@ -54,7 +64,7 @@ The router's `goldens:` block points at `goldens/CALIBRATION.md` (target `.autop
 Stage exactly the files to ship (never `git add -A`, never state/secrets). Dispatch the **verifier** (Task, `verifier`, sonnet) with the task id + description + the golden calibration card (step 2.6) as the quality bar; it reads `git diff --cached HEAD` and judges intent-vs-implementation AND whether the output matches the strong-exemplar shape (e.g. tests are executable & fail-before/pass-after, no unverified "all clear"). CONFORMS → step 3.6. NONCONFORMING → feed the gap back to the maker (counts as a cycle); second NONCONFORMING → escalate. Never skip/weaken this.
 
 ## 3.6. Review notes
-Write `$AP_STATE/reviews/task-<id>-notes.md`: verifier verdict (per criterion), checker evidence (real gate output), risk notes, and `tracks: <names>` + `skill: <invoked>` + `golden: <calibration cards used>` + `model: <effective>`.
+Write `$AP_STATE/reviews/task-<id>-notes.md`: verifier verdict (per criterion), checker evidence (real gate output), risk notes, and `tracks: <names>` + `skill: <invoked>` + `golden: <calibration cards used>` + `knowledge: <docs read or none>` + `model: <effective>`.
 
 ## 4. Finish (CONFORMS) — atomic commit on the detached base HEAD
 Files already staged. ONE atomic commit on the detached HEAD (no branch), message `<type>: <what changed>` (<72 chars) ending with the config `commit_trailer`. Do NOT push. Record: `python3 "$ORBIT_HOME/engine/ledger.py" committed <id> "<branch_prefix>/task-<id>" "$(git rev-parse HEAD)"`.
