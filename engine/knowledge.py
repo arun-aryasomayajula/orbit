@@ -168,7 +168,7 @@ def _unsafe_doc_reason(kdir: Path, doc) -> str | None:
         return "absolute paths are not allowed — must be relative to knowledge/"
     try:
         resolved = (kdir / doc).resolve()
-    except OSError as e:
+    except (OSError, ValueError) as e:      # ValueError: e.g. an embedded NUL byte
         return f"could not resolve path ({e})"
     if not resolved.is_relative_to(kdir.resolve()):
         return "escapes knowledge/ (path traversal)"
@@ -354,31 +354,58 @@ def _unsafe_patch_reason(ap_state: Path, patch) -> str | None:
     return None
 
 
+_SHA_RE = re.compile(r"^[0-9a-f]{7,64}$", re.IGNORECASE)
+
+
+def _combine_reasons(primary: str | None, secondary: str | None) -> str | None:
+    if primary and secondary:
+        return f"{primary}; {secondary}"
+    return primary or secondary
+
+
 def _changed_paths_for_marker(repo: Path, ap_state: Path, sha: str,
                                patch) -> tuple[list[str] | None, str | None]:
     """(paths, None) on success — paths may be empty ("this merge touched
     nothing", not a failure). (None, reason) when BOTH the git lookup and the
     patch-file fallback failed — the caller turns `reason` into its WARN line
     so a rejected/traversal patch reads differently from a merely-missing
-    one."""
+    one.
+
+    `sha` is agent-written data (a merge marker's ledger call, verbatim) —
+    untrusted enough that it must never reach a git argv unguarded. Before any
+    git invocation it's checked against `_SHA_RE`; anything else (e.g. a
+    `--output=/path` flag-injection attempt) is rejected outright and treated
+    exactly like an unreachable sha — same patch-file fallback, same
+    warn-and-skip path, with the rejection reason carried through so the WARN
+    says *why*. `--end-of-options` is also inserted ahead of the sha in the
+    git argv itself as defense in depth, in case the regex guard is ever
+    weakened or bypassed."""
+    sha_reason = None
     if sha:
-        try:
-            p = subprocess.run(["git", "-C", str(repo), "show", "--name-only", "--format=", sha],
-                               capture_output=True, text=True, timeout=GIT_TIMEOUT)
-            if p.returncode == 0:
-                return [ln.strip() for ln in p.stdout.splitlines() if ln.strip()], None
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-    # git failed (unreachable sha) or no sha at all — fall back to the backup patch.
+        if _SHA_RE.match(sha):
+            try:
+                p = subprocess.run(
+                    ["git", "-C", str(repo), "show", "--name-only", "--format=",
+                     "--end-of-options", sha],
+                    capture_output=True, text=True, timeout=GIT_TIMEOUT)
+                if p.returncode == 0:
+                    return [ln.strip() for ln in p.stdout.splitlines() if ln.strip()], None
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        else:
+            sha_reason = (f"sha {sha!r} is not a valid git sha (must match "
+                          "^[0-9a-f]{7,64}$, case-insensitive) — rejected before any git call")
+    # git failed (unreachable sha), the sha was rejected as unsafe, or there was
+    # no sha at all — fall back to the backup patch.
     reason = _unsafe_patch_reason(ap_state, patch)
     if reason:
-        return None, reason
+        return None, _combine_reasons(sha_reason, reason)
     patch_path = (ap_state / patch).resolve()
     if not patch_path.is_file():
-        return None, f"patch file not found ({patch_path})"
+        return None, _combine_reasons(sha_reason, f"patch file not found ({patch_path})")
     text, err = _read_text(patch_path)
     if err:
-        return None, f"patch file could not be read ({err})"
+        return None, _combine_reasons(sha_reason, f"patch file could not be read ({err})")
     return [ln[len("+++ b/"):].strip() for ln in text.splitlines() if ln.startswith("+++ b/")], None
 
 

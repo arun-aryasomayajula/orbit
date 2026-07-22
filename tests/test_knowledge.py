@@ -8,6 +8,7 @@
 #
 # Run: python3.11 -m pytest tests/test_knowledge.py -v   (from orbit/)
 import base64
+import importlib.util
 import json
 import os
 import subprocess
@@ -810,3 +811,90 @@ def test_doctor_reports_stale_docs_informationally(tmp_path):
         "stale_docs": ["INDEX.md"], "merges_considered": 2}))
     r = _run_doctor(t)
     assert "knowledge: 1 doc(s) stale — orbit knowledge <target> refresh" in r.stdout, r.stdout
+
+
+# === Final whole-branch review fixes ========================================
+
+def test_status_sha_flag_injection_is_rejected_and_falls_back_with_warning(tmp_path):
+    # Finding 1 (security): a merge marker's `sha` is agent-written data
+    # (stored verbatim from the maker's ledger call) that used to reach
+    # `git show --name-only --format= <sha>` completely unguarded. Confirmed
+    # exploit absent the fix: `git show --name-only --format= --output=X <any
+    # sha>` exits 0 and writes file X — i.e. an agent-controlled "sha" of
+    # `--output=<path>` makes the engine write an arbitrary file. This marker
+    # carries exactly that payload (an absolute --output= path); the file
+    # must never be created, and the marker must be handled exactly like an
+    # unreachable sha — patch fallback attempted (none given here), then
+    # WARN + skip, exit 0, fresh — with the rejection reason named in the
+    # WARN line.
+    t = _target(tmp_path)
+    _build_kb(tmp_path, t, "2026-07-10T00:00:00Z", {"src/*.py": ["conventions.md"]})
+    pwned = tmp_path / "pwned.txt"
+    _write_markers(t, [_marker("task-inj", "2026-07-15T00:00:00Z",
+                               sha=f"--output={pwned}", patch="")])
+
+    r = run_sub(t, "status")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not pwned.exists(), "git argument injection via marker sha wrote a file"
+    assert "WARN" in r.stdout
+    assert "not a valid git sha" in r.stdout
+    staleness = json.loads((t / ".autopilot" / "state" / "knowledge-staleness.json").read_text())
+    assert staleness["stale_docs"] == []
+
+
+def test_status_sha_flag_injection_falls_back_to_patch_file_when_present(tmp_path):
+    # Same payload as above, but a valid patch backup exists — the invalid
+    # sha must fall through to the existing patch-file fallback (not just
+    # skip), exactly like today's unreachable-sha-with-patch case.
+    t = _target(tmp_path)
+    _build_kb(tmp_path, t, "2026-07-10T00:00:00Z", {"src/*.py": ["conventions.md"]})
+    diffs = t / ".autopilot" / "state" / "diffs"
+    diffs.mkdir(parents=True)
+    patch = diffs / "cycle-inj.patch"
+    patch.write_text(
+        "diff --git a/src/app.py b/src/app.py\n"
+        "index 111..222 100644\n"
+        "--- a/src/app.py\n"
+        "+++ b/src/app.py\n"
+        "@@ -1 +1 @@\n"
+        "-x = 0\n"
+        "+x = 1\n"
+    )
+    pwned = tmp_path / "pwned2.txt"
+    _write_markers(t, [_marker("task-inj-2", "2026-07-15T00:00:00Z",
+                               sha=f"--output={pwned}", patch=str(patch))])
+
+    r = run_sub(t, "status")
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert not pwned.exists()
+    assert "conventions.md" in r.stdout
+
+
+def test_build_rejects_doc_path_containing_null_byte(tmp_path):
+    # Finding 2 (minor): _unsafe_doc_reason's `.resolve()` used to be guarded
+    # by `except OSError` only — a null byte in a manifest docs[] entry
+    # raises ValueError instead, which escaped as a raw traceback (an
+    # accidental fail-closed, not a deliberate one). Must now be a clean
+    # VALIDATE: rejection, no traceback.
+    t = _target(tmp_path)
+    docs = list(ALL_DOCS) + ["bad\x00name.md"]
+    spec = _spec(tmp_path, "spec.json", _full_files(), _full_manifest(docs=docs))
+    r = run(t, _agent_script(tmp_path), spec)
+    assert r.returncode == 1
+    assert "VALIDATE" in r.stdout
+    assert "Traceback" not in r.stderr
+
+
+def test_endpoints_header_constant_matches_the_skill_doc():
+    # Finding 3 (minor): ENDPOINTS_HEADER is hand-duplicated from
+    # skills/orbit-knowledge.md with no coupling test — drift between the two
+    # would be a silent false-pass (validate() keeps accepting whatever
+    # knowledge.py hardcodes even if the skill's prescribed table header
+    # changes out from under it). Import the real constant rather than
+    # re-duplicating the literal here.
+    spec = importlib.util.spec_from_file_location("knowledge", KNOWLEDGE)
+    knowledge = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(knowledge)
+
+    skill_text = (ROOT / "skills" / "orbit-knowledge.md").read_text()
+    assert knowledge.ENDPOINTS_HEADER in skill_text
