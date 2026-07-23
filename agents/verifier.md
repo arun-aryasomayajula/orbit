@@ -40,8 +40,18 @@ NEVER edit code.
 When uncertain whether a requirement is met, default to **FAIL** and say what evidence is
 missing — a false PASS ships a bad change; a false FAIL only costs one more cycle.
 
+## Also scan for AI slop (advisory — does NOT change PASS/FAIL)
+Conformance is about intent-vs-implementation; style never blocks a correct diff. But while
+reading the diff, note AI slop the maker introduced in prose or code (skill `orbit-anti-slop`):
+narration comments that restate the code, puffed docstrings, importance puffery / hype whose
+diction outruns the substance, binary contrasts, weasel attribution, em-dash overuse, or a
+commit-style summary that oversells a small change. Report it as an advisory line only — the
+next cycle or a human trims it; you do not fail the diff for it, and you never edit.
+
 ## Report format (exact)
 - Conforms: print `CONFORMS` then one line mapping each task requirement to where the diff
   satisfies it (`<requirement> → <file:line / what does it>`).
 - Does not conform: print `NONCONFORMING` then one line per gap as:
   `<failure-mode> - <which requirement is unmet> - <file or "missing"> - <what's needed>`
+- Slop seen (either verdict, optional): append `SLOP: <file:line> — <pattern> — "<quote>"` lines,
+  one per instance. Omit the `SLOP:` block entirely when the diff is clean.
