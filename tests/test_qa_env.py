@@ -104,6 +104,52 @@ def test_down_is_reverse_order():
     assert order == ["c", "b", "a"]
 
 
+def test_teardown_kills_forked_grandchild_not_just_launch_pid(tmp_path, monkeypatch):
+    """Mechanism proof for the process-group teardown (start_new_session +
+    os.killpg in _send): `python -m http.server` is exec-replaced by
+    /bin/sh, so its tracked pid IS the real server (pid == pgid) — every
+    other test in this file would still pass even with start_new_session/
+    killpg deleted, signalling only proc.pid. Real `launch` strings (e.g.
+    `npm run dev`) routinely fork a grandchild the shell never exec-replaces
+    into. `bash -c 'sleep 30 & echo $! > pidfile; wait'` reproduces that
+    shape: bash (our tracked pid) backgrounds `sleep 30` as a genuinely
+    separate, un-exec'd process and captures its pid to a file. If down()
+    only signalled the tracked pid, the sleep grandchild would keep running
+    for its full 30s after teardown — this asserts it doesn't.
+
+    RED-tested manually: temporarily patching _send to `proc.send_signal(sig)`
+    (bypassing os.killpg entirely, i.e. simulating start_new_session/killpg
+    having been deleted) makes this exact test fail (grandchild still alive
+    after down()) while every other test in this file keeps passing — see
+    the task-19-report.md fix-pass entry for the transcript.
+    """
+    monkeypatch.setattr(qa_env, "NO_READY_SLEEP", 0.2)   # keep the test itself fast
+    pidfile = tmp_path / "grandchild.pid"
+    qa_cfg = {"services": [
+        # Single-quote the inner bash script: this whole `launch` string
+        # itself goes through ONE shell parse already (up()'s own
+        # Popen(shell=True) invokes /bin/sh -c launch) — double-quoting it
+        # here would let $! expand in the OUTER shell (which has no
+        # background jobs, so it'd expand to "") before bash ever saw it.
+        {"name": "forker",
+         "launch": f"bash -c 'sleep 30 & echo $! > {pidfile}; wait'"},
+    ]}
+    log_dir = tmp_path / "logs"
+
+    handles = qa_env.up(tmp_path, qa_cfg, log_dir)
+    try:
+        pid_written = lambda: pidfile.exists() and pidfile.read_text().strip() != ""
+        assert wait_until(pid_written, timeout=2), "grandchild never wrote its pid"
+        grandchild_pid = int(pidfile.read_text().strip())
+        assert grandchild_pid != handles[0].proc.pid   # genuinely a DIFFERENT process
+        assert alive(grandchild_pid), "grandchild not even running yet"
+    finally:
+        qa_env.down(handles)
+
+    assert wait_until(lambda: not alive(grandchild_pid)), (
+        "grandchild leaked past down() — process-group teardown isn't working")
+
+
 # ===========================================================================
 # Ready timeout tears down EVERYTHING already started, naming the culprit.
 # ===========================================================================
@@ -190,6 +236,20 @@ def test_services_not_a_list_raises(tmp_path):
 
 def test_no_services_is_a_noop(tmp_path):
     assert qa_env.up(tmp_path, {}, tmp_path / "logs") == []
+
+
+def test_non_numeric_ready_timeout_raises(tmp_path):
+    qa_cfg = {"ready_timeout_seconds": "soon",
+              "services": [{"name": "x", "launch": "true"}]}
+    with pytest.raises(qa_env.QaEnvError, match="ready_timeout_seconds"):
+        qa_env.up(tmp_path, qa_cfg, tmp_path / "logs")
+
+
+def test_non_dict_env_raises(tmp_path):
+    qa_cfg = {"env": ["not", "a", "dict"],
+              "services": [{"name": "x", "launch": "true"}]}
+    with pytest.raises(qa_env.QaEnvError, match="qa.env"):
+        qa_env.up(tmp_path, qa_cfg, tmp_path / "logs")
 
 
 # ===========================================================================

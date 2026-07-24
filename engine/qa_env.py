@@ -148,49 +148,63 @@ def up(target: str | Path, qa_cfg: dict, log_dir: str | Path) -> list[ServiceHan
     if not isinstance(services, list):
         raise QaEnvError(f"qa.services must be a list, got {type(services).__name__}")
 
-    env = dict(os.environ)
     extra_env = qa_cfg.get("env") or {}
-    if isinstance(extra_env, dict):
-        env.update({str(k): str(v) for k, v in extra_env.items()})
+    if not isinstance(extra_env, dict):
+        raise QaEnvError(f"qa.env must be an object/mapping, got {type(extra_env).__name__}")
+    env = dict(os.environ)
+    env.update({str(k): str(v) for k, v in extra_env.items()})
 
     raw_timeout = qa_cfg.get("ready_timeout_seconds")
-    ready_timeout = int(raw_timeout) if raw_timeout is not None else DEFAULT_READY_TIMEOUT
-
-    handles: list[ServiceHandle] = []
-    for svc in services:
-        if not isinstance(svc, dict):
-            down(handles)
-            raise QaEnvError(f"qa.services entry is not an object: {svc!r}")
-
-        name = str(svc.get("name") or f"service{len(handles)}")
-        launch = svc.get("launch")
-        if not launch or not isinstance(launch, str):
-            down(handles)
-            raise QaEnvError(f"service {name!r} has no 'launch' command")
-
-        raw_cwd = svc.get("cwd") or "."
-        if not isinstance(raw_cwd, str):
-            down(handles)
-            raise QaEnvError(f"service {name!r} has a non-string 'cwd': {raw_cwd!r}")
-        cwd = target / raw_cwd
-        log_path = log_dir / f"{name}.log"
+    if raw_timeout is None:
+        ready_timeout = DEFAULT_READY_TIMEOUT
+    else:
         try:
-            proc = _spawn(launch, cwd, env, log_path)
-        except OSError as e:
-            down(handles)
-            raise QaEnvError(f"service {name!r} failed to launch: {e}") from e
+            ready_timeout = int(raw_timeout)
+        except (TypeError, ValueError):
+            raise QaEnvError(
+                f"qa.ready_timeout_seconds must be a number, got {raw_timeout!r}")
 
-        handles.append(ServiceHandle(name=name, proc=proc, log_path=log_path))
+    # Everything from here on can have started a real process — one
+    # try/except around the whole loop is the structural teardown guarantee:
+    # ANY exception raised while bringing services up (the QaEnvErrors below,
+    # today, or anything a future change might let through — e.g. a bug in
+    # _http_ok's catch-all) tears down everything already started before
+    # propagating. Safety net, not a substitute for raising QaEnvError at the
+    # actual point of failure (still done below, for a clear message).
+    handles: list[ServiceHandle] = []
+    try:
+        for svc in services:
+            if not isinstance(svc, dict):
+                raise QaEnvError(f"qa.services entry is not an object: {svc!r}")
 
-        ready = svc.get("ready")
-        if ready:
-            if not _wait_ready(str(ready), ready_timeout):
-                down(handles)   # everything started so far, INCLUDING this one
-                raise QaEnvError(
-                    f"service {name!r} never became ready at {ready!r} "
-                    f"within {ready_timeout}s")
-        else:
-            time.sleep(NO_READY_SLEEP)
+            name = str(svc.get("name") or f"service{len(handles)}")
+            launch = svc.get("launch")
+            if not launch or not isinstance(launch, str):
+                raise QaEnvError(f"service {name!r} has no 'launch' command")
+
+            raw_cwd = svc.get("cwd") or "."
+            if not isinstance(raw_cwd, str):
+                raise QaEnvError(f"service {name!r} has a non-string 'cwd': {raw_cwd!r}")
+            cwd = target / raw_cwd
+            log_path = log_dir / f"{name}.log"
+            try:
+                proc = _spawn(launch, cwd, env, log_path)
+            except OSError as e:
+                raise QaEnvError(f"service {name!r} failed to launch: {e}") from e
+
+            handles.append(ServiceHandle(name=name, proc=proc, log_path=log_path))
+
+            ready = svc.get("ready")
+            if ready:
+                if not _wait_ready(str(ready), ready_timeout):
+                    raise QaEnvError(
+                        f"service {name!r} never became ready at {ready!r} "
+                        f"within {ready_timeout}s")
+            else:
+                time.sleep(NO_READY_SLEEP)
+    except Exception:
+        down(handles)
+        raise
 
     return handles
 
