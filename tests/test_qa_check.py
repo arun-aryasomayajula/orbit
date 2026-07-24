@@ -464,8 +464,14 @@ def test_qa_fail_escalates_at_cap_with_attachments(tmp_path):
     e = entries["t1"]
     assert e["qa"]["verdict"] == "fail" and e["qa"]["summary"] == "login dead"
     kinds = {a["kind"]: a["path"] for a in e.get("attachments", [])}
-    assert kinds["screenshot"] == str((qa_dir / "01-login.png").resolve())
-    assert kinds["report"] == str((qa_dir / "findings.md").resolve())
+    # Relative to $AP_STATE/qa/ — NOT resolved/absolute — so command_center.py's
+    # /qa-shot and /qa-report routes (which reject absolute `p`) can serve them.
+    assert kinds["screenshot"] == "task-t1/01-login.png"
+    assert kinds["report"] == "task-t1/findings.md"
+    _QA_DASHBOARD_PATH_RE = re.compile(r"^[A-Za-z0-9._/\-]{1,200}$")
+    for p in kinds.values():
+        assert _QA_DASHBOARD_PATH_RE.match(p), p
+        assert not os.path.isabs(p), p
 
 
 def test_qa_fail_at_cap_no_screenshots_or_report_attaches_nothing(tmp_path):

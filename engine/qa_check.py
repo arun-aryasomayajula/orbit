@@ -338,6 +338,12 @@ def _escalate_with_evidence(tid: str, summary: str, verdict: dict) -> int:
               f"will silently no-op; QA evidence will NOT be recorded for review")
     _ledger("qa-verdict", tid, "fail", summary)
 
+    # Attach the RELATIVE-to-qa/ string, not the resolved absolute path —
+    # command_center.py's /qa-shot and /qa-report routes (Task 17) only ever
+    # serve paths relative to $AP_STATE/qa/ and reject absolute `p` outright.
+    # The containment check still resolves against QA_DIR to validate (catches
+    # traversal/symlink escapes); only the string handed to `ledger.py attach`
+    # changes, so evidence attached here can actually render on the dashboard.
     shots = verdict.get("screenshots")
     if isinstance(shots, list) and shots:
         first = shots[0]
@@ -345,11 +351,12 @@ def _escalate_with_evidence(tid: str, summary: str, verdict: dict) -> int:
         if reason:
             print(f"WARN: QA verdict screenshot {first!r} for {tid} rejected ({reason}) — not attached")
         else:
-            _ledger("attach", tid, "screenshot", str((QA_DIR / first).resolve()))
+            _ledger("attach", tid, "screenshot", first)
 
-    findings_path = QA_DIR / f"task-{tid}" / "findings.md"
+    findings_rel = f"task-{tid}/findings.md"
+    findings_path = QA_DIR / findings_rel
     if findings_path.exists():
-        _ledger("attach", tid, "report", str(findings_path))
+        _ledger("attach", tid, "report", findings_rel)
     else:
         print(f"WARN: no findings report at {findings_path} for {tid} — not attached")
 
