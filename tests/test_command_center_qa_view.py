@@ -272,14 +272,46 @@ def test_pending_heals_excludes_approved_and_rejected_subdirs(cc):
     heal = cc.QA_DIR / "heal"
     (heal / "approved").mkdir(parents=True)
     (heal / "rejected").mkdir(parents=True)
-    (heal / "pending-1.json").write_text("{}")
-    (heal / "pending-2.json").write_text("{}")
-    (heal / "approved" / "old-1.json").write_text("{}")
-    (heal / "rejected" / "old-2.json").write_text("{}")
+    (heal / "pending-1--20260721T000000Z.json").write_text("{}")
+    (heal / "pending-2--20260721T000001Z.json").write_text("{}")
+    (heal / "approved" / "old-1--20260721T000000Z.json").write_text("{}")
+    (heal / "rejected" / "old-2--20260721T000000Z.json").write_text("{}")
     st = cc.build_state()
     assert st["qa_flows"]["pending_heals"] == 2
     assert len(st["qa_flows"]["heals"]) == 2
-    assert {h["file"] for h in st["qa_flows"]["heals"]} == {"pending-1.json", "pending-2.json"}
+    assert {h["file"] for h in st["qa_flows"]["heals"]} == {
+        "pending-1--20260721T000000Z.json", "pending-2--20260721T000001Z.json"}
+
+
+def test_pending_heals_excludes_non_conforming_filenames(cc):
+    # Finding 1(b): the heal listing is gated to _HEAL_FILE_RE — the same
+    # regex heal-approve/heal-reject already require via _heal_candidate_path
+    # — not just `.is_file()`. A name like `x&#39;evil.json` is creatable on
+    # disk (e.g. by a misbehaving agent writing candidates directly) and,
+    # unfiltered, would previously reach cc_shell.html's onclick attributes
+    # unescaped-enough to smuggle a quote via HTML entity decoding (see
+    # escJsAttr). `.DS_Store` is ordinary Finder litter. Neither is a
+    # _HEAL_FILE_RE match, so neither should appear in `heals` or count
+    # toward `pending_heals` — while a conforming candidate alongside them
+    # still is. This also closes the unclearable-junk-card bug: previously
+    # such a file was LISTED but heal-approve/heal-reject both refused it
+    # (wrong shape), so Reject always errored and the card could never be
+    # cleared; now it's simply never listed.
+    # Note: the cc_shell.html escJsAttr fix (escaping & first) isn't
+    # harness-testable from here — this Python test suite never renders or
+    # parses the dashboard's HTML/JS. This server-side listing filter is the
+    # primary gate; escJsAttr is defense-in-depth on top of it.
+    _write_flow(cc, "login")
+    heal = cc.QA_DIR / "heal"
+    heal.mkdir(parents=True)
+    _write_heal(cc, "login--20260722T000000Z.json", flow="login")
+    (heal / "x&#39;evil.json").write_text("{}")
+    (heal / ".DS_Store").write_text("")
+
+    st = cc.build_state()
+    qf = st["qa_flows"]
+    assert qf["pending_heals"] == 1
+    assert [h["file"] for h in qf["heals"]] == ["login--20260722T000000Z.json"]
 
 
 def test_qa_flows_heals_list_full_shape_and_malformed_entries(cc):

@@ -1238,7 +1238,7 @@ def qa_flow_library() -> dict | None:
     EITHER flows exist OR exploratory is enabled: `explore_enabled` lives
     INSIDE this dict, so if it stayed None whenever there were zero taught
     flows, enabling exploratory with no flows taught yet would hide the
-    whole QA view — Explore button included (Phase 5 review finding).
+    whole QA view — Explore button included.
     Listed flow names are filtered to SLUG_RE — a non-slug directory is never
     runnable anyway, and it's what the dashboard's HTML template trusts to
     be quote-safe (see the `names = sorted(...)` line below)."""
@@ -1286,13 +1286,25 @@ def qa_flow_library() -> dict | None:
     # Only top-level files under heal/ are pending — heal/approved/ and
     # heal/rejected/ are subdirectories (never `.is_file()`), so an archived
     # candidate is excluded from both the listing and the count without a
-    # separate check. Sorted by name for a deterministic strip ordering, same
-    # convention as load_calibration_candidates' `sorted(d.glob(...))`.
+    # separate check. Also gated to _HEAL_FILE_RE (same regex that guards
+    # heal-approve/heal-reject via _heal_candidate_path): a name that doesn't
+    # match is either junk (e.g. `.DS_Store`) or, worse, agent-written text
+    # that never went through this module's own naming convention and so
+    # isn't trusted to be quote-safe once it reaches cc_shell.html's onclick
+    # attributes (same reasoning as qa_flow_library's SLUG_RE filter on flow
+    # names above — filter the LISTING, don't rely on escaping alone).
+    # Filtering here also means a non-conforming file can never become an
+    # unclearable card: previously it was listed but heal-approve/reject both
+    # refused it (wrong shape), so Reject always errored and the card stuck
+    # around forever — now it's simply never listed. Sorted by name for a
+    # deterministic strip ordering, same convention as
+    # load_calibration_candidates' `sorted(d.glob(...))`.
     heal_dir = QA_DIR / "heal"
     heals = []
     if heal_dir.is_dir():
         try:
-            names = sorted(p.name for p in heal_dir.iterdir() if p.is_file())
+            names = sorted(p.name for p in heal_dir.iterdir()
+                            if p.is_file() and _HEAL_FILE_RE.match(p.name))
         except OSError:
             names = []
         heals = [_qa_heal_candidate_entry(heal_dir / name) for name in names]

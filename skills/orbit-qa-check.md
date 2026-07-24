@@ -54,7 +54,13 @@ For each acceptance criterion, exactly one status:
 
 ## 4. Unrelated bugs never move the verdict
 Anything broken you notice that is NOT one of this task's criteria: append
-ONE row to `ops/qa/SEEN.md` (create it with a header if missing) —
+ONE row to `$AP_HOME/../ops/qa/SEEN.md` — the MAIN checkout, NOT a path
+relative to your cwd. Your cwd here is the cycle worktree, which gets `git
+reset --hard` before the next cycle, so a plain relative `ops/qa/SEEN.md`
+write would silently vanish while the `qa` signal adapter (which reads the
+main checkout) never sees it; same precedent as `/orbit-qa-explore`, whose
+cwd IS the target repo root, so its own relative `ops/qa/SEEN.md` write
+already lands there. Create the file with a header if missing —
 `| date | page | type | signature | severity |`, `type` ∈
 `bug`|`ux`|`feature`, `severity` ∈ `critical`|`high`|`medium`|`low`. These
 NEVER affect `criteria` or `verdict` below — they are separately triaged, not
@@ -73,7 +79,7 @@ have time for — this check is deadline-conscious and never worth blowing
 your budget over.
 
 A broken overlapping flow: screenshot it, note it in findings.md, and append
-a `SEEN.md` row (step 4's format). It colors THIS task's `verdict` ONLY if it
+a `SEEN.md` row (step 4's path + format). It colors THIS task's `verdict` ONLY if it
 directly contradicts one of the task's own acceptance criteria (fold that
 into the criterion's judgment above, evidence cited); otherwise it's an
 unrelated finding like any other and never touches `criteria` or `verdict`.
@@ -113,7 +119,8 @@ unrelated finding like any other and never touches `criteria` or `verdict`.
 - Never push, never commit, never edit code.
 - Write ONLY inside `$AP_STATE/qa/task-<id>/`,
   `$AP_STATE/reviews/task-<id>-runtime.md`,
-  `$AP_STATE/reviews/task-<id>-qa.json`, and `ops/qa/SEEN.md` — nowhere else.
+  `$AP_STATE/reviews/task-<id>-qa.json`, and `$AP_HOME/../ops/qa/SEEN.md` —
+  nowhere else.
 - Unrelated findings NEVER color the verdict.
 - Always kill every service you launched, on every exit path.
 - A gate rerun is NOT a QA check — you must observe the RUNNING product,
@@ -121,6 +128,8 @@ unrelated finding like any other and never touches `criteria` or `verdict`.
 
 ## Clean up and exit
 Kill every process you started; leave the worktree exactly as you found it —
-`git status` clean apart from `ops/qa/SEEN.md` (the one sanctioned
-in-worktree write); your other outputs live OUTSIDE the worktree. Print one
-line: `<id>: verdict=<pass|fail|unable> contradicts=<bool>`.
+`git status` FULLY clean, no carve-out: every output, including
+`ops/qa/SEEN.md`, is written to its `$AP_HOME/../...` path in the main
+checkout, never relative to your cwd, so nothing you write ever lands inside
+the worktree. Print one line:
+`<id>: verdict=<pass|fail|unable> contradicts=<bool>`.

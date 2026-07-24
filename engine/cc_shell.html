@@ -720,7 +720,14 @@ const esc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').rep
 // literal INSIDE an onclick="..." HTML attribute (e.g. runFlow('${...}')):
 // esc() alone doesn't neuter a bare ' or " (see qa_flow_library's SLUG_RE
 // filter, the primary fix — this is a second layer, not a substitute for it).
-const escJsAttr=s=>String(s==null?'':s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+// & MUST be escaped FIRST: the browser HTML-entity-decodes attribute values
+// before the JS string literal inside them is parsed, so an unescaped input
+// containing the literal text `&#39;` would decode to a real `'` at parse
+// time and smuggle a string-literal break out of the onclick, regardless of
+// the backslash-escaping below (which only ever sees a `&`, never the quote
+// it decodes to). Escaping & to &amp; first turns that into the inert,
+// non-re-decoded literal `&amp;#39;`.
+const escJsAttr=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
 const fmt=s=>{s=Math.max(0,Math.floor(s));const m=Math.floor(s/60),r=s%60;
   return m<60?`${m}:${String(r).padStart(2,'0')}`:`${Math.floor(m/60)}h${String(m%60).padStart(2,'0')}m`;};
 let S=null,fetchedAt=0,serverNow=0,lastSig='';

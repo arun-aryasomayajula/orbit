@@ -773,7 +773,7 @@ def _release_lock(lock_path: Path) -> None:
     our_pid = os.getpid()
     if not isinstance(d, dict) or d.get("pid") != our_pid:
         other = d.get("pid") if isinstance(d, dict) else "?"
-        print(f"WARN: regression lock at {lock_path} is no longer ours "
+        print(f"WARN: QA lock at {lock_path} is no longer ours "
               f"(recorded pid {other!r}, we are {our_pid}) — leaving it in place")
         return
     try:
