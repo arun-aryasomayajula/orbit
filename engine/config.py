@@ -161,6 +161,26 @@ def validate(target):
                 envv = qa["env"]
                 if not isinstance(envv, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in envv.items()):
                     errs.append(f"qa.env must be a mapping of string to string, got {envv!r}")
+            if "regression" in qa:
+                reg = qa["regression"]
+                if not isinstance(reg, dict):
+                    errs.append(f"qa.regression must be a mapping, got {reg!r}")
+                else:
+                    if "on_merge" in reg and not isinstance(reg["on_merge"], bool):
+                        errs.append(f"qa.regression.on_merge must be a boolean, got {reg.get('on_merge')!r}")
+                    if "schedule_hours" in reg and (not isinstance(reg["schedule_hours"], int) or isinstance(reg["schedule_hours"], bool) or reg["schedule_hours"] < 0):
+                        errs.append(f"qa.regression.schedule_hours must be a non-negative integer, got {reg.get('schedule_hours')!r}")
+                    if "max_flows_per_run" in reg and (not isinstance(reg["max_flows_per_run"], int) or isinstance(reg["max_flows_per_run"], bool) or reg["max_flows_per_run"] <= 0):
+                        errs.append(f"qa.regression.max_flows_per_run must be a positive integer, got {reg.get('max_flows_per_run')!r}")
+            if "exploratory" in qa:
+                exp = qa["exploratory"]
+                if not isinstance(exp, dict):
+                    errs.append(f"qa.exploratory must be a mapping, got {exp!r}")
+                else:
+                    if "enabled" in exp and not isinstance(exp["enabled"], bool):
+                        errs.append(f"qa.exploratory.enabled must be a boolean, got {exp.get('enabled')!r}")
+                    if "max_pages" in exp and (not isinstance(exp["max_pages"], int) or isinstance(exp["max_pages"], bool) or exp["max_pages"] <= 0):
+                        errs.append(f"qa.exploratory.max_pages must be a positive integer, got {exp.get('max_pages')!r}")
     if errs:
         print("\n".join("  ✗ " + e for e in errs)); sys.exit(1)
     print("  ✓ config valid")

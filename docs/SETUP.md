@@ -176,6 +176,7 @@ before it pushes). Config (`.autopilot/config.yaml`, all optional):
 #       launch: "npm run dev"
 #       ready: "http://localhost:3000"
 #   base_url: "http://localhost:3000"  # where the browser starts (required with services)
+#   flows_dir: "qa/flows"  # under .autopilot/, committed
 #   env: {PORT: "3000"}                # exported into service launches (dedicated QA ports)
 #   ready_timeout_seconds: 90
 #   timeout_seconds: 1200              # whole QA-agent budget per invocation
@@ -188,6 +189,13 @@ before it pushes). Config (`.autopilot/config.yaml`, all optional):
 #     frontend: required               # required = QA fail blocks the ship (bounce/escalate)
 #     feature: required
 #     bug: evidence                    # evidence only, never blocks
+#   regression:
+#     on_merge: true                 # sweep approved flows when origin/<base> moves
+#     schedule_hours: 24             # independent cadence (0 = off)
+#     max_flows_per_run: 10          # cap per sweep
+#   exploratory:
+#     enabled: false                 # scheduled exploratory crawl → ops/qa/SEEN.md rows
+#     max_pages: 10
 ```
 Post-commit, the `/orbit-qa-check <task-id>` agent (`skills/orbit-qa-check.md`)
 launches (or attaches to) the product per `qa.services`/`base_url`, drives the

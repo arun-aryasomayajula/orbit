@@ -9,6 +9,7 @@
 # Run: python3.11 -m pytest tests/test_qa_config.py -v   (from orbit/)
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -208,6 +209,149 @@ def test_validate_rejects_empty_flows_dir(tmp_path):
     ))))
     assert r.returncode == 1
     assert "qa.flows_dir" in r.stdout
+
+
+# === qa.regression / qa.exploratory — deferred sub-blocks (Tasks 27/29 consume) ==
+
+def test_validate_accepts_full_regression_and_exploratory_blocks(tmp_path):
+    r = _run("config.py", "validate", str(_cfg_repo(tmp_path, (
+        'qa:\n'
+        '  regression:\n'
+        '    on_merge: true\n'
+        '    schedule_hours: 24\n'
+        '    max_flows_per_run: 10\n'
+        '  exploratory:\n'
+        '    enabled: false\n'
+        '    max_pages: 10\n'
+    ))))
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_validate_accepts_regression_schedule_hours_zero(tmp_path):
+    r = _run("config.py", "validate", str(_cfg_repo(tmp_path, (
+        'qa:\n'
+        '  regression:\n'
+        '    schedule_hours: 0\n'
+    ))))
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_validate_rejects_non_bool_regression_on_merge(tmp_path):
+    r = _run("config.py", "validate", str(_cfg_repo(tmp_path, (
+        'qa:\n'
+        '  regression:\n'
+        '    on_merge: "yes"\n'
+    ))))
+    assert r.returncode == 1
+    assert "qa.regression.on_merge" in r.stdout
+
+
+def test_validate_rejects_zero_regression_max_flows_per_run(tmp_path):
+    r = _run("config.py", "validate", str(_cfg_repo(tmp_path, (
+        'qa:\n'
+        '  regression:\n'
+        '    max_flows_per_run: 0\n'
+    ))))
+    assert r.returncode == 1
+    assert "qa.regression.max_flows_per_run" in r.stdout
+
+
+def test_validate_rejects_bool_regression_schedule_hours(tmp_path):
+    r = _run("config.py", "validate", str(_cfg_repo(tmp_path, (
+        'qa:\n'
+        '  regression:\n'
+        '    schedule_hours: true\n'
+    ))))
+    assert r.returncode == 1
+    assert "qa.regression.schedule_hours" in r.stdout
+
+
+def test_validate_rejects_non_dict_regression(tmp_path):
+    r = _run("config.py", "validate", str(_cfg_repo(tmp_path, (
+        'qa:\n'
+        '  regression: "on"\n'
+    ))))
+    assert r.returncode == 1
+    assert "qa.regression" in r.stdout
+
+
+def test_validate_rejects_non_dict_exploratory(tmp_path):
+    r = _run("config.py", "validate", str(_cfg_repo(tmp_path, (
+        'qa:\n'
+        '  exploratory: "on"\n'
+    ))))
+    assert r.returncode == 1
+    assert "qa.exploratory" in r.stdout
+
+
+def test_validate_rejects_non_bool_exploratory_enabled(tmp_path):
+    r = _run("config.py", "validate", str(_cfg_repo(tmp_path, (
+        'qa:\n'
+        '  exploratory:\n'
+        '    enabled: "yes"\n'
+    ))))
+    assert r.returncode == 1
+    assert "qa.exploratory.enabled" in r.stdout
+
+
+def test_validate_rejects_zero_exploratory_max_pages(tmp_path):
+    r = _run("config.py", "validate", str(_cfg_repo(tmp_path, (
+        'qa:\n'
+        '  exploratory:\n'
+        '    max_pages: 0\n'
+    ))))
+    assert r.returncode == 1
+    assert "qa.exploratory.max_pages" in r.stdout
+
+
+def test_validate_rejects_bool_exploratory_max_pages(tmp_path):
+    r = _run("config.py", "validate", str(_cfg_repo(tmp_path, (
+        'qa:\n'
+        '  exploratory:\n'
+        '    max_pages: true\n'
+    ))))
+    assert r.returncode == 1
+    assert "qa.exploratory.max_pages" in r.stdout
+
+
+# === config/schema.yaml qa: block ↔ docs/SETUP.md fenced copy — drift-lock ===
+# Mirrors the spirit of test_qa_settings_differs_from_dev_settings_only_by_playwright_allow
+# above: two independently-maintained copies of the same content must never
+# silently diverge. Anchored on content markers (the section's opening comment
+# line, and the next section boundary / closing code fence) rather than raw
+# line numbers, so it survives edits that shift either file's line offsets.
+
+_QA_BLOCK_START_RE = re.compile(r'^# --- QA runtime \(optional\):')
+_SECTION_BOUNDARY_RE = re.compile(r'^# ---')
+
+
+def _extract_qa_comment_block(text):
+    lines = text.splitlines()
+    start = next((i for i, ln in enumerate(lines) if _QA_BLOCK_START_RE.match(ln)), None)
+    assert start is not None, (
+        f"anchor line not found (expected something matching {_QA_BLOCK_START_RE.pattern!r})"
+    )
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        ln = lines[j]
+        if _SECTION_BOUNDARY_RE.match(ln) or ln.strip() == "```":
+            end = j
+            break
+    block = lines[start:end]
+    while block and block[-1].strip() == "":
+        block.pop()
+    return block
+
+
+def test_schema_and_setup_qa_block_are_byte_identical():
+    schema_block = _extract_qa_comment_block(
+        (REPO_ROOT / "config" / "schema.yaml").read_text())
+    setup_block = _extract_qa_comment_block(
+        (REPO_ROOT / "docs" / "SETUP.md").read_text())
+    assert setup_block == schema_block, (
+        "docs/SETUP.md's fenced qa: copy has drifted from config/schema.yaml's "
+        "qa: block — the two must stay byte-identical; update both together"
+    )
 
 
 # === QA permission-settings file — drift-locked to config/orbit.settings.json

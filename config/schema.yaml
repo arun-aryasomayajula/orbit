@@ -147,6 +147,13 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
 #     frontend: required               # required = QA fail blocks the ship (bounce/escalate)
 #     feature: required
 #     bug: evidence                    # evidence only, never blocks
+#   regression:
+#     on_merge: true                 # sweep approved flows when origin/<base> moves
+#     schedule_hours: 24             # independent cadence (0 = off)
+#     max_flows_per_run: 10          # cap per sweep
+#   exploratory:
+#     enabled: false                 # scheduled exploratory crawl → ops/qa/SEEN.md rows
+#     max_pages: 10
 
 # --- pull requests (optional, wrapper-only) ------------------------------------
 # "github" → after pushing a ship, the WRAPPER (never the agent) runs `gh pr create`
