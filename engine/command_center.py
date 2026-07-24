@@ -110,6 +110,7 @@ PORT = int(os.environ.get("PORT", "8787"))
 SHELL_FILE = ENGINE / "cc_shell.html"         # the SPA shell — read per request so design edits go live on refresh
 REVIEWS = AP_STATE / "reviews"                # per-ship review packets (review_packet.py)
 DIFFDIR = AP_STATE / "diffs"                  # wrapper backup patches
+QA_DIR = AP_STATE / "qa"                      # QA gate screenshots/reports (confined /qa-shot, /qa-report)
 # launchd job label (used only to detect whether the daemon is loaded).
 LAUNCHD_LABEL = os.environ.get("ORBIT_LAUNCHD_LABEL", "com.orbit.autopilot")
 # Dollar spend is informational only — displayed, never a cap (the wrapper's
@@ -1064,6 +1065,58 @@ def read_patch(tid: str) -> str | None:
     return p.read_text(errors="ignore")[:400_000]
 
 
+# ── QA evidence routes (/qa-shot, /qa-report) ─────────────────────────────────
+# Unlike read_patch (which trusts a ledger-recorded path), the candidate path
+# here comes straight off the query string — untrusted. `_qa_path_ok` is a
+# cheap shape gate (charset/length, no absolute path, no ".." segment) run
+# BEFORE any filesystem touch; read_qa_shot/read_qa_report then apply the
+# read_patch confinement template (resolve → assert resolved-under-root, which
+# also catches symlink escapes a ".."-free string can still pull off → is_file)
+# plus an extension allowlist and a size cap.
+_QA_PATH_RE = re.compile(r"^[A-Za-z0-9._/\-]{1,200}$")
+_QA_SHOT_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
+_QA_REPORT_EXTS = {".md", ".txt", ".log", ".json"}
+_QA_MAX_BYTES = 5 * 1024 * 1024
+
+
+def _qa_path_ok(p: str) -> bool:
+    return bool(p) and bool(_QA_PATH_RE.match(p)) and not p.startswith("/") and ".." not in p.split("/")
+
+
+def _qa_resolve(p: str) -> Path | None:
+    # Same confinement template as read_patch: resolve → assert the RESOLVED
+    # path is under the RESOLVED root → is_file(). Resolving (not just string
+    # concatenation) is what catches a symlink inside qa/ pointing outside it.
+    root = QA_DIR.resolve()
+    resolved = (QA_DIR / p).resolve()
+    if not str(resolved).startswith(str(root) + os.sep) or not resolved.is_file():
+        return None
+    return resolved
+
+
+def read_qa_shot(p: str) -> tuple[bytes, str] | None:
+    # Serve a QA screenshot — $AP_STATE/qa/<p>. `p`'s shape is pre-validated by
+    # the caller (do_GET's _qa_path_ok); confinement + extension + size here.
+    resolved = _qa_resolve(p)
+    if resolved is None:
+        return None
+    ctype = _QA_SHOT_TYPES.get(resolved.suffix.lower())
+    if ctype is None or resolved.stat().st_size > _QA_MAX_BYTES:
+        return None
+    return resolved.read_bytes(), ctype
+
+
+def read_qa_report(p: str) -> str | None:
+    # Serve a QA report/log — $AP_STATE/qa/<p>. Same confinement as
+    # read_qa_shot, text-extension allowlist instead of image types.
+    resolved = _qa_resolve(p)
+    if resolved is None:
+        return None
+    if resolved.suffix.lower() not in _QA_REPORT_EXTS or resolved.stat().st_size > _QA_MAX_BYTES:
+        return None
+    return resolved.read_text(errors="ignore")[:400_000]
+
+
 def cycletail(max_lines: int = 120) -> dict:
     """Human-readable live tail of the newest cycle log. stream-json logs are
     parsed into narrator lines (agent text, tool calls, final cost); legacy
@@ -1595,6 +1648,19 @@ def _on_board(t: dict) -> bool:
     return t.get("autopilot") in ("review-only", "human") or t.get("status") == "proposed"
 
 
+def _qa_evidence(e: dict) -> dict:
+    # attachments/qa surfaced verbatim from a ledger entry (Task 15's attach /
+    # qa-verdict verbs) — absent on the entry means the key is ABSENT on the
+    # row (not null), so existing consumers that don't know these keys yet
+    # see no change.
+    extra = {}
+    if e.get("attachments"):
+        extra["attachments"] = e["attachments"]
+    if e.get("qa"):
+        extra["qa"] = e["qa"]
+    return extra
+
+
 def build_state() -> dict:
     reload_settings()   # config.yaml is the source of truth — reflect Admin edits live
     backlog = load_backlog()
@@ -1657,6 +1723,7 @@ def build_state() -> dict:
                 running.append(row)
             else:
                 row["reason"] = row.get("reason") or "stalled — claimed but not the live cycle's task (orphaned; Answer & re-queue or Set aside)"
+                row.update(_qa_evidence(e))
                 escalated.append(row)
         elif st in ("committed", "pushed", "merged", "rejected"):
             branch = (e.get("remote_ref") or "").removeprefix("origin/") or e.get("branch") or ""
@@ -1686,10 +1753,12 @@ def build_state() -> dict:
                 "has_packet": (REVIEWS / f"task-{tid}.md").exists(),
                 "has_patch": bool(e.get("patch")),
             })
+            row.update(_qa_evidence(e))
             done.append(row)
         elif st == "escalated":
             row.update({"state": st, "forced": bool(e.get("forced")),
                         "can_reject": lifecycle.check(st, "rejected", e) is None})
+            row.update(_qa_evidence(e))
             escalated.append(row)
 
     # NEXT UP = the loop's real pick order: queue.json, safe + not worked/skipped,
@@ -1914,6 +1983,23 @@ class Handler(BaseHTTPRequestHandler):
             if body is None:
                 self._send(b"not found for this task", "text/plain", 404); return
             self._send(body.encode(), "text/plain; charset=utf-8")
+        elif path in ("/qa-shot", "/qa-report"):
+            # Confined GET routes for QA evidence — token-less like /review and
+            # /diff (loopback-bound, GET is read-only). `p` is a path relative
+            # to $AP_STATE/qa/; see _qa_path_ok/read_qa_shot/read_qa_report.
+            qp = (qs.get("p", [""])[0]).strip()
+            if not _qa_path_ok(qp):
+                self._send(b"invalid path", "text/plain", 400); return
+            if path == "/qa-shot":
+                shot = read_qa_shot(qp)
+                if shot is None:
+                    self._send(b"not found", "text/plain", 404); return
+                body, ctype = shot
+                self._send(body, ctype); return
+            report = read_qa_report(qp)
+            if report is None:
+                self._send(b"not found", "text/plain", 404); return
+            self._send(report.encode(), "text/plain; charset=utf-8")
         elif path == "/epic-spec":
             # The planner's spec for one epic — rendered in the packet viewer.
             if not tid or not _TID_RE.match(tid):

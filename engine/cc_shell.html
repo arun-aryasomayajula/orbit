@@ -205,6 +205,11 @@ ul.acc{margin:6px 0 0 16px;padding:0;font-size:11.5px;color:var(--dim)}
 .rawreason summary{cursor:pointer;font:500 11px var(--mono);color:var(--faint)}
 .colsub{font:500 11.5px/1.5 var(--disp);color:var(--faint);margin:-4px 0 10px}
 .lint{font:500 11px/1.5 var(--mono);color:var(--amber);margin-top:4px}
+/* QA evidence (Task 17): screenshot thumbnails + report/log links on escalation cards */
+.qa-evidence{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.qa-thumb{max-height:120px;max-width:100%;border-radius:6px;border:1px solid var(--line2);display:block;cursor:pointer}
+.qa-report-link{font:500 11px var(--mono);color:var(--blue);text-decoration:none;align-self:flex-start;padding:3px 0}
+.qa-report-link:hover{text-decoration:underline}
 .empty{color:var(--faint);font-size:12px;padding:16px 6px;text-align:center;line-height:1.6}
 .empty b{color:var(--dim)}
 
@@ -839,10 +844,25 @@ function card(t,kind){
   const lint=(kind==='board'&&((t.lint_hard&&t.lint_hard.length)||(t.lint_soft&&t.lint_soft.length)))?
     `<div class=lint>contract: ${esc([...(t.lint_hard||[]).map(x=>'HELD — '+x),...(t.lint_soft||[])].join(' · '))}</div>`:'';
   const note=t.review_note?`<div class=lint>rejected: ${esc(t.review_note)}</div>`:'';
+  // QA evidence (Task 17): escalation cards render what the QA gate attached
+  // (Task 15/16) — screenshots as clickable thumbnails, reports/logs as a
+  // link. Both routes are server-confined to $AP_STATE/qa/ (regex + resolve-
+  // under-root); the client only URL-encodes the path value it was given.
+  const qaEvidence=(kind==='esc'&&t.attachments&&t.attachments.length)?
+    `<div class=qa-evidence>${t.attachments.map(a=>{
+      const url='/qa-shot?p='+encodeURIComponent(a.path||'');
+      const rurl='/qa-report?p='+encodeURIComponent(a.path||'');
+      const label=escAttr(a.label||a.path||'');
+      return a.kind==='screenshot'
+        ?`<a href="${url}" target="_blank" rel="noopener" title="${label}"><img class=qa-thumb src="${url}" alt="${label}" loading="lazy"></a>`
+        :`<a class="qa-report-link" href="${rurl}" target="_blank" rel="noopener">📄 ${esc(a.label||a.kind)}</a>`;
+    }).join('')}</div>`:'';
+  const qaBadge=(kind==='done'&&t.qa&&t.qa.verdict)?
+    badge('QA: '+t.qa.verdict,{pass:'ok',fail:'stop',unable:'warn'}[t.qa.verdict]||'muted'):'';
   return `<div class="card ${live}" data-tid="${esc(t.id)}">
-    <div class="card-h"><span class="tid">${esc(t.id)}</span> ${cat} ${gate} ${pri} ${eff} ${rev} ${src} ${epicTag}</div>
+    <div class="card-h"><span class="tid">${esc(t.id)}</span> ${cat} ${gate} ${pri} ${eff} ${rev} ${qaBadge} ${src} ${epicTag}</div>
     <div class="title">${esc(t.title)}</div>
-    ${plain}${brief}${rec}${hint}${timer}${reason}${lint}${note}${ctx}${why}${accList(t.acceptance_criteria)}
+    ${plain}${brief}${rec}${hint}${timer}${reason}${lint}${note}${ctx}${why}${accList(t.acceptance_criteria)}${qaEvidence}
     <div class="btns">${btns}</div></div>`;
 }
 // One-line plain-language explainer per section, shown under the heading so a
