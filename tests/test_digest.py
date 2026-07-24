@@ -133,3 +133,113 @@ def test_knowledge_stale_line_absent_when_stale_docs_empty(tmp_path):
     }))
     _, body, _ = digest.build(tgt)
     assert "knowledge stale" not in body
+
+
+# ── 🧪 QA section (Task 28) ──────────────────────────────────────────────────
+# Two independent feedback surfaces: pending heal candidates (top-level
+# $AP_STATE/qa/heal/*.json) and flows whose last taught-flow replay verdict
+# was "fail" (guarded flows-root meta.json). Either populates the section;
+# neither means it's entirely absent; malformed/missing inputs never crash
+# the digest and never masquerade as real data.
+
+def _write_flow_meta(tgt, name, last_verdict, flows_dir="qa/flows", malformed=False):
+    flow_dir = tgt / ".autopilot" / flows_dir / name
+    flow_dir.mkdir(parents=True, exist_ok=True)
+    if malformed:
+        (flow_dir / "meta.json").write_text("{not valid json")
+    else:
+        (flow_dir / "meta.json").write_text(json.dumps({
+            "created_at": "2026-07-01T00:00:00Z", "last_run_at": "2026-07-20T00:00:00Z",
+            "last_verdict": last_verdict, "runs": 3, "heals": [],
+        }))
+
+
+def _write_heal_files(tgt, n, subdir=None):
+    heal_dir = tgt / ".autopilot" / "state" / "qa" / "heal"
+    (heal_dir / subdir if subdir else heal_dir).mkdir(parents=True, exist_ok=True)
+    for i in range(n):
+        d = (heal_dir / subdir) if subdir else heal_dir
+        (d / f"cand-{i}.json").write_text(json.dumps({"flow": f"f{i}", "reason": "diff"}))
+
+
+def test_qa_section_absent_with_no_heals_or_failing_flows(tmp_path):
+    tgt = _target(tmp_path)
+    _, body, _ = digest.build(tgt)
+    assert "🧪" not in body
+
+
+def test_qa_pending_heals_line_with_count(tmp_path):
+    tgt = _target(tmp_path)
+    _write_heal_files(tgt, 2)
+    _, body, _ = digest.build(tgt)
+    assert any("🧪" in l for l in body.splitlines())
+    assert any("2 pending heal" in l and "dashboard" in l for l in body.splitlines())
+
+
+def test_qa_heal_approved_rejected_subdirs_not_counted(tmp_path):
+    # heal/approved/ and heal/rejected/ are subdirectories of top-level
+    # heal/ — an archived candidate must never be double-counted as pending.
+    tgt = _target(tmp_path)
+    _write_heal_files(tgt, 1)
+    _write_heal_files(tgt, 3, subdir="approved")
+    _, body, _ = digest.build(tgt)
+    assert any("1 pending heal" in l for l in body.splitlines())
+
+
+def test_qa_failing_flows_line_with_names_capped_at_three(tmp_path):
+    tgt = _target(tmp_path)
+    for name in ("login", "checkout", "signup", "search"):
+        _write_flow_meta(tgt, name, "fail")
+    _write_flow_meta(tgt, "profile", "pass")
+    _, body, _ = digest.build(tgt)
+    qa_lines = [l for l in body.splitlines() if "last failed" in l]
+    assert len(qa_lines) == 1
+    line = qa_lines[0]
+    assert "4 flow(s) last failed" in line
+    assert "orbit qa" in line and "--flow <name>" in line
+    shown = sum(1 for name in ("login", "checkout", "signup", "search") if name in line)
+    assert shown == 3          # capped at 3 names even though 4 flows failed
+    assert "profile" not in line
+
+
+def test_qa_malformed_flow_meta_skipped_silently(tmp_path):
+    tgt = _target(tmp_path)
+    _write_flow_meta(tgt, "broken", "fail", malformed=True)
+    _write_flow_meta(tgt, "login", "fail")
+    _, body, _ = digest.build(tgt)
+    qa_lines = [l for l in body.splitlines() if "last failed" in l]
+    assert len(qa_lines) == 1
+    assert "1 flow(s) last failed" in qa_lines[0]
+    assert "login" in qa_lines[0] and "broken" not in qa_lines[0]
+
+
+def test_qa_respects_custom_flows_dir(tmp_path):
+    ap = tmp_path / ".autopilot"
+    state = ap / "state"
+    state.mkdir(parents=True)
+    (ap / "config.yaml").write_text(yaml.safe_dump({"dashboard_url": DASH, "qa": {"flows_dir": "custom/flows"}}))
+    (state / "ledger.json").write_text(json.dumps({"entries": {}}))
+    (state / "queue.json").write_text(json.dumps({"tasks": []}))
+    _write_flow_meta(tmp_path, "login", "fail", flows_dir="custom/flows")
+    _, body, _ = digest.build(tmp_path)
+    assert any("1 flow(s) last failed" in l and "login" in l for l in body.splitlines())
+
+
+def test_qa_bad_flows_dir_falls_back_without_crash(tmp_path):
+    ap = tmp_path / ".autopilot"
+    state = ap / "state"
+    state.mkdir(parents=True)
+    (ap / "config.yaml").write_text(yaml.safe_dump({"dashboard_url": DASH, "qa": {"flows_dir": "/etc/passwd"}}))
+    (state / "ledger.json").write_text(json.dumps({"entries": {}}))
+    (state / "queue.json").write_text(json.dumps({"tasks": []}))
+    # should not crash, and should fall back to the default "qa/flows" root
+    _write_flow_meta(tmp_path, "login", "fail", flows_dir="qa/flows")
+    _, body, _ = digest.build(tmp_path)
+    assert any("1 flow(s) last failed" in l and "login" in l for l in body.splitlines())
+
+
+def test_qa_missing_flows_and_heal_dirs_no_crash(tmp_path):
+    tgt = _target(tmp_path)
+    _, body, _ = digest.build(tgt)
+    assert "🧪" not in body
+    assert "next:" in body.splitlines()[-1]
