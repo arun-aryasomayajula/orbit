@@ -385,9 +385,21 @@ def _bounce(tid: str, qa_cfg: dict, summary: str, patch_path: str,
     subprocess.run([sys.executable, str(ENGINE_DIR / "backlog_to_tasks.py")],
                    cwd=str(ENGINE_DIR), env=_engine_env(), capture_output=True, timeout=60)
 
-    notify.send("🔁 Orbit QA bounce",
-                f"task {tid}: QA failed (bounce {new_bounces}/{max_bounces}) — "
-                f"re-queued with findings in the contract", _dashboard_url())
+    # Past this point the bounce is DONE (backlog re-filed, ledger cleared,
+    # queue regenerated) — notify is best-effort UI sugar, not part of the
+    # bounce's atomicity. It can't raise today (notify.py swallows every
+    # exception itself), but that safety lives in another file; guard it
+    # here too so a future change to notify.py can never let this function's
+    # own exception propagate up into decide_fail_action's outer try/except
+    # and turn an already-committed bounce into a return of ESCALATE (3) —
+    # which would desync run.sh's dispatch from what actually happened.
+    try:
+        notify.send("🔁 Orbit QA bounce",
+                    f"task {tid}: QA failed (bounce {new_bounces}/{max_bounces}) — "
+                    f"re-queued with findings in the contract", _dashboard_url())
+    except Exception as e:
+        print(f"WARN: notify.send raised for {tid}'s bounce ({e!r}) — "
+              f"bounce already committed, continuing")
     return BOUNCE
 
 

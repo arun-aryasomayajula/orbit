@@ -33,7 +33,8 @@ def target(tmp_path, extra_cfg="", category="frontend"):
 
 def run(repo, agent_cmd=None, qa_agent_cmd=None, tid="t1", patch=None):
     env = dict(os.environ, AP_HOME=str(repo / ".autopilot"),
-               AP_STATE=str(repo / ".autopilot" / "state"), ORBIT_HOME=str(ROOT))
+               AP_STATE=str(repo / ".autopilot" / "state"), ORBIT_HOME=str(ROOT),
+               ORBIT_NO_NOTIFY="1")   # no real desktop/Slack notifications from the test suite
     env.pop("ORBIT_RUNTIME_CMD", None)
     env.pop("ORBIT_QA_CMD", None)
     if agent_cmd:
@@ -422,6 +423,17 @@ def test_qa_fail_bounce_records_patch_path(tmp_path):
     assert re.search(r"(?m)^\s*qa_bounces: 2\s*$", text), text
     findings = _qa_findings_value(text)
     assert f"previous attempt patch: {patch_file}" in findings
+
+
+def test_qa_fail_bounces_tolerates_inline_comment_on_qa_bounces(tmp_path):
+    # qa_bounces: 2  # note — a hand-annotated field. Before the
+    # comment-tolerant get_task_field fix, the raw "2  # note" failed
+    # int(), _read_qa_bounces silently defaulted to 0, and a task already
+    # AT the cap bounced again instead of escalating.
+    repo = bounce_target(tmp_path, max_bounces=2, qa_bounces="2  # note")
+    r = run(repo, qa_agent_cmd=qa_agent(tmp_path, {
+        "ran": True, "verdict": "fail", "contradicts": True, "summary": "still broken"}))
+    assert r.returncode == 3, r.stdout + r.stderr   # escalates (cap reached), NOT a bounce
 
 
 def test_qa_fail_argv2_only_still_works_no_patch_arg(tmp_path):

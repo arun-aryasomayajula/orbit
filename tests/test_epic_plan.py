@@ -134,3 +134,54 @@ tasks:
     assert {t["id"]: t["status"] for t in doc["tasks"]} == {"one": "proposed", "two": "queued"}
     assert "# keep this comment" in bl.read_text()
     assert not ba.set_task_field(bl, "missing", "status", "queued")
+
+
+def test_get_task_field_reads_plain_and_missing(tmp_path):
+    bl = tmp_path / "backlog.yaml"
+    bl.write_text("""tasks:
+  - id: one
+    status: proposed
+    qa_bounces: 2
+  - id: two
+    status: queued
+""")
+    assert ba.get_task_field(bl, "one", "status") == "proposed"
+    assert ba.get_task_field(bl, "one", "qa_bounces") == "2"
+    assert ba.get_task_field(bl, "one", "no_such_field") is None
+    assert ba.get_task_field(bl, "missing", "status") is None
+
+
+def test_get_task_field_strips_trailing_inline_comment_on_unquoted_scalar(tmp_path):
+    # A hand-annotated field (`qa_bounces: 2  # bumped by hand`) must read as
+    # "2", not "2  # bumped by hand" — int("2  # ...") would raise, and a
+    # caller defaulting on that error (e.g. qa_check._read_qa_bounces) would
+    # silently treat an already-capped counter as zero.
+    bl = tmp_path / "backlog.yaml"
+    bl.write_text("""tasks:
+  - id: one
+    qa_bounces: 2  # bumped by hand after a manual retest
+""")
+    assert ba.get_task_field(bl, "one", "qa_bounces") == "2"
+
+
+def test_get_task_field_preserves_hash_inside_a_quoted_scalar(tmp_path):
+    # A `#` INSIDE a quoted value is content, not a comment — must survive.
+    bl = tmp_path / "backlog.yaml"
+    bl.write_text('''tasks:
+  - id: one
+    qa_findings: "drove the flow \\u2014 see ops/qa/SEEN.md #3 for the dupe"
+''')
+    val = ba.get_task_field(bl, "one", "qa_findings")
+    assert val == '"drove the flow \\u2014 see ops/qa/SEEN.md #3 for the dupe"'
+    assert json.loads(val) == "drove the flow — see ops/qa/SEEN.md #3 for the dupe"
+
+
+def test_get_task_field_trailing_comment_after_closing_quote_is_dropped(tmp_path):
+    bl = tmp_path / "backlog.yaml"
+    bl.write_text('''tasks:
+  - id: one
+    qa_findings: "no hash here"   # this trailing comment must be dropped
+''')
+    val = ba.get_task_field(bl, "one", "qa_findings")
+    assert val == '"no hash here"'
+    assert json.loads(val) == "no hash here"
