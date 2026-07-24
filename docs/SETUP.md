@@ -273,6 +273,12 @@ one row is appended to `ops/qa/SEEN.md`, which the `qa` signal adapter turns int
 `status: proposed` task for a human to triage, the same discovery pipeline any other
 adapter-sourced finding flows through.
 
+On a flow's first fully-clean replay (no drift, every success criterion met), the
+agent also writes `steps.json` into the flow dir, alongside its own `meta.json`/
+`FLOWMAP.md` updates. Treat that the same as any other flow-dir change: review the
+new `steps.json` against `steps.spec.ts` and `git add`/commit it once you're happy —
+`orbit qa --flow` never commits on your behalf, replay or teach alike.
+
 ## Opt-in task sources (signal adapters)
 Beyond the native `backlog.yaml`, every extra name in `sources:` runs a matching
 `<name>_to_backlog.py` each cycle — resolved from YOUR repo's `.autopilot/adapters/` first,

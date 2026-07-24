@@ -79,7 +79,9 @@ gate above proves ONE task's acceptance criteria, `orbit teach` builds a standin
 committed flow map: a human records a browser flow once (Playwright `codegen`), states
 its intent + success criteria, and Orbit writes `intent.md` + `steps.spec.ts` +
 `meta.json` under `.autopilot/<qa.flows_dir>/<name>/` (indexed in one `FLOWMAP.md`) for a
-human to `git add`/commit — the library is human-owned, never machine-authored.
+human to `git add`/commit — human-gated, not human-only: every machine write lands
+only via the recording session, the first-replay `steps.json`, or verdict metadata,
+and all of it is reviewed in the flow dir's own git diff before it's committed.
 `orbit qa <target> --flow <name>` then replays it independently, any time, via the same
 `/orbit-qa-flow` skill and Playwright MCP wiring the QA gate uses, grading the run
 against the flow's own intent rather than a task's criteria. It's the supervised-
@@ -90,7 +92,8 @@ approval (the dashboard surfaces the pending count; the approval action itself l
 next phase), while a genuine break grades **fail** and feeds `ops/qa/SEEN.md` into the
 same triage pipeline any other signal adapter uses. `steps.json` — the normalized,
 healable step list — is written by the replay agent itself, only on the first fully
-clean pass; `teach` never writes it.
+clean pass (`teach` never writes it), and reviewed/committed the same way as any other
+flow-dir change.
 
 ## Model tiering (grounded in evidence, not vibes)
 The router assigns opus to hard-judgment categories (bug/feature/refactor/security) and sonnet to

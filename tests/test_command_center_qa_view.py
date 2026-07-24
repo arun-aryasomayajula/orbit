@@ -141,6 +141,50 @@ def test_qa_flows_respects_configured_flows_dir(cc):
     assert [f["name"] for f in st["qa_flows"]["flows"]] == ["login"]
 
 
+def test_qa_flows_root_falls_back_to_default_on_escaping_flows_dir(cc):
+    # Finding 1 (Phase 4 review): _qa_flows_root used to resolve
+    # `AP_HOME / flows_dir` raw — a malformed/escaping flows_dir (leading
+    # '/', '..' segments) could point outside .autopilot entirely (the same
+    # shape qa_teach.py's `orbit teach` already refuses with exit 2). A poll
+    # loop (build_state every ~3s) must never error on a bad config value,
+    # so this is a SILENT fallback to the default instead.
+    (cc.AP_HOME / "config.yaml").write_text('qa:\n  flows_dir: "../x"\n')
+    # A flow planted at what "../x" would actually resolve to, OUTSIDE
+    # .autopilot — the fixture that proves no escape: if _qa_flows_root ever
+    # honored the bad value, this flow would show up in qa_flows.
+    escape_dir = cc.AP_HOME.parent / "x" / "planted-outside"
+    escape_dir.mkdir(parents=True)
+
+    assert cc._qa_flows_root() == cc.AP_HOME / cc.DEFAULT_QA_FLOWS_DIR
+    st = cc.build_state()
+    assert "qa_flows" not in st   # default flows dir doesn't exist -> omitted, planted flow never seen
+
+
+def test_qa_flows_excludes_non_slug_flow_dir_names(cc):
+    # Finding 2 (Phase 4 review): qa_flow_library used to list EVERY
+    # directory under flows_root — cc_shell.html's
+    # onclick="runFlow('${esc(f.name)}')" isn't quote-safe (esc() only
+    # neuters &/</>, not '/"), so a crafted committed flow-dir name could
+    # execute JS in the operator dashboard. Non-slug names are unrunnable
+    # anyway (do_qa_action/qa_run.py both refuse them), so the listing
+    # itself is now SLUG_RE-gated.
+    _write_flow(cc, "legit-flow")
+    evil_name = "x'onmouseover='1"
+    (cc.AP_HOME / "qa" / "flows" / evil_name).mkdir(parents=True)
+
+    st = cc.build_state()
+    names = [f["name"] for f in st["qa_flows"]["flows"]]
+    assert names == ["legit-flow"]
+    assert evil_name not in names
+
+
+def test_qa_flows_omitted_when_only_non_slug_dirs_exist(cc):
+    evil_name = "x'onmouseover='1"
+    (cc.AP_HOME / "qa" / "flows" / evil_name).mkdir(parents=True)
+    st = cc.build_state()
+    assert "qa_flows" not in st   # zero SLUG_RE-valid flows -> same as zero flows at all
+
+
 def test_pending_heals_excludes_approved_and_rejected_subdirs(cc):
     _write_flow(cc, "login")
     heal = cc.QA_DIR / "heal"

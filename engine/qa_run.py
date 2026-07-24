@@ -50,8 +50,10 @@ Exit codes:
     3   fail (the SEEN.md pointer is printed — see skills/orbit-qa-flow.md)
     1   unable, no verdict found (incl. only-stale-files-present), a
         malformed verdict, or the agent itself could not be run/finished
-    2   usage / validation error (bad slug, no `qa:` block, unknown flow —
-        the last one lists the flows that DO exist)
+    2   usage / validation error (bad slug, no `qa:` block, a malformed
+        `qa.flows_dir` — same `_bad_flows_dir_reason` shape check `orbit
+        teach` enforces, see qa_teach.py — or an unknown flow: the last one
+        lists the flows that DO exist)
 
 Config (`.autopilot/config.yaml`, see config/schema.yaml's `qa:` block):
     qa.flows_dir (default "qa/flows"), qa.mcp_config, qa.browser,
@@ -83,6 +85,7 @@ from pathlib import Path
 import yaml
 
 from backlog_append import SLUG_RE
+from qa_teach import _bad_flows_dir_reason
 
 ENGINE_DIR = Path(__file__).resolve().parent
 ORBIT_HOME = Path(os.environ.get("ORBIT_HOME") or ENGINE_DIR.parent)
@@ -164,7 +167,8 @@ def _flow_mcp_config(qa_cfg: dict, ap_state: Path, flow_name: str) -> Path:
     # explicit paths and never touches qa_check's own globals either way.
     import qa_check
     output_dir = ap_state / "qa" / f"flow-{flow_name}"
-    return qa_check.build_mcp_config(qa_cfg, ap_state / "qa", output_dir)
+    return qa_check.build_mcp_config(qa_cfg, ap_state / "qa", output_dir,
+                                      f"mcp-run-flow-{flow_name}.json")
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +358,11 @@ def main(argv: list[str]) -> int:
         return USAGE_ERR
 
     flows_dir = qa_cfg.get("flows_dir") or DEFAULT_FLOWS_DIR
+    bad = _bad_flows_dir_reason(flows_dir)
+    if bad:
+        _err(f"qa.flows_dir {flows_dir!r} is invalid ({bad})")
+        return USAGE_ERR
+
     flows_root = ap_home / flows_dir
     flow_dir = flows_root / flow_name
     if not flow_dir.is_dir():

@@ -101,10 +101,16 @@ def _load_cfg(target: Path) -> dict:
 
 
 def _bad_flows_dir_reason(fd) -> str | None:
-    """Mirrors config.py's validate() check (kept independently — engine/
-    scripts each carry their own copy of small shape checks rather than
-    cross-importing another CLI script's internals; see qa_check.py's
-    _TID_RE for the same precedent). None = fd is fine to use as-is."""
+    """Mirrors config.py's validate() check. Unlike the small literal
+    defaults each engine script keeps its own copy of (DEFAULT_FLOWS_DIR
+    here, DEFAULT_QA_FLOWS_DIR in command_center.py — see qa_check.py's
+    _TID_RE for that precedent), THIS shape/escape check is imported (not
+    copy-pasted) by qa_run.py (teach-parity: same rejection, exit 2) and by
+    command_center.py's _qa_flows_root (silent fallback to the default
+    instead — a dashboard poll loop must never error on a bad config value)
+    — a path-escape guard must never be allowed to drift between its
+    consumers the way a cosmetic default safely can. None = fd is fine to
+    use as-is."""
     if not isinstance(fd, str) or not fd.strip():
         return "must be a non-empty string"
     if fd.startswith("/"):

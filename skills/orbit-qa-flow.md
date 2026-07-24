@@ -16,7 +16,7 @@ worktree, post-merge); `$AP_HOME`/`$AP_STATE`/`$ORBIT_HOME` are set. The `qa:`
 block you read below lives in `$AP_HOME/config.yaml`.
 
 ## 0. Read the flow
-Read `$AP_HOME/<flows_dir>/$FLOW_NAME/`: `intent.md` (frontmatter + intent +
+Read `$AP_HOME/<flows_dir>/$FLOW_NAME/` (default `qa/flows`): `intent.md` (frontmatter + intent +
 `## Success criteria` — this is the contract you grade against, nothing
 else), `steps.json` if it exists (the normalized step list — replay this
 verbatim), else `steps.spec.ts` (raw Playwright codegen TS — interpret the

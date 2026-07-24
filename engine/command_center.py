@@ -41,6 +41,7 @@ import yaml
 
 from backlog_lint import lint_task
 from backlog_append import SLUG_RE
+from qa_teach import _bad_flows_dir_reason
 
 # ── path model ───────────────────────────────────────────────────────────────
 # ENGINE       : this repo's engine dir (ships command_center.py, its converter,
@@ -112,9 +113,11 @@ SHELL_FILE = ENGINE / "cc_shell.html"         # the SPA shell — read per reque
 REVIEWS = AP_STATE / "reviews"                # per-ship review packets (review_packet.py)
 DIFFDIR = AP_STATE / "diffs"                  # wrapper backup patches
 QA_DIR = AP_STATE / "qa"                      # QA gate screenshots/reports (confined /qa-shot, /qa-report)
-DEFAULT_QA_FLOWS_DIR = "qa/flows"             # mirrors qa_teach.py/qa_run.py's own default (each script
-                                               # carries its own copy of this small default — see qa_teach.py's
-                                               # _bad_flows_dir_reason comment for why)
+DEFAULT_QA_FLOWS_DIR = "qa/flows"             # mirrors qa_teach.py/qa_run.py's own default — the bare
+                                               # string constant is still each script's own tiny copy (see
+                                               # qa_teach.py's _bad_flows_dir_reason comment for why that's
+                                               # fine); the shape/escape check itself IS shared — imported
+                                               # below and used by _qa_flows_root, never re-implemented here.
 # launchd job label (used only to detect whether the daemon is loaded).
 LAUNCHD_LABEL = os.environ.get("ORBIT_LAUNCHD_LABEL", "com.orbit.autopilot")
 # Dollar spend is informational only — displayed, never a cap (the wrapper's
@@ -1131,10 +1134,15 @@ _FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)$", re.DOTALL)
 
 
 def _qa_flows_root() -> Path:
+    # Bad/escaping flows_dir shapes (absolute, '..' segments, empty/non-string
+    # — same _bad_flows_dir_reason `orbit teach`/`orbit qa` enforce with a
+    # loud exit 2) fall back to the default here instead: this feeds a poll
+    # loop (build_state → /api/state every ~3s), which must never error on a
+    # bad config value the way a one-shot CLI is allowed to.
     cfg = _load_cfg()
     qa_cfg = cfg.get("qa") if isinstance(cfg.get("qa"), dict) else {}
     flows_dir = qa_cfg.get("flows_dir")
-    if not isinstance(flows_dir, str) or not flows_dir.strip():
+    if _bad_flows_dir_reason(flows_dir):
         flows_dir = DEFAULT_QA_FLOWS_DIR
     return AP_HOME / flows_dir
 
@@ -1189,13 +1197,21 @@ def _read_flow_meta(flow_dir: Path) -> tuple[str | None, str | None, int | None]
 def qa_flow_library() -> dict | None:
     """The QA view's data: the taught-flow library, the 10 newest run
     verdicts, and the pending-heal count. None when the target has no flows
-    dir, or it has one with zero flows — build_state then OMITS the
-    `qa_flows` key entirely, so a target with no QA story yet sees a
-    byte-identical /api/state (existing consumers see no change)."""
+    dir, or it has one with zero (SLUG_RE-valid) flows — build_state then
+    OMITS the `qa_flows` key entirely, so a target with no QA story yet sees
+    a byte-identical /api/state (existing consumers see no change). Listed
+    flow names are filtered to SLUG_RE — a non-slug directory is never
+    runnable anyway, and it's what the dashboard's HTML template trusts to
+    be quote-safe (see the `names = sorted(...)` line below)."""
     flows_root = _qa_flows_root()
     if not flows_root.is_dir():
         return None
-    names = sorted(p.name for p in flows_root.iterdir() if p.is_dir())
+    # SLUG_RE-gated: a non-slug directory name is unrunnable anyway (do_qa_action
+    # and qa_run.py both refuse it), and cc_shell.html's onclick="runFlow('${esc(
+    # f.name)}')" isn't quote-safe — esc() only neuters &/</>, not '/". Filtering
+    # the LISTING here (rather than only escaping in the template) means a
+    # crafted committed flow-dir name can never reach the page at all.
+    names = sorted(p.name for p in flows_root.iterdir() if p.is_dir() and SLUG_RE.match(p.name))
     if not names:
         return None
 

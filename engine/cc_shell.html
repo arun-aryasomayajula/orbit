@@ -712,6 +712,11 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
 const TOKEN="__TOKEN__";
 const POST_HDRS={'Content-Type':'application/x-www-form-urlencoded','X-CC-Token':TOKEN};
 const esc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+// Defense-in-depth for values interpolated into a single-quoted JS string
+// literal INSIDE an onclick="..." HTML attribute (e.g. runFlow('${...}')):
+// esc() alone doesn't neuter a bare ' or " (see qa_flow_library's SLUG_RE
+// filter, the primary fix — this is a second layer, not a substitute for it).
+const escJsAttr=s=>String(s==null?'':s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
 const fmt=s=>{s=Math.max(0,Math.floor(s));const m=Math.floor(s/60),r=s%60;
   return m<60?`${m}:${String(r).padStart(2,'0')}`:`${Math.floor(m/60)}h${String(m%60).padStart(2,'0')}m`;};
 let S=null,fetchedAt=0,serverNow=0,lastSig='';
@@ -1257,7 +1262,7 @@ function qaFlowRow(f){
   const last=f.last_run_at?relSince(Math.floor(new Date(f.last_run_at).getTime()/1000))+' ago':'never run';
   return `<div class=brow><code>${esc(f.name)}</code> ${esc(f.intent_line||'—')} ${qaVerdictBadge(f.last_verdict)}
     <span class=aside>${esc(last)} · ${runs} run${runs===1?'':'s'}</span><span class=spacer></span>
-    <button class="btn btn-go btn-mini" onclick="runFlow('${esc(f.name)}')">▶ Run</button></div>`;
+    <button class="btn btn-go btn-mini" onclick="runFlow('${escJsAttr(f.name)}')">▶ Run</button></div>`;
 }
 function qaRunRow(r){
   const shot=r.screenshot?`<a class="qa-report-link" href="/qa-shot?p=${encodeURIComponent(r.screenshot)}" target="_blank" rel="noopener">screenshot</a>`:'';

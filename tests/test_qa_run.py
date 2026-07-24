@@ -388,6 +388,23 @@ def test_bad_slug_exit_2(tmp_path):
     assert result.returncode == 2
 
 
+def test_bad_flows_dir_exit_2(tmp_path):
+    # Finding 1 (Phase 4 review): qa_teach.py already rejects a malformed
+    # qa.flows_dir (absolute / '..'-escaping) with exit 2 — qa_run.py used
+    # to resolve `ap_home / flows_dir` raw, so `ap_home / "/etc"` silently
+    # collapsed to Path("/etc") instead of being refused. Teach-parity: same
+    # check (_bad_flows_dir_reason, imported from qa_teach), same exit code,
+    # same message shape.
+    r = repo(tmp_path, extra_cfg=textwrap.dedent("""\
+        qa:
+          base_url: "http://example.test/app"
+          flows_dir: "/abs"
+        """))
+    result = run(r, "whatever")
+    assert result.returncode == 2
+    assert "flows_dir" in result.stdout + result.stderr
+
+
 # ===========================================================================
 # MCP autogen + override
 # ===========================================================================
@@ -401,7 +418,7 @@ def test_mcp_autogen_writes_flow_output_dir(tmp_path):
         "summary": "ok", "healed_candidate": None}, mcp_log=mcp_log))
     assert result.returncode == 0, result.stdout + result.stderr
 
-    generated = r / ".autopilot" / "state" / "qa" / "mcp-run.json"
+    generated = r / ".autopilot" / "state" / "qa" / "mcp-run-flow-login-flow.json"
     assert generated.exists()
     cfg = json.loads(generated.read_text())
     args = cfg["mcpServers"]["playwright"]["args"]
@@ -419,6 +436,6 @@ def test_mcp_config_override_skips_autogen(tmp_path):
         "verdict": "pass", "failed_step": None, "screenshot": None,
         "summary": "ok", "healed_candidate": None}, mcp_log=mcp_log))
     assert result.returncode == 0, result.stdout + result.stderr
-    generated = r / ".autopilot" / "state" / "qa" / "mcp-run.json"
+    generated = r / ".autopilot" / "state" / "qa" / "mcp-run-flow-login-flow.json"
     assert not generated.exists()
     assert mcp_log.read_text() == "/tmp/custom-mcp.json"

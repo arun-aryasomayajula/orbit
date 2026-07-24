@@ -226,13 +226,23 @@ def _mcp_args(browser: str, output_dir: str, headless: bool) -> list[str]:
     return args
 
 
-def build_mcp_config(qa_cfg: dict, qa_dir: Path, output_dir: Path) -> Path:
+def build_mcp_config(qa_cfg: dict, qa_dir: Path, output_dir: Path, filename: str) -> Path:
     """Shared MCP-autogen helper — extracted so `engine/qa_run.py` (Task 22)
     can reuse the exact same Playwright MCP config shape for a flow replay
     instead of copy-pasting it. `qa.mcp_config` set → use that path as-is
     (nothing generated). Else write a per-run Playwright MCP config to
-    `qa_dir`/mcp-run.json, with `output_dir` (the --output-dir target)
+    `qa_dir`/`filename`, with `output_dir` (the --output-dir target)
     pre-created ahead of the race with the real MCP server writing into it.
+
+    `filename` MUST be caller-distinguished (`mcp-run-task-<tid>.json`,
+    `mcp-run-flow-<name>.json`, ...) — this used to be a fixed `mcp-run.json`
+    shared by every caller, so the loop gate's own qa_check run and any
+    dashboard-spawned `qa_run.py --flow` (or several of those at once) could
+    write the SAME file concurrently: one run's MCP server config — and thus
+    its screenshots/output-dir — could clobber another's mid-flight (Phase 4
+    review finding). Both current callers already hold a natural
+    distinguisher (the task id / the flow name) before they get here, so
+    there's no good reason for this function to invent one itself.
 
     qa_run.py can't just `import qa_check` at the top of its file to get
     this — qa_check.py resolves its own AP_STATE/AP_HOME module-level
@@ -254,15 +264,19 @@ def build_mcp_config(qa_cfg: dict, qa_dir: Path, output_dir: Path) -> Path:
     }}}
     output_dir.mkdir(parents=True, exist_ok=True)   # --output-dir target, ahead of the race
     qa_dir.mkdir(parents=True, exist_ok=True)
-    path = qa_dir / "mcp-run.json"
+    path = qa_dir / filename
     path.write_text(json.dumps(mcp_cfg))
     return path
 
 
 def _resolve_mcp_config(tid: str, qa_cfg: dict) -> Path:
     """`qa.mcp_config` set → use that path as-is (nothing generated). Else
-    write a per-run Playwright MCP config to $AP_STATE/qa/mcp-run.json."""
-    return build_mcp_config(qa_cfg, QA_DIR, AP_STATE / "qa" / f"task-{tid}")
+    write a per-run Playwright MCP config to
+    $AP_STATE/qa/mcp-run-task-<tid>.json — task-id-scoped so a concurrent
+    `qa_run.py --flow` run (or another task's own qa_check run) never shares
+    this file."""
+    return build_mcp_config(qa_cfg, QA_DIR, AP_STATE / "qa" / f"task-{tid}",
+                             f"mcp-run-task-{tid}.json")
 
 
 def run_qa_agent(cfg_all: dict, qa_cfg: dict, tid: str, worktree: str,
