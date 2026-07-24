@@ -46,7 +46,7 @@ loop safety over completeness — printing a `WARN:` line on any failure
 (including unexpected exceptions) instead of ever propagating one.
 
 Test hook: ORBIT_KNOWLEDGE_CMD replaces the claude call (shell, same env/cwd)
-— see engine/runtime_check.py for the identical pattern.
+— see engine/qa_check.py's legacy-path agent runner for the identical pattern.
 
 Usage: knowledge.py <target> build|refresh|status|autorefresh [--timeout N] [--quiet]
 """

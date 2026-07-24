@@ -262,7 +262,7 @@ one_iteration() {
     # observed behaviour contradicting a `required` category's contract — blocks
     # the ship; every other outcome (skipped, unable-to-run, agent error) ships.
     if [ -n "$tid" ]; then
-      python3 "$ENGINE/runtime_check.py" "$tid" "$WT" >>"$LOGDIR/orbit.log" 2>&1
+      python3 "$ENGINE/qa_check.py" "$tid" "$WT" >>"$LOGDIR/orbit.log" 2>&1
       if [ "$?" = "3" ]; then
         log "runtime check contradicted the contract — escalating instead of shipping (patch kept: ${patch:-none})"
         python3 "$ENGINE/ledger.py" escalate "$tid" "runtime check: observed behaviour contradicts acceptance criteria (see reviews/task-$tid-runtime.md)" >>"$LOGDIR/orbit.log" 2>&1 \

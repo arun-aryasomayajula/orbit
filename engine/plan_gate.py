@@ -5,9 +5,9 @@ The planner agent writes a `plan_scope` fence naming the files a task is
 allowed to touch (`edit`, `create`, `forbid`, `allow_incidental`). Most repos
 run `plan.enforce: "verifier"` — the verifier judges scope creep as one more
 review signal. `plan.enforce: "block"` opts into a HARD backstop: run.sh calls
-this script on the cycle's already-committed change, right before
-runtime_check, and refuses to push a commit that touches files outside the
-fence.
+this script on the cycle's already-committed change, right before qa_check
+(the browser QA gate that superseded runtime_check.py), and refuses to push
+a commit that touches files outside the fence.
 
 Cardinal rule: **never block blind**. Every missing or unparseable
 precondition — no `plan:` block, `enforce` not `"block"`, no plan file, no
@@ -32,7 +32,7 @@ prefix if the entry ends in `/`; otherwise an `fnmatch` glob. `forbid`
 overrides — a path matching any `forbid` entry is a violation even if also
 allowed elsewhere.
 
-Exit codes (run.sh dispatches on EXACTLY 3, same as runtime_check.py):
+Exit codes (run.sh dispatches on EXACTLY 3, same as qa_check.py):
     0   ship — feature off, preconditions missing/unparseable, or in-scope
     2   usage — bad argv / a task id that isn't a lowercase slug
     3   escalate — the commit touches at least one out-of-fence path
@@ -172,7 +172,7 @@ def main(argv: list[str]) -> int:
               f"max 80 chars), got {tid!r}", file=sys.stderr)
         return USAGE
 
-    # Same precedent as runtime_check.py:121-125 — unlink any stale verdict
+    # Same precedent as qa_check.py's _unlink_stale_verdicts() — unlink any stale verdict
     # from a PRIOR run of this tid before doing anything else, so an
     # escalate→answer→re-pick→clean-ship flow never folds an old run's
     # violations into review_packet for a later, actually-clean commit.
