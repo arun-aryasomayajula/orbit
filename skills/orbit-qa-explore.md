@@ -18,8 +18,11 @@ including `qa.exploratory.max_pages` — your hard page cap.
 ## 0. Read context
 Read `qa:` from `$AP_HOME/config.yaml`: services/base_url/env/timeouts/
 browser/headless, and `qa.exploratory.max_pages` (your crawl budget — never
-exceed it, no matter how promising the next link looks). `mkdir -p
-"$AP_STATE/qa/explore"` — screenshots land there.
+exceed it, no matter how promising the next link looks). Pick this run's UTC
+timestamp ONCE, `<UTC-ts>` — reuse it for both the screenshot directory
+(step 2) and the result JSON's name (step 5), so this run's evidence can
+never collide with or overwrite another run's. `mkdir -p
+"$AP_STATE/qa/explore/<UTC-ts>"` — screenshots land there.
 
 ## 1. Bring the product up (or attach)
 Orbit-qa-check discipline, verbatim: `qa.services` configured → you launch
@@ -39,7 +42,8 @@ a trailing slash is not a new entry). Follow ONLY links whose origin
 never follow it. Visit AT MOST `qa.exploratory.max_pages` pages total — a
 hard cap, not a suggestion: stop discovering new pages the instant you hit
 it, even with more links queued. Screenshot each page into
-`$AP_STATE/qa/explore/`, numbered: `01-<slug>.png`, `02-<slug>.png`, ... .
+`$AP_STATE/qa/explore/<UTC-ts>/` (this run's own subdirectory — step 0),
+numbered: `01-<slug>.png`, `02-<slug>.png`, ... .
 
 ## 3. Judge each page — real defects, not lint
 On every page, look for what a real user would notice: console errors, a
@@ -49,18 +53,28 @@ content belongs, a crashed component, garbled layout). This is judgment, not
 a linter pass — a missing `alt` tag or a minor style nit is not a finding;
 something a user would call "broken" is.
 
-## 4. Dedupe against SEEN.md — file ONLY new findings
-Read `ops/qa/SEEN.md` FIRST (create it with a header if missing:
-`| date | page | type | signature | severity |`) and note every existing
-`signature` cell. For each defect this crawl turns up, compare against those
-signatures — the same page and the same underlying problem, worded
-differently, is STILL a duplicate. Append ONE row per genuinely NEW finding
-only — `type` ∈ `bug`|`ux`|`feature`, `severity` ∈
-`critical`|`high`|`medium`|`low`. Never re-file something already on the
-ledger; that just inflates the backlog with the same bug twice.
+## 4. Build the signature, THEN dedupe against SEEN.md
+Free-text signatures drift across sessions — same bug, different wording,
+looks like a new row every time. Use a canonical template instead, mirroring
+`orbit-qa-flow`'s own signature discipline:
+`<page path> — <defect class>: <symptom>`
+e.g. `/checkout — console-error: TypeError in cart.js`. `<page path>` is the
+page's path (no scheme/host); `<defect class>` is exactly one of
+`console-error`|`broken-nav`|`dead-link`|`server-error`|`broken-render`
+(step 3's judgment categories); `<symptom>` is a short human description.
+
+Construct the signature FIRST, from the template above — THEN read
+`ops/qa/SEEN.md` (create it with a header if missing:
+`| date | page | type | signature | severity |`) and check for an existing
+row with the SAME page and the SAME defect class. Same class on the same
+page = duplicate, regardless of how the symptom is worded — never re-file it
+just because this run's phrasing differs from the row already on the ledger.
+Append ONE row per genuinely NEW (page, defect class) pair only — `type` ∈
+`bug`|`ux`|`feature`, `severity` ∈ `critical`|`high`|`medium`|`low`.
 
 ## 5. Write the result summary LAST — the completion signal
-`$AP_STATE/qa/explore-<UTC-ts>.json`:
+`$AP_STATE/qa/explore-<UTC-ts>.json` (the SAME `<UTC-ts>` as the screenshot
+directory, step 0):
 ```json
 {"pages_visited": <int>, "new_rows": <int>, "summary": "<one line>"}
 ```
@@ -72,12 +86,13 @@ this run — 0 is a perfectly honest answer, a clean crawl is a finding too.
 - Never install anything — missing tooling means `pages_visited: 0`; say
   exactly what's missing in `summary`.
 - Never git — no commit, no push; you observe, you never edit code.
-- Never file a duplicate — dedupe against `ops/qa/SEEN.md` FIRST, every run.
+- Never file a duplicate — build the signature from the template FIRST
+  (step 4), then dedupe against `ops/qa/SEEN.md`, every run.
 - Never exceed `qa.exploratory.max_pages` — the cap is hard.
 - Findings are proposals (SEEN.md rows) — NEVER a pass/fail verdict; you
   file leads, a human decides what's real.
 - The two sanctioned writes are `ops/qa/SEEN.md` and the result JSON, plus
-  screenshots under `$AP_STATE/qa/explore/` — nowhere else.
+  screenshots under `$AP_STATE/qa/explore/<UTC-ts>/` — nowhere else.
 - Always kill every service you launched, on every exit path.
 
 ## Clean up and exit

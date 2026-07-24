@@ -1231,22 +1231,27 @@ def _qa_heal_candidate_entry(p: Path) -> dict:
 def qa_flow_library() -> dict | None:
     """The QA view's data: the taught-flow library, the 10 newest run
     verdicts, and every pending heal candidate. None when the target has no
-    flows dir, or it has one with zero (SLUG_RE-valid) flows — build_state
-    then OMITS the `qa_flows` key entirely, so a target with no QA story yet
-    sees a byte-identical /api/state (existing consumers see no change).
+    flows dir (or one with zero SLUG_RE-valid flows) AND exploratory QA is
+    disabled — build_state then OMITS the `qa_flows` key entirely, so a
+    target with no QA story yet sees a byte-identical /api/state (existing
+    consumers see no change). Present (with an EMPTY `flows` list) whenever
+    EITHER flows exist OR exploratory is enabled: `explore_enabled` lives
+    INSIDE this dict, so if it stayed None whenever there were zero taught
+    flows, enabling exploratory with no flows taught yet would hide the
+    whole QA view — Explore button included (Phase 5 review finding).
     Listed flow names are filtered to SLUG_RE — a non-slug directory is never
     runnable anyway, and it's what the dashboard's HTML template trusts to
     be quote-safe (see the `names = sorted(...)` line below)."""
+    explore_enabled = _qa_exploratory_enabled()
     flows_root = _qa_flows_root()
-    if not flows_root.is_dir():
-        return None
     # SLUG_RE-gated: a non-slug directory name is unrunnable anyway (do_qa_action
     # and qa_run.py both refuse it), and cc_shell.html's onclick="runFlow('${esc(
     # f.name)}')" isn't quote-safe — esc() only neuters &/</>, not '/". Filtering
     # the LISTING here (rather than only escaping in the template) means a
     # crafted committed flow-dir name can never reach the page at all.
-    names = sorted(p.name for p in flows_root.iterdir() if p.is_dir() and SLUG_RE.match(p.name))
-    if not names:
+    names = (sorted(p.name for p in flows_root.iterdir() if p.is_dir() and SLUG_RE.match(p.name))
+             if flows_root.is_dir() else [])
+    if not names and not explore_enabled:
         return None
 
     flows = []
@@ -1293,7 +1298,7 @@ def qa_flow_library() -> dict | None:
         heals = [_qa_heal_candidate_entry(heal_dir / name) for name in names]
 
     return {"flows": flows, "recent_runs": recent_runs, "heals": heals,
-            "pending_heals": len(heals), "explore_enabled": _qa_exploratory_enabled()}
+            "pending_heals": len(heals), "explore_enabled": explore_enabled}
 
 
 # ── heal approve/reject (Task 26) — the human gate that closes the QA

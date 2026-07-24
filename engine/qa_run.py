@@ -686,7 +686,7 @@ def _regression_due(repo: Path, base_branch: str, ap_state: Path, cursor: dict |
     return cadence_due or merge_due
 
 
-def _acquire_lock(lock_path: Path, stale_after_seconds: int) -> bool:
+def _acquire_lock(lock_path: Path, stale_after_seconds: int, mode: str = "QA") -> bool:
     """True = lock acquired (this call now owns it — the caller MUST release
     it via _release_lock, and MUST call _touch_lock after every flow so this
     process's OWN liveness stays provable). False = a fresh lock already
@@ -695,7 +695,9 @@ def _acquire_lock(lock_path: Path, stale_after_seconds: int) -> bool:
     that constant's own comment for why NOT the whole sweep's budget) is
     presumed dead (a crashed prior sweep never reached its own finally, or
     never got the chance to touch it again) and is replaced, with a WARN —
-    never left to wedge every future sweep forever."""
+    never left to wedge every future sweep forever. `mode` is purely cosmetic
+    (labels the WARN, e.g. "regression" or "explore") — this same lock file
+    and staleness window are shared by every qa_run.py entry point."""
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps({"pid": os.getpid(), "started_at": _now_iso()}) + "\n"
     try:
@@ -731,7 +733,7 @@ def _acquire_lock(lock_path: Path, stale_after_seconds: int) -> bool:
         age = stale_after_seconds
     if age < stale_after_seconds:
         return False
-    print(f"WARN: stale regression lock at {lock_path} (age {int(age)}s >= "
+    print(f"WARN: stale {mode} lock at {lock_path} (age {int(age)}s >= "
           f"{stale_after_seconds}s) — replacing")
     try:
         lock_path.write_text(payload)
@@ -968,7 +970,7 @@ def _run_regression(target: Path, ap_home: Path, cfg_all: dict, qa_cfg: dict,
     # NOT the whole sweep's (max_flows x timeout_seconds) — because _sweep
     # re-touches the lock after every flow; see LOCK_STALE_MARGIN_SECONDS.
     stale_after_seconds = timeout_seconds + LOCK_STALE_MARGIN_SECONDS
-    if not _acquire_lock(lock_path, stale_after_seconds):
+    if not _acquire_lock(lock_path, stale_after_seconds, mode="regression"):
         print("regression: a sweep is already running — skipping this pass")
         return OK
 
@@ -1130,7 +1132,7 @@ def _run_explore(target: Path, ap_home: Path, cfg_all: dict, qa_cfg, timeout_arg
     # timeout budget + a fixed margin) — a single explore invocation is one
     # agent call, not a multi-flow sweep, so there's no per-step touch to do.
     stale_after_seconds = timeout_seconds + LOCK_STALE_MARGIN_SECONDS
-    if not _acquire_lock(lock_path, stale_after_seconds):
+    if not _acquire_lock(lock_path, stale_after_seconds, mode="explore"):
         print("explore: a QA sweep/explore is already running — skipping this run")
         return OK
 

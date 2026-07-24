@@ -189,6 +189,40 @@ def test_qa_exploratory_enabled_helper_matches_state_flag(cc):
     assert cc._qa_exploratory_enabled() is True
 
 
+# ── explore_enabled decoupled from taught flows (Phase 5 review) ────────────
+# explore_enabled lives INSIDE qa_flows, which used to be None whenever there
+# were zero taught (SLUG_RE-valid) flows — so enabling exploratory with no
+# flows taught yet hid the whole QA view, Explore button included. qa_flows
+# must now be present (with an empty `flows` list) whenever EITHER flows
+# exist OR exploratory is enabled; still absent when neither holds.
+
+def test_qa_flows_present_with_empty_flows_when_exploratory_enabled_no_flows_dir(cc):
+    # No qa/flows dir at all, exploratory enabled -> qa_flows still present.
+    (cc.AP_HOME / "config.yaml").write_text(
+        "qa:\n  exploratory:\n    enabled: true\n    max_pages: 10\n")
+    st = cc.build_state()
+    assert "qa_flows" in st
+    assert st["qa_flows"]["flows"] == []
+    assert st["qa_flows"]["explore_enabled"] is True
+
+
+def test_qa_flows_present_with_empty_flows_when_exploratory_enabled_empty_flows_dir(cc):
+    # qa/flows dir exists but is empty, exploratory enabled -> still present.
+    (cc.AP_HOME / "qa" / "flows").mkdir(parents=True)
+    (cc.AP_HOME / "config.yaml").write_text(
+        "qa:\n  exploratory:\n    enabled: true\n    max_pages: 10\n")
+    st = cc.build_state()
+    assert "qa_flows" in st
+    assert st["qa_flows"]["flows"] == []
+    assert st["qa_flows"]["explore_enabled"] is True
+
+
+def test_qa_flows_absent_when_no_flows_and_exploratory_disabled(cc):
+    # Neither flows nor exploratory -> unchanged, still fully absent.
+    st = cc.build_state()
+    assert "qa_flows" not in st
+
+
 def test_qa_flows_root_falls_back_to_default_on_escaping_flows_dir(cc):
     # Finding 1 (Phase 4 review): _qa_flows_root used to resolve
     # `AP_HOME / flows_dir` raw — a malformed/escaping flows_dir (leading
