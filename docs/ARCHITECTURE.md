@@ -74,6 +74,24 @@ the ordinary discovery pipeline instead (the `qa` signal adapter turns them into
 `status: proposed` tasks for a human to triage), same as any other
 adapter-sourced finding.
 
+**The flow library (teach mode, optional, decoupled from the cycle)** — where the QA
+gate above proves ONE task's acceptance criteria, `orbit teach` builds a standing,
+committed flow map: a human records a browser flow once (Playwright `codegen`), states
+its intent + success criteria, and Orbit writes `intent.md` + `steps.spec.ts` +
+`meta.json` under `.autopilot/<qa.flows_dir>/<name>/` (indexed in one `FLOWMAP.md`) for a
+human to `git add`/commit — the library is human-owned, never machine-authored.
+`orbit qa <target> --flow <name>` then replays it independently, any time, via the same
+`/orbit-qa-flow` skill and Playwright MCP wiring the QA gate uses, grading the run
+against the flow's own intent rather than a task's criteria. It's the supervised-
+learning loop in miniature: the human demonstrates once, the machine imitates it
+thereafter, and drift never edits the demonstration in place — a UI change that still
+honors the intent mines a **heal candidate** under `$AP_STATE/qa/heal/`, gated on human
+approval (the dashboard surfaces the pending count; the approval action itself lands
+next phase), while a genuine break grades **fail** and feeds `ops/qa/SEEN.md` into the
+same triage pipeline any other signal adapter uses. `steps.json` — the normalized,
+healable step list — is written by the replay agent itself, only on the first fully
+clean pass; `teach` never writes it.
+
 ## Model tiering (grounded in evidence, not vibes)
 The router assigns opus to hard-judgment categories (bug/feature/refactor/security) and sonnet to
 directed work (docs/deps/testing) where a smaller model is at parity — cheaper without quality loss.

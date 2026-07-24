@@ -162,10 +162,10 @@ config carries a `qa:` block it supersedes `runtime_check:` as the post-commit g
 (`engine/qa_check.py`, dispatched by `run.sh` right after the cycle commits and
 before it pushes). Config (`.autopilot/config.yaml`, all optional):
 ```yaml
-# --- QA runtime (optional): a browser-driving QA agent proves ships and files
-# failures back onto the task. Requires node+npx in the target env (Playwright
-# MCP is fetched via npx — never an engine dependency). When present, this
-# supersedes runtime_check: as the post-commit gate.
+# --- QA runtime (optional): a browser-driving QA agent proves ships, replays taught
+# flows, and files failures back onto the task. Requires node+npx in the target env
+# (Playwright MCP is fetched via npx — never an engine dependency). When present,
+# this supersedes runtime_check: as the post-commit gate.
 # qa:
 #   services:                          # full-stack launch recipe, in start order
 #     - name: api
@@ -216,6 +216,62 @@ and `runtime_check:` are configured (`qa:` wins).
 the same `runtime_check:` behaviour as before (same config keys, same
 `/orbit-runtime-check` skill, same `reviews/task-<id>-runtime.json` verdict) —
 nothing changes until you add one.
+
+## 6.8. Teach mode (optional): the flow library
+Where the QA gate above proves ONE task's acceptance criteria, **teach mode** builds a
+standing library of browser flows a human records once and the QA agent replays forever
+after — decoupled from any single task's cycle.
+
+```bash
+orbit teach <target> <flow-name> [--url URL]   # target URL = --url > qa.base_url; neither -> exit 2
+```
+Brings `qa.services` up, then launches `npx playwright codegen` against the target URL
+in the foreground — you drive the real recording browser yourself and close its window
+when the flow is complete. It then prompts on stdin for a one-line intent and one-or-more
+success criteria; nothing is written until both are given (an empty intent or zero
+criteria is exit 1, no flow left behind). On success it writes the flow dir and prints a
+`git add` hint — **you** review the new flow dir's git diff like any other change, then
+commit it; the engine never runs git on the target.
+
+Each taught flow lives at `.autopilot/<qa.flows_dir>/<name>/` (default flows_dir
+`qa/flows`):
+- **`intent.md`** — frontmatter (name/created/entry_path/tags) + your one-line intent +
+  a `## Success criteria` list — the contract the replay agent grades against
+- **`steps.spec.ts`** — the raw `codegen` recording, byte-for-byte — ground truth
+- **`meta.json`** — `created_at`/`last_run_at`/`last_verdict`/`runs`/`heals`, updated on
+  every replay
+- **`steps.json`** — the normalized, healable step list — **not** written by `teach`;
+  it appears after the first fully clean replay (no drift, intent achieved)
+
+One directory up from `flows_dir` (default `.autopilot/qa/FLOWMAP.md`), a `FLOWMAP.md`
+tracks one row per flow (name/intent/entry path/last verdict). Each `orbit qa --flow`
+run updates that flow's own last-verdict cell in place, never duplicating the row (a
+flow name already taught is refused by `orbit teach` for now — re-teaching lands a
+later phase).
+
+**Replaying a flow:**
+```bash
+orbit qa <target> --flow <name> [--timeout N]
+```
+Runs the `/orbit-qa-flow` skill headless against the named flow and records a verdict
+into its `meta.json` + `FLOWMAP.md` row. Exit codes:
+
+| exit | meaning |
+|------|---------|
+| 0 | pass, or healed (UI drifted but the intent still holds) |
+| 3 | fail — an app bug |
+| 1 | unable (the environment prevented the attempt), no verdict was written, or the verdict was malformed |
+| 2 | usage/validation error (bad flow-name slug, no `qa:` block, or an unknown flow name) |
+
+The replay agent tells drift from breakage: if it needed one OBVIOUSLY-equivalent path to
+still satisfy every success criterion (a renamed button, a moved-but-recognizable
+control), the verdict is **healed** — a corrected-steps candidate is written to
+`$AP_STATE/qa/heal/`, **pending approval** (the dashboard shows the pending count;
+the approval action itself lands next phase) — the flow dir's own steps are never
+touched by a heal. If the intent genuinely can't be achieved, the verdict is **fail** —
+one row is appended to `ops/qa/SEEN.md`, which the `qa` signal adapter turns into a
+`status: proposed` task for a human to triage, the same discovery pipeline any other
+adapter-sourced finding flows through.
 
 ## Opt-in task sources (signal adapters)
 Beyond the native `backlog.yaml`, every extra name in `sources:` runs a matching

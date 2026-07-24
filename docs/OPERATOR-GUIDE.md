@@ -83,6 +83,24 @@ verdict) before it's pushed:
   never recorded a failing verdict against it (it passed, ran unable, or
   wasn't checked).
 
+## QA view (flow library)
+
+A **QA** tab appears in the nav only when the target repo has at least one
+taught flow (`orbit teach`) — invisible otherwise.
+
+- **Flow library** — one row per taught flow: its name, its one-line intent,
+  a verdict badge for the last replay (green = pass, red = fail, amber =
+  healed or unable, grey = never run), how long ago it last ran and how many
+  times, and a **▶ Run** button that kicks off `orbit qa --flow <name>`
+  right from the dashboard (detached — the page doesn't wait on it).
+- **Recent runs** — the 10 newest run verdicts across all flows: badge, flow
+  name, one-line summary, and a screenshot link when the run captured one.
+- **Pending heals** — when one or more heal candidates are waiting
+  (UI drifted but the flow's intent still held), a line reads "pending
+  heals: N (approval UI coming in Phase 5)" — approving or rejecting a
+  candidate isn't available from the dashboard yet; this is a visible count
+  only.
+
 ## Safety facts
 
 - Every task ships on its own branch; nothing merges without a human click.
