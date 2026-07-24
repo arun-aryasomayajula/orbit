@@ -1128,8 +1128,9 @@ def read_qa_report(p: str) -> str | None:
 # Data sources: $AP_HOME/<flows_dir>/<name>/{intent.md, meta.json} (the flow-
 # file format Task 20's `orbit teach` writes — see qa_teach.py), $AP_STATE/
 # qa/runs/*.json (run verdicts Task 21's replay skill writes, read by Task
-# 22's qa_run.py), $AP_STATE/qa/heal/*.json (heal candidates — Phase 5 owns
-# approve/reject; this view only counts the pending ones).
+# 22's qa_run.py), $AP_STATE/qa/heal/*.json (heal candidates the replay skill
+# mines — Task 26's do_qa_action heal-approve/heal-reject are the human gate
+# that approves/rejects them; this view surfaces each pending one).
 _FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)$", re.DOTALL)
 
 
@@ -1194,13 +1195,34 @@ def _read_flow_meta(flow_dir: Path) -> tuple[str | None, str | None, int | None]
             runs if isinstance(runs, int) else None)
 
 
+def _qa_heal_candidate_entry(p: Path) -> dict:
+    """One pending heal candidate for build_state's `heals` list. `new_steps`
+    is deliberately omitted — it can be large, and the approve action
+    (do_qa_action's heal-approve) re-reads the file from disk rather than
+    trusting anything round-tripped through /api/state. JSON that fails to
+    parse, or parses to something other than an object, still needs to reach
+    the operator (there's no other way to clear it) — it's surfaced as
+    `{file, malformed: True}` instead of the full shape; heal-reject
+    deliberately allows rejecting this shape through (heal-approve refuses
+    it)."""
+    try:
+        c = json.loads(p.read_text())
+        if not isinstance(c, dict):
+            raise ValueError
+    except (OSError, ValueError):
+        return {"file": p.name, "malformed": True}
+    return {"file": p.name, "flow": c.get("flow"), "reason": c.get("reason"),
+            "step_diff": c.get("step_diff"), "screenshot": c.get("screenshot"),
+            "mined_at": c.get("mined_at")}
+
+
 def qa_flow_library() -> dict | None:
     """The QA view's data: the taught-flow library, the 10 newest run
-    verdicts, and the pending-heal count. None when the target has no flows
-    dir, or it has one with zero (SLUG_RE-valid) flows — build_state then
-    OMITS the `qa_flows` key entirely, so a target with no QA story yet sees
-    a byte-identical /api/state (existing consumers see no change). Listed
-    flow names are filtered to SLUG_RE — a non-slug directory is never
+    verdicts, and every pending heal candidate. None when the target has no
+    flows dir, or it has one with zero (SLUG_RE-valid) flows — build_state
+    then OMITS the `qa_flows` key entirely, so a target with no QA story yet
+    sees a byte-identical /api/state (existing consumers see no change).
+    Listed flow names are filtered to SLUG_RE — a non-slug directory is never
     runnable anyway, and it's what the dashboard's HTML template trusts to
     be quote-safe (see the `names = sorted(...)` line below)."""
     flows_root = _qa_flows_root()
@@ -1244,30 +1266,158 @@ def qa_flow_library() -> dict | None:
             row["file"] = p.name
             recent_runs.append(row)
 
+    # Only top-level files under heal/ are pending — heal/approved/ and
+    # heal/rejected/ are subdirectories (never `.is_file()`), so an archived
+    # candidate is excluded from both the listing and the count without a
+    # separate check. Sorted by name for a deterministic strip ordering, same
+    # convention as load_calibration_candidates' `sorted(d.glob(...))`.
     heal_dir = QA_DIR / "heal"
-    pending_heals = 0
+    heals = []
     if heal_dir.is_dir():
         try:
-            pending_heals = sum(1 for p in heal_dir.iterdir() if p.is_file())
+            names = sorted(p.name for p in heal_dir.iterdir() if p.is_file())
         except OSError:
-            pending_heals = 0
+            names = []
+        heals = [_qa_heal_candidate_entry(heal_dir / name) for name in names]
 
-    return {"flows": flows, "recent_runs": recent_runs, "pending_heals": pending_heals}
+    return {"flows": flows, "recent_runs": recent_runs, "heals": heals,
+            "pending_heals": len(heals)}
+
+
+# ── heal approve/reject (Task 26) — the human gate that closes the QA
+# self-healing loop. Structure mirrors do_calibration_action exactly: approve
+# mutates a committed $AP_HOME artifact (there: goldens/LEARNED.md; here: the
+# flow's own steps.json) + archives the candidate; reject requires a reason,
+# stamps it, archives. The one asymmetry from calibration: approve here has
+# real shape validation to do first (a candidate's new_steps could be
+# garbage), so it runs every check BEFORE any write — all-or-nothing, never
+# a partial apply.
+_HEAL_FILE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,79}--\d{8}T\d{6}Z\.json$")
+_HEAL_STEP_ACTIONS = {"goto", "click", "fill", "expect"}
+
+
+def _heal_candidate_path(file) -> Path | None:
+    """None unless `file` is a bare `<slug>--<ts>.json` basename (the regex's
+    character class contains no '/', so a '..' segment, an absolute path, or
+    a subdirectory path all fail to match by SHAPE — there's no separate
+    traversal check to forget) naming a file that actually exists directly
+    under $AP_STATE/qa/heal/ (never heal/approved/ or heal/rejected/ — a bare
+    basename can't reach into a subdirectory)."""
+    if not isinstance(file, str) or not _HEAL_FILE_RE.match(file):
+        return None
+    p = QA_DIR / "heal" / file
+    return p if p.is_file() else None
+
+
+def _qa_now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _do_heal_approve(file: str) -> dict:
+    """Approve a mined heal candidate: write its new_steps into the flow's
+    own committed steps.json (pretty JSON — the ONE new machine write this
+    dashboard makes into a committed dir; it's human-clicked, same precedent
+    as calibration approve's LEARNED.md append), append a `heals` entry to
+    the flow's meta.json (runs/last_run_at/last_verdict untouched), then
+    archive the candidate under heal/approved/. Every validation below runs
+    BEFORE any write — a failure at any check leaves steps.json, meta.json,
+    and the candidate file exactly as they were."""
+    p = _heal_candidate_path(file)
+    if p is None:
+        return {"ok": False, "msg": f"'{file}' is not a pending heal candidate"}
+    try:
+        c = json.loads(p.read_text())
+        if not isinstance(c, dict):
+            raise ValueError
+    except (OSError, ValueError):
+        return {"ok": False, "msg": f"candidate '{file}' is malformed JSON — reject it instead"}
+    flow = c.get("flow")
+    if not isinstance(flow, str) or not SLUG_RE.match(flow):
+        return {"ok": False, "msg": f"candidate '{file}' names an invalid flow {flow!r}"}
+    flow_dir = _qa_flows_root() / flow
+    if not flow_dir.is_dir():
+        return {"ok": False, "msg": f"candidate's flow '{flow}' has no flow dir at {flow_dir}"}
+    new_steps = c.get("new_steps")
+    if not isinstance(new_steps, list) or not new_steps:
+        return {"ok": False, "msg": f"candidate '{file}' has no usable new_steps"}
+    for i, step in enumerate(new_steps):
+        if not isinstance(step, dict) or step.get("action") not in _HEAL_STEP_ACTIONS:
+            return {"ok": False, "msg": f"candidate '{file}' new_steps[{i}] has an invalid action"}
+
+    # All-or-nothing point of no return: every check above passed, so the
+    # writes below are safe to make unconditionally.
+    (flow_dir / "steps.json").write_text(json.dumps(new_steps, indent=2) + "\n")
+    meta_path = flow_dir / "meta.json"
+    try:
+        meta = json.loads(meta_path.read_text())
+        if not isinstance(meta, dict):
+            raise ValueError
+    except (OSError, ValueError):
+        # Mirrors qa_run.py's _update_meta fallback — a missing/corrupt
+        # meta.json must never block the approve that's already committed
+        # steps.json.
+        meta = {"created_at": None, "last_run_at": None, "last_verdict": None,
+                 "runs": 0, "heals": []}
+    heals = meta.get("heals")
+    if not isinstance(heals, list):
+        heals = []
+    heals.append({"at": _qa_now_iso(), "reason": c.get("reason"), "candidate": file})
+    meta["heals"] = heals
+    meta_path.write_text(json.dumps(meta, indent=2) + "\n")
+
+    approved_dir = QA_DIR / "heal" / "approved"
+    approved_dir.mkdir(parents=True, exist_ok=True)
+    p.rename(approved_dir / p.name)
+    return {"ok": True,
+            "msg": f"Approved heal for '{flow}' — steps.json updated (archived to heal/approved/)."}
+
+
+def _do_heal_reject(file: str, reason: str) -> dict:
+    """Reject a heal candidate: a reason is required (archived with it, same
+    discipline as do_calibration_action's reject) and is checked before the
+    filename even needs to be valid. Same filename validation as approve.
+    Unlike approve, a malformed candidate IS rejectable — its raw text is
+    archived best-effort under `malformed_raw` since it can't be parsed back
+    into a dict; this is the operator's only way to clear junk out of the
+    pending strip."""
+    if not reason.strip():
+        return {"ok": False, "msg": "A rejection reason is required."}
+    p = _heal_candidate_path(file)
+    if p is None:
+        return {"ok": False, "msg": f"'{file}' is not a pending heal candidate"}
+    try:
+        raw = p.read_text()
+    except OSError as e:
+        return {"ok": False, "msg": f"cannot read candidate '{file}': {e}"}
+    try:
+        c = json.loads(raw)
+        if not isinstance(c, dict):
+            raise ValueError
+    except ValueError:
+        c = {"malformed_raw": raw}
+    c["rejected_reason"] = reason
+    c["rejected_at"] = _qa_now_iso()
+    rejected_dir = QA_DIR / "heal" / "rejected"
+    rejected_dir.mkdir(parents=True, exist_ok=True)
+    (rejected_dir / p.name).write_text(json.dumps(c, indent=2) + "\n")
+    p.unlink()
+    return {"ok": True, "msg": f"Rejected heal candidate '{file}' (archived with reason)."}
 
 
 def do_qa_action(payload: dict) -> dict:
-    """POST /qa-action — flow-library actions from the QA view. Only
-    run-flow is implemented: validates the flow name (SLUG_RE discipline,
-    same as qa_teach.py/qa_run.py) and that the flow actually exists, then
-    spawns `qa_run.py <target> --flow <name>` DETACHED (do_epic_action's
-    Popen pattern), logging to $AP_STATE/logs/qa-run-<name>.log. Heal
-    approve/reject are Phase 5 — refused here with a clear message rather
-    than silently doing nothing."""
+    """POST /qa-action — flow-library actions from the QA view. run-flow
+    validates the flow name (SLUG_RE discipline, same as qa_teach.py/
+    qa_run.py) and that the flow actually exists, then spawns `qa_run.py
+    <target> --flow <name>` DETACHED (do_epic_action's Popen pattern),
+    logging to $AP_STATE/logs/qa-run-<name>.log. heal-approve/heal-reject
+    (Task 26) close the self-healing loop — see _do_heal_approve/
+    _do_heal_reject, which mirror do_calibration_action's precedent."""
     action = (payload.get("action") or "").strip()
+    if action == "heal-approve":
+        return _do_heal_approve((payload.get("file") or "").strip())
+    if action == "heal-reject":
+        return _do_heal_reject((payload.get("file") or "").strip(), payload.get("reason") or "")
     flow = (payload.get("flow") or "").strip()
-    if action in ("heal-approve", "heal-reject"):
-        return {"ok": False,
-                "msg": "heal approval is coming in Phase 5 — not available from the dashboard yet"}
     if action != "run-flow":
         return {"ok": False, "msg": f"unknown qa action '{action}'"}
     if not SLUG_RE.match(flow):
@@ -2258,7 +2408,9 @@ class Handler(BaseHTTPRequestHandler):
                 msg = do_lintok(tid)
             elif path == "/qa-action":
                 result = do_qa_action({"action": (data.get("action", [""])[0]).strip(),
-                                       "flow": (data.get("flow", [""])[0]).strip()})
+                                       "flow": (data.get("flow", [""])[0]).strip(),
+                                       "file": (data.get("file", [""])[0]).strip(),
+                                       "reason": (data.get("reason", [""])[0]).strip()})
                 self._send(json.dumps(result).encode(), "application/json"); return
             elif path == "/epic-action":
                 if not tid:

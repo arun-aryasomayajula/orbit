@@ -982,8 +982,8 @@ function renderTop(){
   nb('nb-branches',(r.branches||[]).filter(b=>b.category==='awaiting'||b.category==='orphan').length,false);
   // QA nav (Task 23): hidden entirely when the target has no flow library;
   // its badge only shows a number once there's a pending heal to look at
-  // (unlike the always-on counters above — there's no approval UI yet, so a
-  // "0" pill would just be noise).
+  // (unlike the always-on counters above — a "0" pill would just be noise
+  // when the heal strip, Task 26, is empty).
   const qaNav=document.querySelector('.nav[data-view="qa"]'),qaHeals=(r.qa_flows&&r.qa_flows.pending_heals)||0;
   if(qaNav)qaNav.style.display=r.qa_flows?'':'none';
   const nbQa=document.getElementById('nb-qa');
@@ -1268,18 +1268,46 @@ function qaRunRow(r){
   const shot=r.screenshot?`<a class="qa-report-link" href="/qa-shot?p=${encodeURIComponent(r.screenshot)}" target="_blank" rel="noopener">screenshot</a>`:'';
   return `<div class=brow>${qaVerdictBadge(r.verdict)} <code>${esc(r.flow||'—')}</code> ${esc(r.summary||'')}<span class=spacer></span>${shot}</div>`;
 }
+
+/* ── heal strip (Task 26): the human gate that closes the self-healing
+   loop — approve writes a mined candidate's corrected steps into the flow's
+   own steps.json; reject archives it with a reason. Mirrors the calibration
+   strip's calCard/calReject pattern exactly. */
+function healCard(h){
+  if(h.malformed)
+    return `<div class=card><div class="card-h"><span class=tid>${esc(h.file)}</span> ${badge('malformed — cannot parse','stop')}</div>
+      <div class=meta>This candidate isn't valid JSON — it can't be approved, only cleared.</div>
+      <div class=btns><button class="btn btn-stop btn-mini" onclick="healReject('${escJsAttr(h.file)}')">Reject</button></div></div>`;
+  const shotUrl=h.screenshot?'/qa-shot?p='+encodeURIComponent(h.screenshot):'';
+  const shot=shotUrl?`<a href="${shotUrl}" target="_blank" rel="noopener"><img class=qa-thumb src="${shotUrl}" alt="heal screenshot" loading="lazy"></a>`:'';
+  const diff=h.step_diff?`<pre style="white-space:pre-wrap;font-size:12px;margin:6px 0">${esc(h.step_diff)}</pre>`:'';
+  return `<div class=card><div class="card-h"><span class=tid>${esc(h.flow||'—')}</span> ${badge('heal candidate','warn')}</div>
+    <div class=meta style="white-space:pre-wrap">${esc(h.reason||'')}</div>${diff}${shot}
+    <div class=btns>
+      <button class="btn btn-go btn-mini" title="write the corrected steps into this flow's steps.json" onclick="if(confirm('Approve this heal for ${escJsAttr(h.flow||'')}? Its steps.json is overwritten with the corrected steps.'))post('/qa-action',{action:'heal-approve',file:'${escJsAttr(h.file)}'})">Approve heal</button>
+      <button class="btn btn-stop btn-mini" onclick="healReject('${escJsAttr(h.file)}')">Reject</button>
+    </div></div>`;
+}
+function healReject(file){
+  const why=prompt('Why reject this heal candidate? (archived with the candidate)');
+  if(why===null)return;
+  if(!why.trim()){toast('A reason is required.');return;}
+  post('/qa-action',{action:'heal-reject',file:file,reason:why.trim()});
+}
 function renderQa(){
   const qf=S&&S.qa_flows;
   if(!qf){document.getElementById('qaBody').innerHTML='';return;}
   const flows=(qf.flows||[]).map(qaFlowRow).join('') ||
     `<div class=empty>No flows taught yet — run <b>orbit teach</b> to record one.</div>`;
   const runs=(qf.recent_runs||[]).map(qaRunRow).join('') || `<div class=empty>No runs yet.</div>`;
-  const heals=qf.pending_heals>0?
-    `<div class=lint>pending heals: ${qf.pending_heals} (approval UI coming in Phase 5)</div>`:'';
+  const heals=qf.heals||[];
+  const healStrip=heals.length?
+    `<div class="eyebrow">Pending heals</div>
+     <div class=grid>${heals.map(healCard).join('')}</div>`:'';
   document.getElementById('qaBody').innerHTML=
     `<div class="eyebrow" style="margin-top:0">Flow library</div>${flows}
      <div class="eyebrow">Recent runs</div>${runs}
-     ${heals}`;
+     ${healStrip}`;
 }
 
 /* ── agents view ────────────────────────────────────────────────────────── */

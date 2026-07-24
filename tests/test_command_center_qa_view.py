@@ -1,8 +1,8 @@
 # Task 23 — dashboard QA view: build_state's `qa_flows` key (the taught-flow
-# library + recent run verdicts + pending-heal count) and POST /qa-action's
-# `do_qa_action` (a validated, detached spawn of `qa_run.py --flow <name>`).
-# Heal approve/reject stay refused here with a clear message — that UI is
-# Phase 5.
+# library + recent run verdicts + pending heal candidates) and POST
+# /qa-action's `do_qa_action` (a validated, detached spawn of `qa_run.py
+# --flow <name>`, plus Task 26's heal-approve/heal-reject — the human gate
+# that closes the self-healing loop, mirroring do_calibration_action).
 #
 # Run: python3.11 -m pytest tests/test_command_center_qa_view.py -v   (from orbit/)
 import importlib.util
@@ -71,6 +71,20 @@ def _write_run(cc, filename, mtime_offset=0, **fields):
     return p
 
 
+def _write_heal(cc, filename, **fields):
+    """A pending heal candidate — $AP_STATE/qa/heal/<flow>--<ts>.json shape
+    (skills/orbit-qa-flow.md), directly under heal/ (not approved/rejected)."""
+    d = cc.QA_DIR / "heal"
+    d.mkdir(parents=True, exist_ok=True)
+    body = {"flow": "login", "reason": "button relabeled", "step_diff": "old -> new",
+            "new_steps": [{"action": "click", "selector": "#go", "value": "", "note": "renamed"}],
+            "screenshot": "flow-login/01.png", "mined_at": "2026-07-21T00:00:00Z"}
+    body.update(fields)
+    p = d / filename
+    p.write_text(json.dumps(body))
+    return p
+
+
 # ── build_state()'s qa_flows key ──────────────────────────────────────────────
 
 def test_qa_flows_absent_without_a_flows_dir(cc):
@@ -112,6 +126,8 @@ def test_qa_flows_shape_with_two_flows_a_run_and_a_heal_candidate(cc):
     assert qf["recent_runs"][0]["failed_step"] == 2
 
     assert qf["pending_heals"] == 1
+    assert qf["heals"] == [{"file": "checkout--20260721T000000Z.json", "flow": "checkout",
+                            "reason": None, "step_diff": None, "screenshot": None, "mined_at": None}]
 
 
 def test_qa_flows_malformed_meta_json_yields_nulls_never_a_crash(cc):
@@ -196,6 +212,36 @@ def test_pending_heals_excludes_approved_and_rejected_subdirs(cc):
     (heal / "rejected" / "old-2.json").write_text("{}")
     st = cc.build_state()
     assert st["qa_flows"]["pending_heals"] == 2
+    assert len(st["qa_flows"]["heals"]) == 2
+    assert {h["file"] for h in st["qa_flows"]["heals"]} == {"pending-1.json", "pending-2.json"}
+
+
+def test_qa_flows_heals_list_full_shape_and_malformed_entries(cc):
+    # Task 26: build_state's `heals` list carries every field a pending
+    # candidate needs for the dashboard's heal strip EXCEPT new_steps (too
+    # big — the approve action re-reads the file for that). A candidate that
+    # isn't valid JSON (or isn't a JSON object) still needs to reach the
+    # operator so they can reject it — it's surfaced as {file, malformed}.
+    _write_flow(cc, "login")
+    heal = cc.QA_DIR / "heal"
+    heal.mkdir(parents=True)
+    _write_heal(cc, "login--20260722T000000Z.json", flow="login", reason="moved button",
+                step_diff="old -> new", screenshot="flow-login/01.png",
+                mined_at="2026-07-22T00:00:00Z")
+    (heal / "bad--20260722T000001Z.json").write_text("{not valid json")
+
+    st = cc.build_state()
+    qf = st["qa_flows"]
+    assert qf["pending_heals"] == 2 == len(qf["heals"])
+
+    good = next(h for h in qf["heals"] if h.get("file") == "login--20260722T000000Z.json")
+    assert good == {"file": "login--20260722T000000Z.json", "flow": "login",
+                    "reason": "moved button", "step_diff": "old -> new",
+                    "screenshot": "flow-login/01.png", "mined_at": "2026-07-22T00:00:00Z"}
+    assert "new_steps" not in good
+
+    bad = next(h for h in qf["heals"] if h.get("file") == "bad--20260722T000001Z.json")
+    assert bad == {"file": "bad--20260722T000001Z.json", "malformed": True}
 
 
 def test_recent_runs_capped_at_ten_newest_first(cc):
@@ -257,11 +303,120 @@ def test_do_qa_action_rejects_unknown_action(cc, monkeypatch):
     assert calls == []
 
 
-def test_do_qa_action_heal_actions_are_refused_as_phase_5(cc, monkeypatch):
-    calls = []
-    monkeypatch.setattr(cc.subprocess, "Popen", lambda *a, **k: calls.append((a, k)))
-    for action in ("heal-approve", "heal-reject"):
-        result = cc.do_qa_action({"action": action, "flow": "login"})
-        assert result["ok"] is False
-        assert "phase 5" in result["msg"].lower()
-    assert calls == []
+# ── heal-approve / heal-reject (Task 26) — mirrors do_calibration_action ─────
+
+def test_do_heal_approve_happy_path_writes_steps_and_meta_and_moves_file(cc):
+    fd = _write_flow(cc, "login")   # runs=3, per _write_flow's default
+    new_steps = [{"action": "click", "selector": "#new-btn", "value": "", "note": "renamed button"}]
+    _write_heal(cc, "login--20260722T000000Z.json", flow="login",
+                reason="button renamed", new_steps=new_steps)
+
+    result = cc.do_qa_action({"action": "heal-approve", "file": "login--20260722T000000Z.json"})
+    assert result["ok"] is True
+
+    assert json.loads((fd / "steps.json").read_text()) == new_steps
+    meta = json.loads((fd / "meta.json").read_text())
+    assert len(meta["heals"]) == 1
+    assert meta["heals"][0]["reason"] == "button renamed"
+    assert meta["heals"][0]["candidate"] == "login--20260722T000000Z.json"
+    assert "at" in meta["heals"][0]
+    assert meta["runs"] == 3   # runs/last_* untouched by the heal append
+
+    assert not (cc.QA_DIR / "heal" / "login--20260722T000000Z.json").exists()
+    assert (cc.QA_DIR / "heal" / "approved" / "login--20260722T000000Z.json").exists()
+
+    # second approve of the same (now-moved) file -> error, nothing double-applied
+    result2 = cc.do_qa_action({"action": "heal-approve", "file": "login--20260722T000000Z.json"})
+    assert result2["ok"] is False
+    meta2 = json.loads((fd / "meta.json").read_text())
+    assert len(meta2["heals"]) == 1   # unchanged
+
+
+def test_do_heal_approve_rejects_unknown_flow_and_touches_nothing(cc):
+    _write_heal(cc, "ghost--20260722T000000Z.json", flow="ghost-flow")
+    result = cc.do_qa_action({"action": "heal-approve", "file": "ghost--20260722T000000Z.json"})
+    assert result["ok"] is False
+    assert "ghost-flow" in result["msg"]
+    assert (cc.QA_DIR / "heal" / "ghost--20260722T000000Z.json").exists()   # untouched, not moved
+
+
+def test_do_heal_approve_rejects_empty_new_steps(cc):
+    _write_flow(cc, "login")
+    _write_heal(cc, "login--20260722T000000Z.json", flow="login", new_steps=[])
+    result = cc.do_qa_action({"action": "heal-approve", "file": "login--20260722T000000Z.json"})
+    assert result["ok"] is False
+    assert not (cc.QA_DIR / "heal" / "approved" / "login--20260722T000000Z.json").exists()
+
+
+def test_do_heal_approve_rejects_bad_action_in_new_steps(cc):
+    fd = _write_flow(cc, "login")
+    (fd / "steps.json").write_text("[]")   # pre-existing — proves it's untouched on failure
+    _write_heal(cc, "login--20260722T000000Z.json", flow="login",
+                new_steps=[{"action": "detonate", "selector": "#x"}])
+    result = cc.do_qa_action({"action": "heal-approve", "file": "login--20260722T000000Z.json"})
+    assert result["ok"] is False
+    assert (fd / "steps.json").read_text() == "[]"
+
+
+def test_do_heal_approve_refuses_malformed_candidate_json(cc):
+    _write_flow(cc, "login")
+    p = cc.QA_DIR / "heal" / "login--20260722T000000Z.json"
+    p.parent.mkdir(parents=True)
+    p.write_text("{not valid json")
+    result = cc.do_qa_action({"action": "heal-approve", "file": "login--20260722T000000Z.json"})
+    assert result["ok"] is False
+    assert p.exists()   # untouched, not moved — approve of malformed is refused
+
+
+def test_do_heal_reject_requires_reason_and_leaves_file_untouched(cc):
+    p = _write_heal(cc, "login--20260722T000000Z.json")
+    result = cc.do_qa_action({"action": "heal-reject",
+                              "file": "login--20260722T000000Z.json", "reason": ""})
+    assert result["ok"] is False
+    assert p.exists()
+
+
+def test_do_heal_reject_stamps_reason_and_moves_to_rejected(cc):
+    p = _write_heal(cc, "login--20260722T000000Z.json", flow="login")
+    result = cc.do_qa_action({"action": "heal-reject", "file": "login--20260722T000000Z.json",
+                              "reason": "not a real drift, revert"})
+    assert result["ok"] is True
+    assert not p.exists()
+    archived = json.loads((cc.QA_DIR / "heal" / "rejected" / "login--20260722T000000Z.json").read_text())
+    assert archived["rejected_reason"] == "not a real drift, revert"
+    assert archived["flow"] == "login"   # original content preserved
+    assert "rejected_at" in archived
+
+
+def test_do_heal_reject_allows_malformed_candidate_json(cc):
+    # Reject-of-malformed is allowed — it's the operator's only way to clear
+    # junk out of the pending strip (unlike approve, which refuses it).
+    p = cc.QA_DIR / "heal" / "login--20260722T000000Z.json"
+    p.parent.mkdir(parents=True)
+    p.write_text("{not valid json")
+    result = cc.do_qa_action({"action": "heal-reject",
+                              "file": "login--20260722T000000Z.json", "reason": "junk"})
+    assert result["ok"] is True
+    assert not p.exists()
+    archived = json.loads((cc.QA_DIR / "heal" / "rejected" / "login--20260722T000000Z.json").read_text())
+    assert archived["rejected_reason"] == "junk"
+    assert "rejected_at" in archived
+
+
+@pytest.mark.parametrize("bad_file", [
+    "../x.json", "/etc/passwd.json", "sub/dir--20260722T000000Z.json",
+    "no-timestamp-suffix.json", "UPPER--20260722T000000Z.json",
+])
+def test_heal_actions_reject_unsafe_or_malshaped_filenames(cc, bad_file):
+    d = cc.QA_DIR / "heal"
+    d.mkdir(parents=True)
+    before = sorted(str(p.relative_to(d)) for p in d.rglob("*") if p.is_file())
+
+    approve = cc.do_qa_action({"action": "heal-approve", "file": bad_file})
+    assert approve["ok"] is False
+
+    reject = cc.do_qa_action({"action": "heal-reject", "file": bad_file, "reason": "x"})
+    assert reject["ok"] is False
+
+    after = sorted(str(p.relative_to(d)) for p in d.rglob("*") if p.is_file())
+    assert before == after   # nothing created, moved, or touched under heal/
