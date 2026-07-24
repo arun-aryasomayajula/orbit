@@ -607,6 +607,9 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
   <!-- ── QA (Task 23) — taught flows, run-now, recent verdicts ── -->
   <section class="view" id="view-qa">
     <h2>QA <span class=aside>taught flows — replay verdicts, recent runs</span></h2>
+    <div style="margin:10px 0">
+      <button class="btn btn-go btn-mini" title="replay every approved flow (one with a steps.json — replay-proven at least once) right now, capped by qa.regression.max_flows_per_run — ignores the cursor" onclick="sweepFlows()">🧹 Sweep flows now</button>
+    </div>
     <div id="qaBody"></div>
   </section>
 
@@ -1256,6 +1259,10 @@ function qaVerdictBadge(v){
 function runFlow(name){
   if(!name)return;
   post('/qa-action',{action:'run-flow',flow:name});
+}
+function sweepFlows(){
+  if(confirm('Sweep all approved flows now?\n\nReplays every taught flow that has a steps.json (replay-proven at least once), capped by qa.regression.max_flows_per_run. Runs in the background — check Recent runs shortly.'))
+    post('/qa-action',{action:'run-regression'});
 }
 function qaFlowRow(f){
   const runs=f.runs==null?0:f.runs;

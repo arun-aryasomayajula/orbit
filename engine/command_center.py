@@ -1411,12 +1411,24 @@ def do_qa_action(payload: dict) -> dict:
     <target> --flow <name>` DETACHED (do_epic_action's Popen pattern),
     logging to $AP_STATE/logs/qa-run-<name>.log. heal-approve/heal-reject
     (Task 26) close the self-healing loop — see _do_heal_approve/
-    _do_heal_reject, which mirror do_calibration_action's precedent."""
+    _do_heal_reject, which mirror do_calibration_action's precedent.
+    run-regression (Task 27) joins run-flow: a detached spawn of `qa_run.py
+    <target> --regression` — no flow param, and deliberately no
+    --if-changed (a human click means "sweep now", unconditionally; the
+    cursor/cadence gating is the run.sh loop hook's own concern) — logged to
+    $AP_STATE/logs/qa-regression.log."""
     action = (payload.get("action") or "").strip()
     if action == "heal-approve":
         return _do_heal_approve((payload.get("file") or "").strip())
     if action == "heal-reject":
         return _do_heal_reject((payload.get("file") or "").strip(), payload.get("reason") or "")
+    if action == "run-regression":
+        log = LOGDIR / "qa-regression.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("ab") as lf:
+            subprocess.Popen([sys.executable, str(ENGINE / "qa_run.py"), str(REPO), "--regression"],
+                             stdout=lf, stderr=lf, stdin=subprocess.DEVNULL, start_new_session=True)
+        return {"ok": True, "msg": "regression sweep started"}
     flow = (payload.get("flow") or "").strip()
     if action != "run-flow":
         return {"ok": False, "msg": f"unknown qa action '{action}'"}

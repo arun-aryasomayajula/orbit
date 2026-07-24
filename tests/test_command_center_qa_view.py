@@ -294,6 +294,28 @@ def test_do_qa_action_rejects_unknown_flow_and_never_spawns(cc, monkeypatch):
     assert calls == []
 
 
+def test_do_qa_action_run_regression_spawns_detached_popen_with_right_argv(cc, monkeypatch):
+    # Task 27: a human "sweep flows now" click — no flow param, and no
+    # --if-changed (that gating is the run.sh loop hook's own concern; a
+    # human click always means "now").
+    calls = []
+
+    class FakePopen:
+        def __init__(self, argv, **kw):
+            calls.append((argv, kw))
+
+    monkeypatch.setattr(cc.subprocess, "Popen", FakePopen)
+    result = cc.do_qa_action({"action": "run-regression"})
+
+    assert result == {"ok": True, "msg": "regression sweep started"}
+    assert len(calls) == 1
+    argv, kw = calls[0]
+    assert argv == [sys.executable, str(cc.ENGINE / "qa_run.py"), str(cc.REPO), "--regression"]
+    assert "--if-changed" not in argv
+    assert kw.get("start_new_session") is True
+    assert (cc.LOGDIR / "qa-regression.log").exists()
+
+
 def test_do_qa_action_rejects_unknown_action(cc, monkeypatch):
     calls = []
     monkeypatch.setattr(cc.subprocess, "Popen", lambda *a, **k: calls.append((a, k)))

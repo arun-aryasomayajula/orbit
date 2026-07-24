@@ -212,6 +212,14 @@ one_iteration() {
   # re-escalate into the operator inbox.
   python3 "$ENGINE/autoclose.py" >>"$LOGDIR/orbit.log" 2>&1 || log "WARN: autoclose failed"
   python3 "$ENGINE/knowledge.py" "$TARGET" autorefresh --quiet >>"$LOGDIR/orbit.log" 2>&1 || log "WARN: knowledge autorefresh failed"
+  # Regression sweep (Task 27): cursor-triggered replay of every approved taught
+  # flow (steps.json-bearing). qa_run.py's own --regression --if-changed posture
+  # is silent-exit-0 fast whenever there's nothing to do (no qa: block at all,
+  # unchanged trunk/cadence, or a sweep already running) — this line can never
+  # break the loop: any nonzero exit (a failed flow, a bad qa.flows_dir, a crash)
+  # just logs a WARN and the iteration continues, exactly like every other
+  # best-effort hook here.
+  python3 "$ENGINE/qa_run.py" "$TARGET" --regression --if-changed >>"$LOGDIR/orbit.log" 2>&1 || log "WARN: regression sweep failed"
   python3 "$ENGINE/backlog_to_tasks.py" >>"$LOGDIR/orbit.log" 2>&1 || log "WARN: backlog→queue refresh failed"
   if [ -f "$STATE/AUTO_PROMOTE" ] && [ "$(count_pickable)" = "0" ]; then
     log "auto-feed: promoting next safe task"

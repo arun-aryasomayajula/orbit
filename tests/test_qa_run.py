@@ -22,6 +22,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -439,3 +440,373 @@ def test_mcp_config_override_skips_autogen(tmp_path):
     generated = r / ".autopilot" / "state" / "qa" / "mcp-run-flow-login-flow.json"
     assert not generated.exists()
     assert mcp_log.read_text() == "/tmp/custom-mcp.json"
+
+
+# ===========================================================================
+# --regression (Task 27): cursor-triggered sweeps of the taught-flow library
+# ===========================================================================
+
+def _now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _iso_hours_ago(hours):
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def qa_cfg_with_regression(on_merge=True, schedule_hours=24, max_flows_per_run=10,
+                           timeout_seconds=None):
+    lines = [
+        "qa:",
+        '  base_url: "http://example.test/app"',
+        "  regression:",
+        f"    on_merge: {str(bool(on_merge)).lower()}",
+        f"    schedule_hours: {schedule_hours}",
+        f"    max_flows_per_run: {max_flows_per_run}",
+    ]
+    if timeout_seconds is not None:
+        lines.append(f"  timeout_seconds: {timeout_seconds}")
+    return "\n".join(lines) + "\n"
+
+
+def approve(flow_dir):
+    """Marks a taught flow "approved" (replay-proven) — a bare steps.json is
+    all _select_regression_flows checks for; its own shape is irrelevant to
+    selection."""
+    (flow_dir / "steps.json").write_text("[]")
+
+
+def run_regression(repo_path, if_changed=False, run_cmd=None, extra_argv=(), timeout=30):
+    env = dict(os.environ)
+    env.pop("ORBIT_QA_RUN_CMD", None)
+    if run_cmd:
+        env["ORBIT_QA_RUN_CMD"] = run_cmd
+    argv = [sys.executable, str(QA_RUN), str(repo_path), "--regression"]
+    if if_changed:
+        argv.append("--if-changed")
+    argv += list(extra_argv)
+    return subprocess.run(argv, capture_output=True, text=True, env=env, timeout=timeout)
+
+
+def fake_agent_by_flow(tmp_path, verdicts, name="fake_regression_agent"):
+    """Per-invocation fake ORBIT_QA_RUN_CMD covering MULTIPLE flows in one
+    sweep: `verdicts` maps flow name -> verdict dict, read back via FLOW_NAME
+    at the fake's OWN runtime (mirrors fake_agent's env-driven flow lookup —
+    this is the multi-flow analog, since one qa_run.py --regression process
+    invokes the SAME override once per selected flow). A flow with no entry
+    gets a default clean 'pass' — keeps selection/cap/pruning tests, which
+    don't care about verdict content, terse."""
+    default = {"verdict": "pass", "failed_step": None, "screenshot": None,
+               "summary": "ok", "healed_candidate": None}
+    script = tmp_path / f"{name}.py"
+    script.write_text(textwrap.dedent(f"""\
+        import json, os
+        from datetime import datetime, timezone
+        from pathlib import Path
+        flow = os.environ["FLOW_NAME"]
+        ap_state = Path(os.environ["AP_STATE"])
+        verdicts = {verdicts!r}
+        default = {default!r}
+        v = dict(verdicts.get(flow, default))
+        v.setdefault("flow", flow)
+        (ap_state / "qa" / "runs").mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S.%fZ")
+        (ap_state / "qa" / "runs" / f"{{ts}}-{{flow}}.json").write_text(json.dumps(v))
+        """))
+    return f"{sys.executable} {script}"
+
+
+def write_cursor(r, base_sha=None, markers_line_count=0, swept_at=None):
+    cursor_path = r / ".autopilot" / "state" / "qa" / ".regression-cursor"
+    cursor_path.parent.mkdir(parents=True, exist_ok=True)
+    cursor_path.write_text(json.dumps({"base_sha": base_sha, "markers_line_count": markers_line_count,
+                                        "swept_at": swept_at}))
+    return cursor_path
+
+
+def read_cursor(r):
+    return json.loads((r / ".autopilot" / "state" / "qa" / ".regression-cursor").read_text())
+
+
+def write_markers(r, n):
+    p = r / ".autopilot" / "state" / "merge_markers.jsonl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("".join(
+        json.dumps({"at": "2026-01-01T00:00:00Z", "sha": "x", "task_id": str(i)}) + "\n"
+        for i in range(n)))
+    return p
+
+
+def write_lock(r, age_seconds=0):
+    lock_path = r / ".autopilot" / "state" / "qa" / ".qa-running"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(json.dumps({"pid": 999999, "started_at": "2020-01-01T00:00:00Z"}))
+    if age_seconds:
+        t = time.time() - age_seconds
+        os.utime(lock_path, (t, t))
+    return lock_path
+
+
+def make_run_files(r, n):
+    runs_dir = r / ".autopilot" / "state" / "qa" / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    paths = []
+    base = time.time() - n
+    for i in range(n):
+        p = runs_dir / f"run-{i:04d}.json"
+        p.write_text(json.dumps({"flow": "x", "verdict": "pass", "failed_step": None,
+                                  "screenshot": None, "summary": "", "healed_candidate": None}))
+        t = base + i
+        os.utime(p, (t, t))
+        paths.append(p)
+    return paths
+
+
+def init_git(r, base_branch="main"):
+    """A minimal real git repo AT the target dir itself (config's default
+    `repo: "."`), with a `refs/remotes/origin/<base_branch>` ref set locally
+    via `update-ref` — no actual remote or fetch needed, `git rev-parse
+    --verify origin/<base_branch>` resolves against this ref exactly like a
+    real fetched one would (see engine/qa_run.py's `_current_base_sha`).
+    Returns the sha."""
+    subprocess.run(["git", "init", "-q"], cwd=r, check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=r, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=r, check=True)
+    (r / "README.md").write_text("x\n")
+    subprocess.run(["git", "add", "README.md"], cwd=r, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=r, check=True)
+    sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=r,
+                         capture_output=True, text=True, check=True).stdout.strip()
+    subprocess.run(["git", "update-ref", f"refs/remotes/origin/{base_branch}", sha], cwd=r, check=True)
+    return sha
+
+
+def move_trunk(r, base_branch="main"):
+    """A new commit + move the fake origin/<base_branch> ref onto it —
+    simulates a merge landing without any real remote/fetch machinery."""
+    (r / f"change-{time.time()}.txt").write_text("change\n")
+    subprocess.run(["git", "add", "-A"], cwd=r, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "change"], cwd=r, check=True)
+    sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=r,
+                         capture_output=True, text=True, check=True).stdout.strip()
+    subprocess.run(["git", "update-ref", f"refs/remotes/origin/{base_branch}", sha], cwd=r, check=True)
+    return sha
+
+
+# --- selection / cap -------------------------------------------------------
+
+def test_regression_only_sweeps_approved_flows_with_steps_json(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_regression())
+    approved = teach_flow(r, name="approved-flow")
+    approve(approved)
+    unapproved = teach_flow(r, name="taught-only")
+    agent = fake_agent_by_flow(tmp_path, {"approved-flow": {
+        "verdict": "pass", "failed_step": None, "screenshot": None,
+        "summary": "ok", "healed_candidate": None}})
+    result = run_regression(r, run_cmd=agent)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert meta(approved)["runs"] == 1
+    assert meta(unapproved)["runs"] == 0     # never swept — no steps.json
+
+
+def test_regression_cap_enforced_with_dropped_log_line(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_regression(max_flows_per_run=2))
+    dirs = {}
+    for name in ("flow-a", "flow-b", "flow-c"):
+        d = teach_flow(r, name=name)
+        approve(d)
+        dirs[name] = d
+    agent = fake_agent_by_flow(tmp_path, {})   # everything defaults to pass
+    result = run_regression(r, run_cmd=agent)
+    assert result.returncode == 0, result.stdout + result.stderr
+    out = result.stdout + result.stderr
+    assert "dropped" in out.lower()
+    assert "flow-c" in out                      # sorted by name -> a, b swept, c dropped
+    assert meta(dirs["flow-a"])["runs"] == 1
+    assert meta(dirs["flow-b"])["runs"] == 1
+    assert meta(dirs["flow-c"])["runs"] == 0
+
+
+# --- exit codes -------------------------------------------------------------
+
+def test_regression_exit_3_when_any_flow_fails(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_regression())
+    ok_dir = teach_flow(r, name="flow-ok")
+    approve(ok_dir)
+    bad_dir = teach_flow(r, name="flow-bad")
+    approve(bad_dir)
+    agent = fake_agent_by_flow(tmp_path, {
+        "flow-ok": {"verdict": "pass", "failed_step": None, "screenshot": None,
+                    "summary": "ok", "healed_candidate": None},
+        "flow-bad": {"verdict": "fail", "failed_step": 1, "screenshot": "x.png",
+                     "summary": "broke", "healed_candidate": None},
+    })
+    result = run_regression(r, run_cmd=agent)
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "1 fail" in result.stdout
+    assert meta(ok_dir)["last_verdict"] == "pass"
+    assert meta(bad_dir)["last_verdict"] == "fail"
+
+
+# --- locking ------------------------------------------------------------
+
+def test_regression_fresh_lock_exits_0_without_sweeping(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_regression(timeout_seconds=5))
+    flow_dir = teach_flow(r, name="approved-flow")
+    approve(flow_dir)
+    write_lock(r, age_seconds=0)
+    agent = fake_agent_by_flow(tmp_path, {})
+    result = run_regression(r, run_cmd=agent)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "already running" in (result.stdout + result.stderr).lower()
+    assert meta(flow_dir)["runs"] == 0            # agent never invoked
+
+
+def test_regression_stale_lock_is_replaced_and_sweep_runs(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_regression(timeout_seconds=5))
+    flow_dir = teach_flow(r, name="approved-flow")
+    approve(flow_dir)
+    write_lock(r, age_seconds=9999)
+    agent = fake_agent_by_flow(tmp_path, {})
+    result = run_regression(r, run_cmd=agent)
+    assert result.returncode == 0, result.stdout + result.stderr
+    out = (result.stdout + result.stderr).lower()
+    assert "stale" in out and "replac" in out
+    assert meta(flow_dir)["runs"] == 1             # sweep actually ran this time
+    lock_path = r / ".autopilot" / "state" / "qa" / ".qa-running"
+    assert not lock_path.exists()                  # released after
+
+
+def test_regression_lock_removed_after_a_failing_sweep(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_regression())
+    flow_dir = teach_flow(r, name="approved-flow")
+    approve(flow_dir)
+    agent = fake_agent_by_flow(tmp_path, {"approved-flow": {
+        "verdict": "fail", "failed_step": 1, "screenshot": "x.png",
+        "summary": "broke", "healed_candidate": None}})
+    result = run_regression(r, run_cmd=agent)
+    assert result.returncode == 3, result.stdout + result.stderr
+    lock_path = r / ".autopilot" / "state" / "qa" / ".qa-running"
+    assert not lock_path.exists()
+
+
+# --- pruning ---------------------------------------------------------------
+
+def test_regression_prunes_runs_dir_to_newest_200(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_regression())
+    files = make_run_files(r, 205)
+    result = run_regression(r)
+    assert result.returncode == 0, result.stdout + result.stderr
+    runs_dir = r / ".autopilot" / "state" / "qa" / "runs"
+    remaining = sorted(p.name for p in runs_dir.iterdir())
+    assert len(remaining) == 200
+    # the 5 oldest (run-0000..run-0004) must be gone; the newest must remain
+    for i in range(5):
+        assert f"run-{i:04d}.json" not in remaining
+    assert "run-0204.json" in remaining
+    assert "pruned" in (result.stdout + result.stderr).lower()
+
+
+# --- no qa: block --------------------------------------------------------
+
+def test_regression_no_qa_block_with_if_changed_is_silent_exit_0(tmp_path):
+    r = repo(tmp_path, extra_cfg="")     # no qa: block at all
+    result = run_regression(r, if_changed=True)
+    assert result.returncode == 0
+    assert result.stdout == "" and result.stderr == ""
+
+
+def test_regression_no_qa_block_without_if_changed_is_loud_exit_2(tmp_path):
+    # The human-click path ("sweep now", no --if-changed) keeps the SAME
+    # loud manual-CLI posture as --flow — only the automated --if-changed
+    # hook gets the silent fast exit (loop-safety ordering exception).
+    r = repo(tmp_path, extra_cfg="")
+    result = run_regression(r, if_changed=False)
+    assert result.returncode == 2
+    assert "qa:" in (result.stdout + result.stderr)
+
+
+# --- --if-changed: cursor + cadence + on_merge ------------------------------
+
+def test_if_changed_fresh_cursor_unchanged_cadence_off_fast_exits(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_regression(on_merge=True, schedule_hours=0))
+    sha = init_git(r)
+    write_cursor(r, base_sha=sha, markers_line_count=0, swept_at=_now())
+    flow_dir = teach_flow(r, name="approved-flow")
+    approve(flow_dir)
+    agent = fake_agent_by_flow(tmp_path, {})
+    result = run_regression(r, if_changed=True, run_cmd=agent)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert meta(flow_dir)["runs"] == 0              # agent NOT invoked
+    assert read_cursor(r)["base_sha"] == sha        # cursor untouched
+
+
+def test_if_changed_trunk_sha_moved_sweeps_and_rewrites_cursor(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_regression(on_merge=True, schedule_hours=0))
+    sha1 = init_git(r)
+    write_cursor(r, base_sha=sha1, markers_line_count=0, swept_at=_now())
+    flow_dir = teach_flow(r, name="approved-flow")
+    approve(flow_dir)
+    sha2 = move_trunk(r)
+    assert sha2 != sha1
+    agent = fake_agent_by_flow(tmp_path, {})
+    result = run_regression(r, if_changed=True, run_cmd=agent)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert meta(flow_dir)["runs"] == 1
+    cur = read_cursor(r)
+    assert cur["base_sha"] == sha2
+    assert cur["swept_at"]
+
+
+def test_if_changed_markers_line_count_grew_sweeps(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_regression(on_merge=True, schedule_hours=0))
+    write_markers(r, 2)
+    write_cursor(r, base_sha=None, markers_line_count=2, swept_at=_now())
+    flow_dir = teach_flow(r, name="approved-flow")
+    approve(flow_dir)
+    write_markers(r, 3)                            # a new merge marker landed
+    agent = fake_agent_by_flow(tmp_path, {})
+    result = run_regression(r, if_changed=True, run_cmd=agent)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert meta(flow_dir)["runs"] == 1
+    assert read_cursor(r)["markers_line_count"] == 3
+
+
+def test_if_changed_schedule_hours_elapsed_sweeps(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_regression(on_merge=True, schedule_hours=24))
+    old = _iso_hours_ago(100)
+    write_cursor(r, base_sha=None, markers_line_count=0, swept_at=old)
+    flow_dir = teach_flow(r, name="approved-flow")
+    approve(flow_dir)
+    agent = fake_agent_by_flow(tmp_path, {})
+    result = run_regression(r, if_changed=True, run_cmd=agent)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert meta(flow_dir)["runs"] == 1
+    assert read_cursor(r)["swept_at"] != old
+
+
+def test_if_changed_schedule_hours_zero_cadence_never_fires(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_regression(on_merge=True, schedule_hours=0))
+    old = _iso_hours_ago(100000)                    # absurdly old — would fire at ANY nonzero cadence
+    write_cursor(r, base_sha=None, markers_line_count=0, swept_at=old)
+    flow_dir = teach_flow(r, name="approved-flow")
+    approve(flow_dir)
+    agent = fake_agent_by_flow(tmp_path, {})
+    result = run_regression(r, if_changed=True, run_cmd=agent)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert meta(flow_dir)["runs"] == 0
+    assert read_cursor(r)["swept_at"] == old         # untouched — never swept
+
+
+def test_if_changed_on_merge_false_ignores_sha_move(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_regression(on_merge=False, schedule_hours=0))
+    sha1 = init_git(r)
+    write_cursor(r, base_sha=sha1, markers_line_count=0, swept_at=_now())
+    flow_dir = teach_flow(r, name="approved-flow")
+    approve(flow_dir)
+    move_trunk(r)                                    # trunk moved, but on_merge is off
+    agent = fake_agent_by_flow(tmp_path, {})
+    result = run_regression(r, if_changed=True, run_cmd=agent)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert meta(flow_dir)["runs"] == 0
+    assert read_cursor(r)["base_sha"] == sha1        # untouched — sha move ignored
