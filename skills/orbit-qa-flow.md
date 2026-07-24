@@ -25,11 +25,12 @@ actions yourself; the engine never parses TS). `mkdir -p "$AP_STATE/qa/runs"
 
 ## 1. Bring the product up (or attach)
 Orbit-qa-check discipline, verbatim: `qa.services` configured → you launch
-each in order, log to `$AP_STATE/qa/flow-$FLOW_NAME/<name>.log`, poll `ready`;
-any service that never comes up is **unable**, never a failure — kill what
-you started and write the honest verdict (step 6). Only `base_url` → attach
-to what's already running. You MUST kill every process you started before
-exiting, on every exit path.
+each in order from its `cwd` (default `.`) with `qa.env` exported, log to
+`$AP_STATE/qa/flow-$FLOW_NAME/<name>.log`, poll `ready` until HTTP 200 or
+`ready_timeout_seconds` elapses; any service that never comes up in time is
+**unable**, never a failure — kill what you started and write the honest
+verdict (step 6). Only `base_url` → attach to what's already running. You
+MUST kill every process you started before exiting, on every exit path.
 
 ## 2. Replay
 Execute the steps in order via `mcp__playwright__*` against `qa.base_url`,
@@ -67,8 +68,9 @@ intent is achieved, regardless of whether every step ran exactly as written.
   had to guess, it is NOT a heal — call it a fail instead.
 - **fail** — intent NOT achievable: an app bug. Append ONE row to
   `ops/qa/SEEN.md` (create with a header if missing) —
-  `| date | page | type | signature | severity |`, `page` = the flow name,
-  `type=bug`, `signature = "flow <name> broke at <step>: <symptom>"`,
+  `| date | page | type | signature | severity |`: `page` = the page URL
+  where the flow broke (fall back to the flow name if no distinct URL
+  applies), `type=bug`, `signature = "flow <name> broke at <step>: <symptom>"`,
   `severity=high` — and screenshot the failure state.
 - **unable** — the environment (not the code) prevented the attempt.
 
@@ -91,10 +93,12 @@ touch it again on later runs (a heal candidate is how it ever gets updated).
  "failed_step": <int index or null>, "screenshot": "<relative or null>",
  "summary": "<one line>", "healed_candidate": "<heal-file name or null>"}
 ```
+- `failed_step` is `null` for `pass`/`healed`/`unable`. For `fail` it is the
+  ZERO-BASED index into the executed step list — the step that broke.
 - `verdict: "healed"` REQUIRES the heal candidate file already written (step
   4) and `healed_candidate` names it — never a bare claim.
-- `verdict: "fail"` REQUIRES `failed_step` (the index it broke at) AND a
-  `screenshot` of the failure — never fail on a hunch.
+- `verdict: "fail"` REQUIRES `failed_step` set AND a `screenshot` of the
+  failure — never fail on a hunch.
 - `verdict: "unable"` NEVER pairs with a `failed_step` — the environment, not
   a step, is what gave out.
 - Precedence: a decisively-failed intent beats later environment trouble
@@ -115,9 +119,8 @@ touch it again on later runs (a heal candidate is how it ever gets updated).
 - Always kill every service you launched, on every exit path.
 - Unrelated bugs you notice mid-replay → `ops/qa/SEEN.md` only; they never
   change this run's verdict.
-- One equivalent-path attempt per step, max — drift means OBVIOUSLY
-  equivalent (a renamed label, a moved element with the same visible
-  purpose). When in doubt, it's a fail, not a heal.
+- One equivalent-path attempt per step, max (step 2) — when in doubt whether
+  it was OBVIOUSLY equivalent, it's a fail, not a heal.
 
 ## Clean up and exit
 Kill every process you started; leave the worktree exactly as you found it —
