@@ -4,7 +4,9 @@
 its verdict into the flow's own library metadata. Also `--regression
 [--if-changed]` (Task 27): a cursor-triggered sweep of every APPROVED flow
 (taught AND replay-proven — see "Regression sweeps" below), sequentially,
-through the exact same per-flow path as `--flow`.
+through the exact same per-flow path as `--flow`. Also `--explore` (Task 29):
+an opt-in, bounded, same-origin exploratory crawl from `qa.base_url` via the
+`/orbit-qa-explore` skill — see "Exploratory crawls" below.
 
 Manual-CLI posture (loud failures) — unlike qa_check.py's loop gate (which
 never blocks a ship on a wiring mistake), an operator running `orbit qa`
@@ -155,21 +157,58 @@ Exit codes (--regression): see "Regression sweeps" above — 0 no fails / lock
 busy / not due, 3 any fail, 1 infra crash, 2 usage (bad flows_dir, or no
 `qa:` block on a non-`--if-changed` invocation).
 
+Exploratory crawls (Task 29, `--explore`): opt-in (`qa.exploratory.enabled`,
+default false — Task 25) bounded, same-origin browser walk from
+`qa.base_url` via `/orbit-qa-explore` (skills/orbit-qa-explore.md), capped by
+`qa.exploratory.max_pages`. Manual-CLI / dashboard trigger only — no
+`--if-changed` variant, no run.sh wiring; a human (or a dashboard click)
+decides when to explore. `qa.exploratory.enabled` is not true (including no
+`qa:` block at all) → exit 2, loud, agent never invoked — same posture as
+`--flow`'s own missing-`qa:`-block check. Enabled → invokes the skill exactly
+once via `_run_explore_agent` (mirrors `_run_flow_agent`; reuses the SAME
+ORBIT_QA_RUN_CMD test hook — the explore skill takes no argument to
+substitute per-invocation the way a flow name does, so there's no reason for
+a second override name), then locates the newest
+`$AP_STATE/qa/explore-<UTC-ts>.json` with mtime >= this run's start (stale-
+file discipline mirrors `_locate_verdict`, minus the flow-name identity
+check — there's only one kind of explore result, never one scoped per name)
+and shape-validates it (`pages_visited`/`new_rows` non-negative ints,
+`summary` a string). Missing or malformed → exit 1, loud. Valid → print
+"pages visited / new rows / summary", exit 0.
+
+Locking: shares Task 27's `.qa-running` lock with `--regression` — both
+drive a real browser against the same `qa.base_url`, so a concurrent sweep
+and a concurrent explore must never run at once. A busy (fresh) lock is the
+SAME benign "already running" skip `--regression` uses (exit 0, agent never
+invoked), not a loud failure — one shared lock file is what actually keeps
+the two from overlapping. Released in a `finally`, ownership-checked, exactly
+like `--regression`'s own lock (see `_acquire_lock`/`_release_lock` above).
+
+Exit codes (--explore): 0 crawl completed (counts echoed) or lock busy
+("already running", benign skip, agent never invoked); 1 no result found /
+malformed result / agent could not be launched or finished; 2 usage
+(`qa.exploratory.enabled` not true, including no `qa:` block at all, or
+`--if-changed`/`--flow`/`--regression` combined with `--explore`).
+
 Config (`.autopilot/config.yaml`, see config/schema.yaml's `qa:` block):
     qa.flows_dir (default "qa/flows"), qa.mcp_config, qa.browser,
     qa.headless, qa.model, qa.timeout_seconds, qa.permission_mode (via the
     top-level `permission_mode`, same key qa_check.py reads), qa.regression
-    (on_merge/schedule_hours/max_flows_per_run — Task 25, see above).
+    (on_merge/schedule_hours/max_flows_per_run — Task 25, see above),
+    qa.exploratory (enabled/max_pages — Task 25, see above).
 
 Test hook: ORBIT_QA_RUN_CMD replaces the `claude --print /orbit-qa-flow ...`
-call verbatim — same substitution mechanism as ORBIT_QA_CMD/ORBIT_RUNTIME_CMD/
-ORBIT_CODEGEN_CMD, its OWN name so a fake can tell this hook apart from
-qa_check.py's loop-gate ORBIT_QA_CMD. AP_HOME/AP_STATE/ORBIT_HOME/FLOW_NAME
-(and QA_MCP_CONFIG, regardless of override, same reasoning as qa_check.py)
-are exported into the child's env either way.
+(or, for --explore, `/orbit-qa-explore`) call verbatim — same substitution
+mechanism as ORBIT_QA_CMD/ORBIT_RUNTIME_CMD/ORBIT_CODEGEN_CMD, its OWN name
+so a fake can tell this hook apart from qa_check.py's loop-gate
+ORBIT_QA_CMD. AP_HOME/AP_STATE/ORBIT_HOME/FLOW_NAME (and QA_MCP_CONFIG,
+regardless of override, same reasoning as qa_check.py) are exported into the
+child's env either way (FLOW_NAME is naturally absent for --explore — there
+is no flow name to export).
 
 Usage: qa_run.py <target> --flow <name> [--timeout N]
        qa_run.py <target> --regression [--if-changed] [--timeout N]
+       qa_run.py <target> --explore [--timeout N]
 """
 from __future__ import annotations
 
@@ -220,7 +259,8 @@ LOCK_STALE_MARGIN_SECONDS = 60
 SWEEP_DEADLINE_MULTIPLIER = 2
 
 USAGE = ("usage: qa_run.py <target> --flow <name> [--timeout N]\n"
-         "       qa_run.py <target> --regression [--if-changed] [--timeout N]")
+         "       qa_run.py <target> --regression [--if-changed] [--timeout N]\n"
+         "       qa_run.py <target> --explore [--timeout N]")
 
 # Exit codes (manual-CLI posture — see module docstring).
 OK, ERR, FAIL, USAGE_ERR = 0, 1, 3, 2
@@ -248,8 +288,11 @@ def _load_cfg(target: Path) -> dict:
 
 def _parse_args(argv: list[str]):
     """Returns (target, mode, flow_name, if_changed, timeout_arg, error) —
-    mode is "flow" or "regression"; error is a (message, exit_code) pair, or
-    None on success."""
+    mode is "flow", "regression", or "explore" (Task 29); error is a
+    (message, exit_code) pair, or None on success. The three modes are all
+    mutually exclusive with each other; `--if-changed` only ever applies to
+    `--regression` (a human-triggered `--explore` has no automated-loop
+    variant to gate)."""
     if not argv:
         return None, None, None, False, None, (USAGE, USAGE_ERR)
     target = Path(argv[0]).resolve()
@@ -262,19 +305,25 @@ def _parse_args(argv: list[str]):
     while i < len(rest):
         tok = rest[i]
         if tok == "--flow":
-            if mode == "regression":
+            if mode in ("regression", "explore"):
                 return None, None, None, False, None, \
-                    (f"--flow and --regression are mutually exclusive ({USAGE})", USAGE_ERR)
+                    (f"--flow, --regression, and --explore are mutually exclusive ({USAGE})", USAGE_ERR)
             if i + 1 >= len(rest):
                 return None, None, None, False, None, (f"missing value for --flow ({USAGE})", USAGE_ERR)
             mode = "flow"
             flow_name = rest[i + 1]
             i += 2
         elif tok == "--regression":
-            if mode == "flow":
+            if mode in ("flow", "explore"):
                 return None, None, None, False, None, \
-                    (f"--flow and --regression are mutually exclusive ({USAGE})", USAGE_ERR)
+                    (f"--flow, --regression, and --explore are mutually exclusive ({USAGE})", USAGE_ERR)
             mode = "regression"
+            i += 1
+        elif tok == "--explore":
+            if mode in ("flow", "regression"):
+                return None, None, None, False, None, \
+                    (f"--flow, --regression, and --explore are mutually exclusive ({USAGE})", USAGE_ERR)
+            mode = "explore"
             i += 1
         elif tok == "--if-changed":
             if_changed = True
@@ -288,8 +337,8 @@ def _parse_args(argv: list[str]):
             return None, None, None, False, None, (f"unrecognized argument {tok!r} ({USAGE})", USAGE_ERR)
     if mode is None:
         return None, None, None, False, None, \
-            (f"either --flow <name> or --regression is required ({USAGE})", USAGE_ERR)
-    if mode == "flow" and if_changed:
+            (f"one of --flow <name>, --regression, or --explore is required ({USAGE})", USAGE_ERR)
+    if mode in ("flow", "explore") and if_changed:
         return None, None, None, False, None, (f"--if-changed only applies to --regression ({USAGE})", USAGE_ERR)
     if timeout_arg is not None:
         try:
@@ -942,6 +991,179 @@ def _run_regression(target: Path, ap_home: Path, cfg_all: dict, qa_cfg: dict,
 
 
 # ---------------------------------------------------------------------------
+# exploratory crawls (Task 29) — opt-in, bounded, same-origin crawl from
+# qa.base_url via /orbit-qa-explore (skills/orbit-qa-explore.md). Manual-CLI/
+# dashboard trigger only — no --if-changed variant, no run.sh wiring. Shares
+# --regression's own .qa-running lock (see module docstring's "Exploratory
+# crawls" section for why: both drive a real browser against the same
+# qa.base_url, so the two must never run concurrently).
+# ---------------------------------------------------------------------------
+
+EXPLORE_MCP_FILENAME = "mcp-run-explore.json"
+
+
+def _explore_mcp_config(qa_cfg: dict, ap_state: Path) -> Path:
+    # Same local/lazy-import reasoning as _flow_mcp_config above — qa_check.py
+    # resolves its own AP_STATE/AP_HOME globals at import time, so AP_HOME/
+    # AP_STATE must already be set to THIS run's target before it's imported.
+    import qa_check
+    output_dir = ap_state / "qa" / "explore"
+    return qa_check.build_mcp_config(qa_cfg, ap_state / "qa", output_dir, EXPLORE_MCP_FILENAME)
+
+
+def _run_explore_agent(qa_cfg: dict, cfg_all: dict, target: Path, mcp_path: Path,
+                        timeout: int, ap_home: Path, ap_state: Path) -> int | None:
+    """Same shape as _run_flow_agent (returns None on a clean launch/return,
+    or an exit code to return immediately). Reuses ORBIT_QA_RUN_CMD — the
+    explore skill's own invocation (`/orbit-qa-explore`, no argument) has no
+    per-invocation name to substitute the way a flow name does, so there's no
+    reason to invent a second override hook distinct from --flow's own."""
+    override = os.environ.get("ORBIT_QA_RUN_CMD")
+    if override:
+        cmd = shlex.split(override)
+    else:
+        claude = shutil.which("claude")
+        if not claude:
+            _err("claude not on PATH — cannot run the QA explore agent")
+            return ERR
+        cmd = [claude, "--print", "/orbit-qa-explore",
+               "--mcp-config", str(mcp_path),
+               "--settings", str(ORBIT_HOME / "config" / "orbit.qa.settings.json"),
+               "--permission-mode", cfg_all.get("permission_mode", "acceptEdits"),
+               "--model", qa_cfg.get("model", DEFAULT_MODEL),
+               "--add-dir", str(ORBIT_HOME)]
+    env = dict(os.environ, AP_HOME=str(ap_home), AP_STATE=str(ap_state),
+               ORBIT_HOME=str(ORBIT_HOME), QA_MCP_CONFIG=str(mcp_path))
+    try:
+        subprocess.run(cmd, cwd=str(target), env=env, timeout=timeout,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       stdin=subprocess.DEVNULL)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        _err(f"QA explore agent failed: {e}")
+        return ERR
+    return None
+
+
+def _locate_explore_result(ap_state: Path, start: float) -> Path | None:
+    """Newest $AP_STATE/qa/explore-*.json with mtime >= start — mirrors
+    _locate_verdict's stale-file discipline (a leftover file from an earlier
+    run must never be mistaken for this run's own outcome). No filename-
+    identity check is needed here the way a flow's own suffix-glob needs one:
+    there is only ONE kind of explore result, never one scoped per name for a
+    sibling invocation to spoof."""
+    qa_dir = ap_state / "qa"
+    if not qa_dir.is_dir():
+        return None
+    best: tuple[float, Path] | None = None
+    for p in qa_dir.glob("explore-*.json"):
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            continue
+        if mtime < start:
+            continue
+        if best is None or mtime > best[0]:
+            best = (mtime, p)
+    return best[1] if best else None
+
+
+def _validate_explore_result(r) -> str | None:
+    """None = shape is valid. Else a human-readable reason it's malformed —
+    same discipline as _validate_verdict: a wiring/agent mistake must never
+    be mistaken for a real result. `isinstance(x, bool)` is excluded from the
+    int checks — bool is a subclass of int in Python, and True/False are
+    never a legitimate page/row count."""
+    if not isinstance(r, dict):
+        return f"explore result json is a {type(r).__name__}, not an object"
+    pages = r.get("pages_visited")
+    if not isinstance(pages, int) or isinstance(pages, bool) or pages < 0:
+        return f"pages_visited {pages!r} is not a non-negative integer"
+    rows = r.get("new_rows")
+    if not isinstance(rows, int) or isinstance(rows, bool) or rows < 0:
+        return f"new_rows {rows!r} is not a non-negative integer"
+    if not isinstance(r.get("summary"), str):
+        return f"summary {r.get('summary')!r} is not a string"
+    return None
+
+
+def _run_explore(target: Path, ap_home: Path, cfg_all: dict, qa_cfg, timeout_arg: int | None) -> int:
+    """--explore (Task 29): opt-in (`qa.exploratory.enabled`) crawl via
+    /orbit-qa-explore. No `qa:` block at all, or `qa.exploratory.enabled`
+    anything other than `true`, is a loud usage error (exit 2, agent never
+    invoked) — same manual-CLI posture as --flow's own missing-`qa:`-block
+    check, never silently skipped the way --regression --if-changed's
+    loop-safety exception is.
+
+    Shares --regression's own `.qa-running` lock (Task 27): both drive a
+    real browser against the same qa.base_url, so the two must never run at
+    once. A busy (fresh) lock is the SAME benign "already running" skip
+    --regression's own lock-busy path uses (exit 0, agent never invoked),
+    not a loud failure — one shared lock file is what actually keeps a
+    concurrent sweep and a concurrent explore from overlapping. Released in
+    a `finally`, ownership-checked, exactly like --regression's lock."""
+    if not isinstance(qa_cfg, dict):
+        _err(f"no 'qa:' block configured in {ap_home / 'config.yaml'} — "
+             f"see config/schema.yaml's qa: section and add one first")
+        return USAGE_ERR
+
+    exploratory_cfg = qa_cfg.get("exploratory")
+    exploratory_cfg = exploratory_cfg if isinstance(exploratory_cfg, dict) else {}
+    if exploratory_cfg.get("enabled") is not True:
+        _err("qa.exploratory.enabled is not true — exploratory crawling is opt-in; "
+             "set qa.exploratory.enabled: true in .autopilot/config.yaml (see "
+             "config/schema.yaml's qa.exploratory block) to turn it on")
+        return USAGE_ERR
+
+    ap_state = ap_home / "state"
+    os.environ.setdefault("AP_HOME", str(ap_home))
+    os.environ.setdefault("AP_STATE", str(ap_state))
+    os.environ.setdefault("ORBIT_HOME", str(ORBIT_HOME))
+
+    timeout_seconds = int(qa_cfg.get("timeout_seconds") or DEFAULT_TIMEOUT)
+    timeout = timeout_arg if timeout_arg is not None else timeout_seconds
+    qa_dir = ap_state / "qa"
+    lock_path = qa_dir / LOCK_NAME
+    # Same staleness-window reasoning as --regression's own lock (ONE run's
+    # timeout budget + a fixed margin) — a single explore invocation is one
+    # agent call, not a multi-flow sweep, so there's no per-step touch to do.
+    stale_after_seconds = timeout_seconds + LOCK_STALE_MARGIN_SECONDS
+    if not _acquire_lock(lock_path, stale_after_seconds):
+        print("explore: a QA sweep/explore is already running — skipping this run")
+        return OK
+
+    try:
+        mcp_path = _explore_mcp_config(qa_cfg, ap_state)
+        start = time.time()
+        launch_rc = _run_explore_agent(qa_cfg, cfg_all, target, mcp_path, timeout, ap_home, ap_state)
+        if launch_rc is not None:
+            return launch_rc
+
+        result_path = _locate_explore_result(ap_state, start)
+        if result_path is None:
+            _err(f"no explore result found under {qa_dir} written since this run started — "
+                 f"the QA explore agent never wrote one")
+            return ERR
+
+        try:
+            r = json.loads(result_path.read_text())
+        except (OSError, ValueError) as e:
+            _err(f"could not read the explore result at {result_path} ({e})")
+            return ERR
+
+        reason = _validate_explore_result(r)
+        if reason:
+            _err(f"malformed explore result at {result_path}: {reason}")
+            return ERR
+
+        summary = (r.get("summary") or "").strip()
+        print(f"explore: pages visited={r['pages_visited']} new rows={r['new_rows']} — "
+              f"{summary or 'crawl complete'}")
+        return OK
+    finally:
+        _release_lock(lock_path)
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
@@ -969,6 +1191,13 @@ def main(argv: list[str]) -> int:
                  f"see config/schema.yaml's qa: section and add one first")
             return USAGE_ERR
         return _run_regression(target, ap_home, cfg_all, qa_cfg, if_changed, timeout_arg)
+
+    if mode == "explore":
+        # Manual-CLI posture throughout — no loop-safety silent-skip
+        # exception here (that's --regression --if-changed's own concern);
+        # a missing/disabled qa.exploratory is always a loud exit 2, checked
+        # inside _run_explore itself.
+        return _run_explore(target, ap_home, cfg_all, qa_cfg, timeout_arg)
 
     # --- --flow path (manual-CLI posture, unchanged) ---
     if not SLUG_RE.match(flow_name):

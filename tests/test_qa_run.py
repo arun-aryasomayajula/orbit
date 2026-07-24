@@ -967,3 +967,218 @@ def test_if_changed_on_merge_false_ignores_sha_move(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert meta(flow_dir)["runs"] == 0
     assert read_cursor(r)["base_sha"] == sha1        # untouched — sha move ignored
+
+
+# ===========================================================================
+# --explore (Task 29): opt-in bounded same-origin crawl via /orbit-qa-explore
+# ===========================================================================
+
+def qa_cfg_with_exploratory(enabled=True, max_pages=10, timeout_seconds=None):
+    lines = [
+        "qa:",
+        '  base_url: "http://example.test/app"',
+        "  exploratory:",
+        f"    enabled: {str(bool(enabled)).lower()}",
+        f"    max_pages: {max_pages}",
+    ]
+    if timeout_seconds is not None:
+        lines.append(f"  timeout_seconds: {timeout_seconds}")
+    return "\n".join(lines) + "\n"
+
+
+def run_explore(repo_path, run_cmd=None, extra_argv=(), timeout=30):
+    env = dict(os.environ)
+    env.pop("ORBIT_QA_RUN_CMD", None)
+    if run_cmd:
+        env["ORBIT_QA_RUN_CMD"] = run_cmd
+    argv = [sys.executable, str(QA_RUN), str(repo_path), "--explore"]
+    argv += list(extra_argv)
+    return subprocess.run(argv, capture_output=True, text=True, env=env, timeout=timeout)
+
+
+def fake_explore_agent(tmp_path, result=None, mcp_log=None, name="fake_explore_agent",
+                        sleep_before_write=0.0):
+    """`result` (dict or None) is written as $AP_STATE/qa/explore-<UTC-ts>.json
+    — None means "write nothing" (simulates a missing result), mirroring
+    fake_agent's own verdict=None convention."""
+    lines = [
+        "import json, os, time",
+        "from datetime import datetime, timezone",
+        "from pathlib import Path",
+        'ap_state = Path(os.environ["AP_STATE"])',
+    ]
+    if mcp_log is not None:
+        lines.append(f'Path({str(mcp_log)!r}).write_text(os.environ.get("QA_MCP_CONFIG", ""))')
+    if sleep_before_write:
+        lines.append(f"time.sleep({sleep_before_write})")
+    if result is not None:
+        lines += [
+            '(ap_state / "qa").mkdir(parents=True, exist_ok=True)',
+            'ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S.%fZ")',
+            f'r = {result!r}',
+            '(ap_state / "qa" / f"explore-{ts}.json").write_text(json.dumps(r))',
+        ]
+    script = tmp_path / f"{name}.py"
+    script.write_text("\n".join(lines) + "\n")
+    return f"{sys.executable} {script}"
+
+
+# --- gating: opt-in, off by default -----------------------------------------
+
+def test_explore_disabled_exit_2_agent_not_invoked(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_exploratory(enabled=False))
+    agent = fake_explore_agent(tmp_path, {"pages_visited": 3, "new_rows": 1, "summary": "found stuff"})
+    result = run_explore(r, run_cmd=agent)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "exploratory" in (result.stdout + result.stderr).lower()
+    qa_dir = r / ".autopilot" / "state" / "qa"
+    assert not (qa_dir.is_dir() and any(qa_dir.glob("explore-*.json")))   # agent never invoked
+
+
+def test_explore_no_exploratory_block_exit_2(tmp_path):
+    r = repo(tmp_path)     # default QA_CFG has no exploratory: block at all
+    result = run_explore(r)
+    assert result.returncode == 2, result.stdout + result.stderr
+
+
+def test_explore_no_qa_block_exit_2(tmp_path):
+    r = repo(tmp_path, extra_cfg="")    # no qa: block at all
+    result = run_explore(r)
+    assert result.returncode == 2, result.stdout + result.stderr
+
+
+def test_explore_and_flow_mutually_exclusive_exit_2(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_exploratory())
+    result = subprocess.run(
+        [sys.executable, str(QA_RUN), str(r), "--explore", "--flow", "x"],
+        capture_output=True, text=True, timeout=30)
+    assert result.returncode == 2, result.stdout + result.stderr
+
+
+def test_explore_and_regression_mutually_exclusive_exit_2(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_exploratory())
+    result = subprocess.run(
+        [sys.executable, str(QA_RUN), str(r), "--regression", "--explore"],
+        capture_output=True, text=True, timeout=30)
+    assert result.returncode == 2, result.stdout + result.stderr
+
+
+def test_explore_rejects_if_changed_exit_2(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_exploratory())
+    result = subprocess.run(
+        [sys.executable, str(QA_RUN), str(r), "--explore", "--if-changed"],
+        capture_output=True, text=True, timeout=30)
+    assert result.returncode == 2, result.stdout + result.stderr
+
+
+# --- happy path: counts echoed ----------------------------------------------
+
+def test_explore_enabled_result_exit_0_echoes_counts(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_exploratory(enabled=True, max_pages=5))
+    agent = fake_explore_agent(tmp_path, {
+        "pages_visited": 4, "new_rows": 2, "summary": "found a dead link"})
+    result = run_explore(r, run_cmd=agent)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "4" in result.stdout and "2" in result.stdout
+    assert "found a dead link" in result.stdout
+
+
+def test_explore_zero_new_rows_is_a_clean_exit_0(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_exploratory())
+    agent = fake_explore_agent(tmp_path, {
+        "pages_visited": 6, "new_rows": 0, "summary": "clean crawl, nothing new"})
+    result = run_explore(r, run_cmd=agent)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "clean crawl" in result.stdout
+
+
+# --- missing / stale / malformed result -> exit 1 ---------------------------
+
+def test_explore_missing_result_exit_1(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_exploratory())
+    agent = fake_explore_agent(tmp_path, result=None)
+    result = run_explore(r, run_cmd=agent)
+    assert result.returncode == 1, result.stdout + result.stderr
+
+
+def test_explore_stale_result_ignored_exit_1(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_exploratory())
+    qa_dir = r / ".autopilot" / "state" / "qa"
+    qa_dir.mkdir(parents=True)
+    stale = qa_dir / "explore-2000-01-01T00-00-00Z.json"
+    stale.write_text(json.dumps({"pages_visited": 9, "new_rows": 9, "summary": "ancient"}))
+    old = time.time() - 3600
+    os.utime(stale, (old, old))
+    agent = fake_explore_agent(tmp_path, result=None)
+    result = run_explore(r, run_cmd=agent)
+    assert result.returncode == 1, result.stdout + result.stderr
+
+
+def test_explore_malformed_negative_pages_exit_1(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_exploratory())
+    agent = fake_explore_agent(tmp_path, {"pages_visited": -1, "new_rows": 0, "summary": "bad"})
+    result = run_explore(r, run_cmd=agent)
+    assert result.returncode == 1, result.stdout + result.stderr
+
+
+def test_explore_malformed_non_string_summary_exit_1(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_exploratory())
+    agent = fake_explore_agent(tmp_path, {"pages_visited": 1, "new_rows": 0, "summary": None})
+    result = run_explore(r, run_cmd=agent)
+    assert result.returncode == 1, result.stdout + result.stderr
+
+
+# --- MCP filename distinct (extends the Phase-4 collision-test discipline) --
+
+def test_explore_mcp_autogen_writes_explore_output_dir_and_distinct_filename(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_exploratory())
+    mcp_log = tmp_path / "mcp-explore.txt"
+    result = run_explore(r, run_cmd=fake_explore_agent(tmp_path, {
+        "pages_visited": 2, "new_rows": 0, "summary": "clean"}, mcp_log=mcp_log))
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    generated = r / ".autopilot" / "state" / "qa" / "mcp-run-explore.json"
+    assert generated.exists()
+    cfg = json.loads(generated.read_text())
+    args = cfg["mcpServers"]["playwright"]["args"]
+    out_dir = args[args.index("--output-dir") + 1]
+    assert out_dir.endswith(str(Path("qa") / "explore"))
+    assert Path(out_dir).is_dir()
+    assert mcp_log.read_text() == str(generated)
+    # distinct from --flow's own filename shape (mcp-run-flow-<name>.json) —
+    # the Phase 4 review finding this whole naming discipline guards against.
+    assert not (r / ".autopilot" / "state" / "qa" / "mcp-run-flow-explore.json").exists()
+
+
+# --- shares Task 27's .qa-running lock with --regression --------------------
+
+def test_explore_shares_qa_running_lock_fresh_lock_skips(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_exploratory(timeout_seconds=5))
+    write_lock(r, age_seconds=0)
+    agent = fake_explore_agent(tmp_path, {"pages_visited": 1, "new_rows": 0, "summary": "x"})
+    result = run_explore(r, run_cmd=agent)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "already running" in (result.stdout + result.stderr).lower()
+    qa_dir = r / ".autopilot" / "state" / "qa"
+    assert not any(qa_dir.glob("explore-*.json"))    # agent never invoked
+
+
+def test_explore_stale_lock_is_replaced_and_crawl_runs(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_exploratory(timeout_seconds=5))
+    write_lock(r, age_seconds=9999)
+    agent = fake_explore_agent(tmp_path, {"pages_visited": 3, "new_rows": 1, "summary": "ok"})
+    result = run_explore(r, run_cmd=agent)
+    assert result.returncode == 0, result.stdout + result.stderr
+    out = (result.stdout + result.stderr).lower()
+    assert "stale" in out and "replac" in out
+    lock_path = r / ".autopilot" / "state" / "qa" / ".qa-running"
+    assert not lock_path.exists()                    # released after
+
+
+def test_explore_lock_released_after_missing_result(tmp_path):
+    r = repo(tmp_path, qa_cfg_with_exploratory())
+    agent = fake_explore_agent(tmp_path, result=None)
+    result = run_explore(r, run_cmd=agent)
+    assert result.returncode == 1, result.stdout + result.stderr
+    lock_path = r / ".autopilot" / "state" / "qa" / ".qa-running"
+    assert not lock_path.exists()

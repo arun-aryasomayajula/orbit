@@ -609,6 +609,7 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
     <h2>QA <span class=aside>taught flows — replay verdicts, recent runs</span></h2>
     <div style="margin:10px 0">
       <button class="btn btn-go btn-mini" title="replay every approved flow (one with a steps.json — replay-proven at least once) right now, capped by qa.regression.max_flows_per_run — ignores the cursor" onclick="sweepFlows()">🧹 Sweep flows now</button>
+      <button class="btn btn-go btn-mini" id="qaExploreBtn" style="display:none" title="bounded, same-origin crawl from qa.base_url, capped by qa.exploratory.max_pages — files NEW findings to ops/qa/SEEN.md, never a verdict" onclick="runExplore()">🔭 Explore now</button>
     </div>
     <div id="qaBody"></div>
   </section>
@@ -1264,6 +1265,10 @@ function sweepFlows(){
   if(confirm('Sweep all approved flows now?\n\nReplays every taught flow that has a steps.json (replay-proven at least once), capped by qa.regression.max_flows_per_run. Runs in the background — check Recent runs shortly.'))
     post('/qa-action',{action:'run-regression'});
 }
+function runExplore(){
+  if(confirm('Run an exploratory crawl now?\n\nWalks qa.base_url breadth-first, same-origin only, capped by qa.exploratory.max_pages. Files only NEW findings to ops/qa/SEEN.md — never a verdict. Runs in the background.'))
+    post('/qa-action',{action:'run-explore'});
+}
 function qaFlowRow(f){
   const runs=f.runs==null?0:f.runs;
   const last=f.last_run_at?relSince(Math.floor(new Date(f.last_run_at).getTime()/1000))+' ago':'never run';
@@ -1303,6 +1308,8 @@ function healReject(file){
 }
 function renderQa(){
   const qf=S&&S.qa_flows;
+  const exploreBtn=document.getElementById('qaExploreBtn');
+  if(exploreBtn)exploreBtn.style.display=(qf&&qf.explore_enabled)?'':'none';
   if(!qf){document.getElementById('qaBody').innerHTML='';return;}
   const flows=(qf.flows||[]).map(qaFlowRow).join('') ||
     `<div class=empty>No flows taught yet — run <b>orbit teach</b> to record one.</div>`;

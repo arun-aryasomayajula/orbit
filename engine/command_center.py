@@ -1148,6 +1148,18 @@ def _qa_flows_root() -> Path:
     return AP_HOME / flows_dir
 
 
+def _qa_exploratory_enabled() -> bool:
+    """True iff `qa.exploratory.enabled` is exactly `true` in config.yaml —
+    the SAME gate qa_run.py's `--explore` enforces (exit 2 otherwise, see its
+    `_run_explore`). Both the dashboard's Explore button (via qa_flows'
+    `explore_enabled`) and do_qa_action's `run-explore` action read this, so
+    the two can never disagree about whether exploratory crawling is on."""
+    cfg = _load_cfg()
+    qa_cfg = cfg.get("qa") if isinstance(cfg.get("qa"), dict) else {}
+    exploratory_cfg = qa_cfg.get("exploratory") if isinstance(qa_cfg.get("exploratory"), dict) else {}
+    return exploratory_cfg.get("enabled") is True
+
+
 def _read_flow_intent(flow_dir: Path) -> tuple[str | None, str | None]:
     """(intent_line, entry_path) from a flow's intent.md: frontmatter
     (name/created/entry_path/tags) + the user's free-text intent (see
@@ -1281,7 +1293,7 @@ def qa_flow_library() -> dict | None:
         heals = [_qa_heal_candidate_entry(heal_dir / name) for name in names]
 
     return {"flows": flows, "recent_runs": recent_runs, "heals": heals,
-            "pending_heals": len(heals)}
+            "pending_heals": len(heals), "explore_enabled": _qa_exploratory_enabled()}
 
 
 # ── heal approve/reject (Task 26) — the human gate that closes the QA
@@ -1416,7 +1428,13 @@ def do_qa_action(payload: dict) -> dict:
     <target> --regression` — no flow param, and deliberately no
     --if-changed (a human click means "sweep now", unconditionally; the
     cursor/cadence gating is the run.sh loop hook's own concern) — logged to
-    $AP_STATE/logs/qa-regression.log."""
+    $AP_STATE/logs/qa-regression.log. run-explore (Task 29) is the same
+    detached-spawn shape again (`qa_run.py <target> --explore`, logged to
+    $AP_STATE/logs/qa-explore.log) but gated FIRST on `_qa_exploratory_enabled()`
+    — exploratory crawling is opt-in, so a disabled target refuses the
+    action (and never spawns anything) even if a stale client somehow still
+    posts it; qa_run.py's own --explore enforces the identical gate
+    independently, so the two can never disagree."""
     action = (payload.get("action") or "").strip()
     if action == "heal-approve":
         return _do_heal_approve((payload.get("file") or "").strip())
@@ -1429,6 +1447,17 @@ def do_qa_action(payload: dict) -> dict:
             subprocess.Popen([sys.executable, str(ENGINE / "qa_run.py"), str(REPO), "--regression"],
                              stdout=lf, stderr=lf, stdin=subprocess.DEVNULL, start_new_session=True)
         return {"ok": True, "msg": "regression sweep started"}
+    if action == "run-explore":
+        if not _qa_exploratory_enabled():
+            return {"ok": False,
+                    "msg": "exploratory crawling is disabled — set qa.exploratory.enabled: true "
+                           "in .autopilot/config.yaml to turn it on"}
+        log = LOGDIR / "qa-explore.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("ab") as lf:
+            subprocess.Popen([sys.executable, str(ENGINE / "qa_run.py"), str(REPO), "--explore"],
+                             stdout=lf, stderr=lf, stdin=subprocess.DEVNULL, start_new_session=True)
+        return {"ok": True, "msg": "exploratory crawl started"}
     flow = (payload.get("flow") or "").strip()
     if action != "run-flow":
         return {"ok": False, "msg": f"unknown qa action '{action}'"}

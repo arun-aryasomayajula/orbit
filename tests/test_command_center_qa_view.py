@@ -157,6 +157,38 @@ def test_qa_flows_respects_configured_flows_dir(cc):
     assert [f["name"] for f in st["qa_flows"]["flows"]] == ["login"]
 
 
+# ── explore_enabled (Task 29) — the dashboard's Explore-button gate ──────────
+
+def test_qa_flows_explore_enabled_false_by_default(cc):
+    # No config.yaml at all in the fixture -> _load_cfg returns {} -> the
+    # gate reads as disabled, same opt-in-off-by-default posture as
+    # qa_run.py's own --explore check.
+    _write_flow(cc, "login")
+    st = cc.build_state()
+    assert st["qa_flows"]["explore_enabled"] is False
+
+
+def test_qa_flows_explore_enabled_false_when_config_says_false(cc):
+    (cc.AP_HOME / "config.yaml").write_text(
+        "qa:\n  exploratory:\n    enabled: false\n    max_pages: 10\n")
+    _write_flow(cc, "login")
+    st = cc.build_state()
+    assert st["qa_flows"]["explore_enabled"] is False
+
+
+def test_qa_flows_explore_enabled_true_when_config_says_true(cc):
+    (cc.AP_HOME / "config.yaml").write_text(
+        "qa:\n  exploratory:\n    enabled: true\n    max_pages: 10\n")
+    _write_flow(cc, "login")
+    st = cc.build_state()
+    assert st["qa_flows"]["explore_enabled"] is True
+
+
+def test_qa_exploratory_enabled_helper_matches_state_flag(cc):
+    (cc.AP_HOME / "config.yaml").write_text("qa:\n  exploratory:\n    enabled: true\n")
+    assert cc._qa_exploratory_enabled() is True
+
+
 def test_qa_flows_root_falls_back_to_default_on_escaping_flows_dir(cc):
     # Finding 1 (Phase 4 review): _qa_flows_root used to resolve
     # `AP_HOME / flows_dir` raw — a malformed/escaping flows_dir (leading
@@ -314,6 +346,48 @@ def test_do_qa_action_run_regression_spawns_detached_popen_with_right_argv(cc, m
     assert "--if-changed" not in argv
     assert kw.get("start_new_session") is True
     assert (cc.LOGDIR / "qa-regression.log").exists()
+
+
+def test_do_qa_action_run_explore_spawns_detached_popen_when_enabled(cc, monkeypatch):
+    (cc.AP_HOME / "config.yaml").write_text("qa:\n  exploratory:\n    enabled: true\n    max_pages: 10\n")
+    calls = []
+
+    class FakePopen:
+        def __init__(self, argv, **kw):
+            calls.append((argv, kw))
+
+    monkeypatch.setattr(cc.subprocess, "Popen", FakePopen)
+    result = cc.do_qa_action({"action": "run-explore"})
+
+    assert result == {"ok": True, "msg": "exploratory crawl started"}
+    assert len(calls) == 1
+    argv, kw = calls[0]
+    assert argv == [sys.executable, str(cc.ENGINE / "qa_run.py"), str(cc.REPO), "--explore"]
+    assert kw.get("start_new_session") is True
+    assert (cc.LOGDIR / "qa-explore.log").exists()
+
+
+def test_do_qa_action_run_explore_refused_and_never_spawns_when_disabled(cc, monkeypatch):
+    # No config.yaml at all -> _qa_exploratory_enabled() reads False, same
+    # opt-in-off-by-default posture as qa_run.py's own --explore gate.
+    calls = []
+    monkeypatch.setattr(cc.subprocess, "Popen", lambda *a, **k: calls.append((a, k)))
+    result = cc.do_qa_action({"action": "run-explore"})
+
+    assert result["ok"] is False
+    assert "disabled" in result["msg"].lower()
+    assert calls == []
+    assert not (cc.LOGDIR / "qa-explore.log").exists()
+
+
+def test_do_qa_action_run_explore_refused_when_explicitly_false(cc, monkeypatch):
+    (cc.AP_HOME / "config.yaml").write_text("qa:\n  exploratory:\n    enabled: false\n")
+    calls = []
+    monkeypatch.setattr(cc.subprocess, "Popen", lambda *a, **k: calls.append((a, k)))
+    result = cc.do_qa_action({"action": "run-explore"})
+
+    assert result["ok"] is False
+    assert calls == []
 
 
 def test_do_qa_action_rejects_unknown_action(cc, monkeypatch):
