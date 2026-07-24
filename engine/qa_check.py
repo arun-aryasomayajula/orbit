@@ -226,24 +226,43 @@ def _mcp_args(browser: str, output_dir: str, headless: bool) -> list[str]:
     return args
 
 
-def _resolve_mcp_config(tid: str, qa_cfg: dict) -> Path:
-    """`qa.mcp_config` set → use that path as-is (nothing generated). Else
-    write a per-run Playwright MCP config to $AP_STATE/qa/mcp-run.json."""
+def build_mcp_config(qa_cfg: dict, qa_dir: Path, output_dir: Path) -> Path:
+    """Shared MCP-autogen helper — extracted so `engine/qa_run.py` (Task 22)
+    can reuse the exact same Playwright MCP config shape for a flow replay
+    instead of copy-pasting it. `qa.mcp_config` set → use that path as-is
+    (nothing generated). Else write a per-run Playwright MCP config to
+    `qa_dir`/mcp-run.json, with `output_dir` (the --output-dir target)
+    pre-created ahead of the race with the real MCP server writing into it.
+
+    qa_run.py can't just `import qa_check` at the top of its file to get
+    this — qa_check.py resolves its own AP_STATE/AP_HOME module-level
+    globals from the environment at import time (see `_ap_state()` below),
+    and qa_run.py doesn't know its target (and thus AP_HOME/AP_STATE) until
+    its own main() parses argv. It sets those env vars first, then imports
+    qa_check locally, then calls this function directly with its own paths
+    — the module-level AP_STATE/QA_DIR globals below are untouched by that
+    caller."""
     configured = qa_cfg.get("mcp_config")
     if configured:
         return Path(configured)
     browser = qa_cfg.get("browser") or QA_DEFAULT_BROWSER
     headless = qa_cfg.get("headless", True)
-    output_dir = str(AP_STATE / "qa" / f"task-{tid}")
+    output_dir = Path(output_dir)
     mcp_cfg = {"mcpServers": {"playwright": {
         "command": "npx",
-        "args": _mcp_args(browser, output_dir, headless),
+        "args": _mcp_args(browser, str(output_dir), headless),
     }}}
-    Path(output_dir).mkdir(parents=True, exist_ok=True)   # --output-dir target, ahead of the race
-    QA_DIR.mkdir(parents=True, exist_ok=True)
-    path = QA_DIR / "mcp-run.json"
+    output_dir.mkdir(parents=True, exist_ok=True)   # --output-dir target, ahead of the race
+    qa_dir.mkdir(parents=True, exist_ok=True)
+    path = qa_dir / "mcp-run.json"
     path.write_text(json.dumps(mcp_cfg))
     return path
+
+
+def _resolve_mcp_config(tid: str, qa_cfg: dict) -> Path:
+    """`qa.mcp_config` set → use that path as-is (nothing generated). Else
+    write a per-run Playwright MCP config to $AP_STATE/qa/mcp-run.json."""
+    return build_mcp_config(qa_cfg, QA_DIR, AP_STATE / "qa" / f"task-{tid}")
 
 
 def run_qa_agent(cfg_all: dict, qa_cfg: dict, tid: str, worktree: str,

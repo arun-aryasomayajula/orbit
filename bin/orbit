@@ -12,6 +12,9 @@
 #   orbit teach <target> <flow-name> [--url URL]
 #                            record a browser flow by demonstration (Playwright codegen) into
 #                            a committed flow library (.autopilot/qa/flows/<name>/)
+#   orbit qa <target> --flow <name> [--timeout N]
+#                            run ONE taught flow via the browser MCP and record its verdict
+#                            (pass/fail/healed/unable) into the flow's library metadata
 #   orbit doctor <target>    validate wiring (read-only, no cycle)
 #   orbit run <target>       run the loop in the foreground
 #   orbit install <target>   install the background service (launchd/systemd)
@@ -32,6 +35,7 @@ case "$verb" in
   knowledge) python3 "$ORBIT_HOME/engine/knowledge.py" "$target" "${@:3}" ;;
   epic)    python3 "$ORBIT_HOME/engine/epic_plan.py" "$target" "${@:3}" ;;
   teach)   python3 "$ORBIT_HOME/engine/qa_teach.py" "$target" "${@:3}" ;;
+  qa)      python3 "$ORBIT_HOME/engine/qa_run.py" "$target" "${@:3}" ;;
   doctor)  python3 "$ORBIT_HOME/engine/doctor.py" "$target" "${3:-}" ;;
   run)     "$ORBIT_HOME/engine/run.sh" "$target" ;;
   install) "$ORBIT_HOME/install/install_service.sh" "$target" "$ORBIT_HOME" ;;
