@@ -144,6 +144,40 @@ def test_url_flag_overrides_base_url(tmp_path):
     assert front["entry_path"] == "http://override.test/start"
 
 
+def test_reserved_word_name_round_trips_as_a_string(tmp_path):
+    """SLUG_RE permits an all-digit name like '123' (also true/null/etc for
+    other slugs) — unquoted in YAML frontmatter these reparse as int/bool/
+    None, not str. Task 21/22 parse this frontmatter and need string types."""
+    r = repo(tmp_path, QA_CFG)
+    result = run(r, "123", codegen_cmd=fake_codegen(tmp_path),
+                 stdin_text="intent line\ncriterion one\n")
+    assert result.returncode == 0, result.stdout + result.stderr
+    intent_text = (flows_dir(r) / "123" / "intent.md").read_text()
+    front = yaml.safe_load(re.match(r"^---\n(.*?)\n---\n", intent_text, re.DOTALL).group(1))
+    assert front["name"] == "123" and isinstance(front["name"], str)
+    assert isinstance(front["created"], str)
+
+
+# ===========================================================================
+# A FLOWMAP write failure never masks an already-written flow.
+# ===========================================================================
+
+def test_flowmap_write_failure_does_not_mask_a_written_flow(tmp_path):
+    r = repo(tmp_path, QA_CFG)
+    fm = flowmap_path(r)
+    fm.parent.mkdir(parents=True, exist_ok=True)
+    fm.mkdir()   # FLOWMAP.md's path is itself a directory -> write fails with OSError
+    result = run(r, "flowmap-fail-flow", codegen_cmd=fake_codegen(tmp_path),
+                 stdin_text="intent line\ncriterion one\n")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "FLOWMAP update failed" in result.stdout
+    fd = flows_dir(r) / "flowmap-fail-flow"
+    assert fd.is_dir()
+    assert (fd / "meta.json").exists()
+    assert (fd / "intent.md").exists()
+    assert (fd / "steps.spec.ts").exists()
+
+
 # ===========================================================================
 # Second flow appends a second FLOWMAP row without clobbering the first.
 # ===========================================================================
@@ -258,6 +292,14 @@ def test_empty_intent_rejected_no_flow_dir(tmp_path):
                  stdin_text="\ncriterion one\n")   # blank first line = empty intent
     assert result.returncode in (1, 2)
     assert not (flows_dir(r) / "empty-intent-flow").exists()
+
+
+def test_whitespace_only_intent_rejected_no_flow_dir(tmp_path):
+    r = repo(tmp_path, QA_CFG)
+    result = run(r, "whitespace-intent-flow", codegen_cmd=fake_codegen(tmp_path),
+                 stdin_text="   \ncriterion one\n")   # whitespace-only first line
+    assert result.returncode in (1, 2)
+    assert not (flows_dir(r) / "whitespace-intent-flow").exists()
 
 
 def test_intent_only_eof_before_any_criteria_rejected_no_flow_dir(tmp_path):

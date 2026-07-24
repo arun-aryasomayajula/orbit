@@ -171,8 +171,8 @@ def _render_intent_md(name: str, created_at: str, entry_path: str,
                        intent: str, criteria: list[str]) -> str:
     lines = [
         "---",
-        f"name: {name}",
-        f"created: {created_at}",
+        f"name: {yq(name)}",
+        f"created: {yq(created_at)}",
         f"entry_path: {yq(entry_path)}",
         "tags: []",
         "---",
@@ -316,8 +316,18 @@ def main(argv: list[str]) -> int:
             _err(f"failed writing the flow ({e}) — cleaned up")
             return 1
 
+    # The flow itself is already fully written and complete at this point —
+    # a failure updating the (secondary, regenerable) FLOWMAP index must
+    # never masquerade as the teach having failed: no traceback, no
+    # misleading nonzero exit that would make a retry hit "already exists"
+    # on a flow that in fact succeeded.
     flowmap = (ap_home / flows_dir).parent / "FLOWMAP.md"
-    _update_flowmap(flowmap, name, intent, url, "never run")
+    try:
+        _update_flowmap(flowmap, name, intent, url, "never run")
+    except OSError as e:
+        print(f"flow written OK at {flow_dir}; FLOWMAP update failed ({e}) — "
+              f"add the row manually")
+        return 0
 
     flow_rel = f".autopilot/{flows_dir}/{name}"
     flowmap_rel = str((Path(".autopilot") / flows_dir).parent / "FLOWMAP.md")
