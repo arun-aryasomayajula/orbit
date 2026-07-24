@@ -245,6 +245,17 @@ def test_qa_malformed_verdict_ships_with_a_warning(tmp_path):
     assert "WARN" in r.stdout
 
 
+def test_qa_invalid_verdict_string_ships_with_a_warning(tmp_path):
+    # verdict must be exactly one of pass/fail/unable — an agent mistake
+    # (e.g. "passed" instead of "pass") is a wiring/agent error, never an
+    # observed contradiction, so it must ship (with a loud WARN), not block.
+    repo = target(tmp_path, QA_CFG)
+    r = run(repo, qa_agent_cmd=qa_agent(tmp_path, {
+        "ran": True, "verdict": "passed", "contradicts": False, "summary": "hmm"}))
+    assert r.returncode == 0
+    assert "WARN" in r.stdout
+
+
 def test_qa_category_not_gated_skips_agent(tmp_path):
     repo = target(tmp_path, QA_CFG, category="documentation")   # not in gate_categories
     r = run(repo, qa_agent_cmd=qa_agent(tmp_path, {
@@ -291,6 +302,19 @@ def test_qa_mcp_autogen_headless_false(tmp_path):
     assert "--headless" not in args
 
 
+def test_qa_mcp_autogen_precreates_output_dir(tmp_path):
+    # `--output-dir` points at $AP_STATE/qa/task-<tid>/ — pre-create it here
+    # rather than leaving it solely to the skill's own mkdir, which can
+    # otherwise race the real @playwright/mcp server starting up and writing
+    # into that same directory.
+    repo = target(tmp_path, QA_CFG)
+    r = run(repo, qa_agent_cmd=qa_agent(tmp_path, {
+        "ran": True, "verdict": "pass", "contradicts": False, "summary": "ok"}))
+    assert r.returncode == 0
+    out_dir = repo / ".autopilot" / "state" / "qa" / "task-t1"
+    assert out_dir.is_dir()
+
+
 def test_qa_mcp_config_override_used(tmp_path):
     custom = tmp_path / "custom-mcp.json"
     custom.write_text(json.dumps({"mcpServers": {"playwright": {"command": "echo"}}}))
@@ -320,6 +344,23 @@ def test_qa_stale_verdict_removed_before_run(tmp_path):
     r = run(repo, qa_agent_cmd=f"{sys.executable} -c 'pass'")   # agent writes nothing this run
     assert r.returncode == 0                          # missing-verdict path, not the stale fail
     assert not stale.exists()
+
+
+def test_qa_path_removes_stale_cross_kind_runtime_verdict(tmp_path):
+    # _unlink_stale_verdicts unlinks BOTH verdict kinds up front, whichever
+    # path is about to run — a stale task-<id>-runtime.json left over from a
+    # prior LEGACY run (config may have since gained a `qa:` block) must
+    # never be mistaken for this QA-path run's own verdict, and must not
+    # survive on disk as misleading leftover state either.
+    repo = target(tmp_path, QA_CFG)
+    reviews = repo / ".autopilot" / "state" / "reviews"
+    stale_runtime = reviews / "task-t1-runtime.json"
+    stale_runtime.write_text(json.dumps({"ran": True, "contradicts": True,
+                                         "summary": "stale legacy verdict"}))
+    r = run(repo, qa_agent_cmd=qa_agent(tmp_path, {
+        "ran": True, "verdict": "pass", "contradicts": False, "summary": "ok"}))
+    assert r.returncode == 0
+    assert not stale_runtime.exists()
 
 
 # ===========================================================================
@@ -397,7 +438,10 @@ def test_qa_fail_bounces_below_cap(tmp_path):
     assert re.search(r"(?m)^\s*status: queued\s*$", text), text
     findings = _qa_findings_value(text)
     assert "login button contradicted" in findings
-    assert ".autopilot/state/qa/task-t1/findings.md" in findings
+    # $AP_STATE-relative (not the wrapper-only .autopilot/state/... path) —
+    # the re-picked maker's cwd is the WORKTREE, a sibling dir, where that
+    # relative path doesn't exist, and it breaks under non-default AP_STATE.
+    assert "$AP_STATE/qa/task-t1/findings.md" in findings
     assert "previous attempt patch: none kept" in findings   # no patch arg passed
 
     # qa-verdict is stamped, then clear immediately removes the whole entry —
@@ -408,6 +452,38 @@ def test_qa_fail_bounces_below_cap(tmp_path):
     assert len(tasks) == 1 and tasks[0]["id"] == "t1"
     assert "QA FINDINGS" in tasks[0]["task"]
     assert "login button contradicted" in tasks[0]["task"]
+
+
+def test_qa_fail_second_bounce_survives_existing_qa_findings_field(tmp_path):
+    # Regression for the set_task_field regex-template bug (Phase 3 finding
+    # #1): the FIRST bounce inserts a fresh qa_findings line (no existing
+    # field to match → the insert branch, which never touches pat.sub at
+    # all). Only the SECOND bounce has to SUBSTITUTE that now-existing line
+    # — this is exactly the path that used to raise `re.error: bad escape
+    # \u` the instant json.dumps's em-dash escape landed inside the
+    # replacement TEMPLATE. Before the fix this crashed decide_fail_action,
+    # which fell back to a plain escalate (exit 3) with NO evidence attached
+    # (the crash-fallback bypasses _escalate_with_evidence) instead of the
+    # correct exit 4 re-queue.
+    repo = bounce_target(tmp_path, max_bounces=2, qa_bounces=None)   # absent → reads as 0
+    agent_cmd = qa_agent(tmp_path, {
+        "ran": True, "verdict": "fail", "contradicts": True,
+        "summary": "login button contradicted"})
+
+    r1 = run(repo, qa_agent_cmd=agent_cmd)
+    assert r1.returncode == 4, r1.stdout + r1.stderr
+    assert re.search(r"(?m)^\s*qa_bounces: 1\s*$", _backlog_text(repo))
+    assert re.search(r"(?m)^\s*qa_findings:", _backlog_text(repo))   # field now exists
+
+    r2 = run(repo, qa_agent_cmd=agent_cmd)                # SECOND bounce — substitute path
+    assert r2.returncode == 4, r2.stdout + r2.stderr       # not 3 — no crash-to-escalate
+    assert "re.error" not in (r2.stdout + r2.stderr)
+
+    text = _backlog_text(repo)
+    assert re.search(r"(?m)^\s*qa_bounces: 2\s*$", text), text
+    assert len(re.findall(r"(?m)^\s*qa_findings:", text)) == 1   # substituted, not duplicated
+    findings = _qa_findings_value(text)
+    assert "login button contradicted" in findings
 
 
 def test_qa_fail_bounce_records_patch_path(tmp_path):
@@ -434,6 +510,37 @@ def test_qa_fail_bounces_tolerates_inline_comment_on_qa_bounces(tmp_path):
     r = run(repo, qa_agent_cmd=qa_agent(tmp_path, {
         "ran": True, "verdict": "fail", "contradicts": True, "summary": "still broken"}))
     assert r.returncode == 3, r.stdout + r.stderr   # escalates (cap reached), NOT a bounce
+
+
+def test_qa_fail_bounces_tolerates_hand_quoted_qa_bounces_at_cap(tmp_path):
+    # qa_bounces: "2" — a hand-quoted scalar (get_task_field returns it raw,
+    # quotes and all: `'"2"'`). Before stripping surrounding quotes,
+    # int('"2"') raised ValueError, _read_qa_bounces silently defaulted to 0,
+    # and a task already AT the cap bounced again instead of escalating.
+    repo = bounce_target(tmp_path, max_bounces=2, qa_bounces='"2"')
+    r = run(repo, qa_agent_cmd=qa_agent(tmp_path, {
+        "ran": True, "verdict": "fail", "contradicts": True, "summary": "still broken"}))
+    assert r.returncode == 3, r.stdout + r.stderr   # escalates (cap reached), NOT a bounce
+
+
+def test_qa_max_bounces_zero_escalates_immediately(tmp_path):
+    # max_bounces: 0 is a legitimate "never bounce, always escalate" config —
+    # `int(qa_cfg.get("max_bounces") or DEFAULT_MAX_BOUNCES)` treated 0 as
+    # falsy and silently substituted the default (2), so a fresh task
+    # (qa_bounces absent → 0) would bounce instead of escalating straight
+    # away. `bounces < max_bounces` must be `0 < 0` (False) → escalate.
+    repo = bounce_target(tmp_path, max_bounces=0, qa_bounces=None)
+    qa_dir = repo / ".autopilot" / "state" / "qa" / "task-t1"
+    qa_dir.mkdir(parents=True)
+    (qa_dir / "findings.md").write_text("drove the login flow; button did nothing")
+    r = run(repo, qa_agent_cmd=qa_agent(tmp_path, {
+        "ran": True, "verdict": "fail", "contradicts": True, "summary": "login dead"}))
+    assert r.returncode == 3, r.stdout + r.stderr   # straight to escalation, never 4
+    assert not re.search(r"(?m)^\s*qa_bounces: 1\s*$", _backlog_text(repo))  # not bounced
+    e = _ledger_entries(repo)["t1"]
+    assert e["qa"]["verdict"] == "fail"                 # escalated WITH evidence attached
+    kinds = {a["kind"] for a in e.get("attachments", [])}
+    assert "report" in kinds
 
 
 def test_qa_fail_argv2_only_still_works_no_patch_arg(tmp_path):

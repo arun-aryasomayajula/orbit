@@ -239,6 +239,7 @@ def _resolve_mcp_config(tid: str, qa_cfg: dict) -> Path:
         "command": "npx",
         "args": _mcp_args(browser, output_dir, headless),
     }}}
+    Path(output_dir).mkdir(parents=True, exist_ok=True)   # --output-dir target, ahead of the race
     QA_DIR.mkdir(parents=True, exist_ok=True)
     path = QA_DIR / "mcp-run.json"
     path.write_text(json.dumps(mcp_cfg))
@@ -317,6 +318,10 @@ def _unsafe_qa_path_reason(base: Path, rel) -> str | None:
 
 def _read_qa_bounces(backlog: Path, tid: str) -> int:
     raw = get_task_field(backlog, tid, "qa_bounces")
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ('"', "'"):
+            raw = raw[1:-1]        # hand-quoted qa_bounces: "2" — strip before int()
     try:
         return int(raw) if raw is not None else 0
     except (TypeError, ValueError):
@@ -370,7 +375,7 @@ def _bounce(tid: str, qa_cfg: dict, summary: str, patch_path: str,
     (field write → status queued → ledger clear → converter re-run)."""
     backlog = AP_HOME / "backlog.yaml"
     new_bounces = bounces + 1
-    findings_report = f".autopilot/state/qa/task-{tid}/findings.md"
+    findings_report = f"$AP_STATE/qa/task-{tid}/findings.md"
     patch_note = patch_path or "none kept"
     message = " ".join(
         f"{summary} — full report: {findings_report} "
@@ -413,7 +418,8 @@ def _bounce(tid: str, qa_cfg: dict, summary: str, patch_path: str,
 def _decide_fail_action(tid: str, worktree: str, qa_cfg: dict, verdict: dict, mode: str,
                         patch_path: str) -> int:
     summary = (verdict.get("summary") or "").strip()
-    max_bounces = int(qa_cfg.get("max_bounces") or DEFAULT_MAX_BOUNCES)
+    mb = qa_cfg.get("max_bounces")
+    max_bounces = int(mb) if mb is not None else DEFAULT_MAX_BOUNCES   # 0 is a valid cap
     backlog = AP_HOME / "backlog.yaml"
     bounces = _read_qa_bounces(backlog, tid)
 

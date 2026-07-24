@@ -101,7 +101,14 @@ def set_task_field(backlog: Path, tid: str, field: str, value: str) -> bool:
     block = text[start.end():end]
     pat = re.compile(rf"^(\s*){re.escape(field)}:.*$", re.MULTILINE)
     if pat.search(block):
-        block = pat.sub(rf"\g<1>{field}: {value}", block, count=1)
+        # A callable replacement — never a template string. `value` is
+        # untrusted-shaped (e.g. QA findings folded via json.dumps, which can
+        # contain backslash-escapes like `—` for an em dash): fed through
+        # re.sub's TEMPLATE parser (as `rf"\g<1>{field}: {value}"` used to),
+        # `\u` isn't a recognized replacement escape and raises `re.error: bad
+        # escape \u`. A lambda's return value is spliced in literally, with no
+        # backslash reinterpretation, so `value` is always treated as data.
+        block = pat.sub(lambda m: f"{m.group(1)}{field}: {value}", block, count=1)
     else:
         block = f"\n{start.group(1)}  {field}: {value}" + block
     backlog.write_text(text[:start.end()] + block + text[end:])
