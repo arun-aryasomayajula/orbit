@@ -162,10 +162,10 @@ config carries a `qa:` block it supersedes `runtime_check:` as the post-commit g
 (`engine/qa_check.py`, dispatched by `run.sh` right after the cycle commits and
 before it pushes). Config (`.autopilot/config.yaml`, all optional):
 ```yaml
-# --- QA runtime (optional): a browser-driving QA agent proves ships, replays taught
-# flows, and files failures back onto the task. Requires node+npx in the target env
-# (Playwright MCP is fetched via npx — never an engine dependency). When present,
-# this supersedes runtime_check: as the post-commit gate.
+# --- QA runtime (optional): a browser-driving QA agent proves ships and files
+# failures back onto the task. Requires node+npx in the target env (Playwright
+# MCP is fetched via npx — never an engine dependency). When present, this
+# supersedes runtime_check: as the post-commit gate.
 # qa:
 #   services:                          # full-stack launch recipe, in start order
 #     - name: api

@@ -120,10 +120,10 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
 #                              #  to push off-plan commits — exit 3 → escalate)
 #   model: "sonnet"            # planner model (router defaults.planner overrides)
 
-# --- QA runtime (optional): a browser-driving QA agent proves ships, replays taught
-# flows, and files failures back onto the task. Requires node+npx in the target env
-# (Playwright MCP is fetched via npx — never an engine dependency). When present,
-# this supersedes runtime_check: as the post-commit gate.
+# --- QA runtime (optional): a browser-driving QA agent proves ships and files
+# failures back onto the task. Requires node+npx in the target env (Playwright
+# MCP is fetched via npx — never an engine dependency). When present, this
+# supersedes runtime_check: as the post-commit gate.
 # qa:
 #   services:                          # full-stack launch recipe, in start order
 #     - name: api

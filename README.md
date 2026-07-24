@@ -118,11 +118,10 @@ flowchart TD
 
 Two human gates bound the loop: **nothing enters the queue and nothing merges
 without a click**. Every other arrow is machine-driven and leaves evidence
-(review packet, backup patch, ledger entry, log line). One arrow loops back on
-itself: a QA gate fail on a `required` category re-queues the SAME task with its
-findings folded in instead of escalating outright — QA fail → task re-queued
-with findings (max `qa.max_bounces`, default 2) → then escalates to a human like
-any other contradiction.
+(review packet, backup patch, ledger entry, log line). A QA-gate fail on a
+`required` category takes one extra lap first: it re-queues the same task with
+the findings folded in (up to `qa.max_bounces`, default 2 bounces), then
+escalates to you like any other contradiction.
 
 ### The task lifecycle (the ledger state machine)
 
