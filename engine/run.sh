@@ -257,10 +257,13 @@ one_iteration() {
         echo OK; return
       fi
     fi
-    # Runtime verification (opt-in `runtime_check:` config): observe the change in
-    # the RUNNING product before pushing. Only exit code 3 — the check RAN and
-    # observed behaviour contradicting a `required` category's contract — blocks
-    # the ship; every other outcome (skipped, unable-to-run, agent error) ships.
+    # QA gate (engine/qa_check.py): a browser-driving QA agent (opt-in `qa:`
+    # config) when present, else the legacy `runtime_check:` behaviour byte-
+    # for-byte — either way, observe the change in the RUNNING product before
+    # pushing. Exit 3 escalates (contradiction, or a QA `fail` on a `required`
+    # category at the bounce cap); QA-only exit 4 bounces the SAME task back
+    # to the queue with findings folded in instead. Every other outcome
+    # (skipped, unable-to-run, agent error) ships.
     if [ -n "$tid" ]; then
       python3 "$ENGINE/qa_check.py" "$tid" "$WT" "$patch" >>"$LOGDIR/orbit.log" 2>&1
       local qa_rc="$?"

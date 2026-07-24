@@ -48,8 +48,31 @@ briefed with it, and the maker is told to touch only the fenced `edit`/`create`
 paths. The verify-spec step (3.5) always judges a diff outside that fence as
 NONCONFORMING once a plan exists; `plan.enforce: "block"` additionally has the
 wrapper run `engine/plan_gate.py` — a deterministic scope-fence gate — right
-before push (ahead of runtime verification), refusing to ship (escalating
-instead) any commit touching a file outside the plan's scope.
+before push (ahead of the QA gate), refusing to ship (escalating instead) any
+commit touching a file outside the plan's scope.
+
+**The QA gate (optional, between commit and push)** — right after the cycle
+commits, `engine/qa_check.py` decides whether to ship, bounce, or escalate. No
+`qa:` block in the target's config → the LEGACY path, byte-for-byte the retired
+`runtime_check.py`'s behaviour (`runtime_check:` config, `/orbit-runtime-check`
+skill). A `qa:` block → the QA path supersedes it: a browser-driving
+`/orbit-qa-check` agent launches (or attaches to) the product via a per-run
+Playwright MCP server, drives the flow the acceptance criteria name, and judges
+it against `qa.gate_categories`. Exit codes:
+
+| exit | meaning |
+|------|---------|
+| 0 | ship — pass, unable-to-run, the check is off/not-configured for this category, or an agent/wiring error (never blocks) |
+| 3 | escalate — legacy: an observed contradiction on a `required` category; QA: a `fail` verdict on `required` at the bounce cap (or any unexpected error inside the bounce path itself, as a safe fallback) |
+| 4 | QA bounce (QA path only) — `fail` on `required`, still under `qa.max_bounces`: the SAME task is re-queued (`status: queued`) with the QA findings folded into its contract (`qa_findings`) for the next pick |
+
+The dev⇄QA loop still respects machines-propose/humans-dispose: a bounce only
+ever re-files a task ALREADY on the queue — no new task is created and no human
+click is skipped for it. Unrelated bugs the QA agent notices along the way never
+move that task's verdict; they're appended to `ops/qa/SEEN.md` and flow through
+the ordinary discovery pipeline instead (the `qa` signal adapter turns them into
+`status: proposed` tasks for a human to triage), same as any other
+adapter-sourced finding.
 
 ## Model tiering (grounded in evidence, not vibes)
 The router assigns opus to hard-judgment categories (bug/feature/refactor/security) and sonnet to

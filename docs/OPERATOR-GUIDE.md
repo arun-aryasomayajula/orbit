@@ -67,6 +67,22 @@ awaiting/orphan. Deleting an unmerged branch (awaiting or orphan) always
 requires a per-branch confirm with an extra warning that its work may be
 unreviewed.
 
+## QA evidence on cards
+
+When the target repo has a `qa:` config block, a browser-driving QA agent
+proves each ship in the running product (screenshots, logs, a written
+verdict) before it's pushed:
+
+- **Escalations** that hit the QA bounce cap show the evidence right on the
+  card: a screenshot thumbnail (click to open full-size) and a 📄 findings
+  report link, served straight from `.autopilot/state/qa/task-<id>/` on your
+  own dashboard — nothing external.
+- **Ships** cards carry a **QA: fail** badge (red) when that task's history
+  includes a QA failure that reached the bounce cap — most often an
+  escalation you later merged or rejected anyway. No badge means the QA gate
+  never recorded a failing verdict against it (it passed, ran unable, or
+  wasn't checked).
+
 ## Safety facts
 
 - Every task ships on its own branch; nothing merges without a human click.

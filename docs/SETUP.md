@@ -154,6 +154,69 @@ a complete new file-scope fence, the last one in the file always wins — to the
 SAME plan file rather than editing what's already there; a second out-of-plan stop
 on the same task escalates.
 
+## 6.7. QA runtime (optional)
+A browser-driving **QA agent** proves each ship in the RUNNING product, not just the
+diff — and, unlike the legacy runtime check, can bounce a failing task back for
+another attempt instead of escalating it straight to a human. When the target's
+config carries a `qa:` block it supersedes `runtime_check:` as the post-commit gate
+(`engine/qa_check.py`, dispatched by `run.sh` right after the cycle commits and
+before it pushes). Config (`.autopilot/config.yaml`, all optional):
+```yaml
+# --- QA runtime (optional): a browser-driving QA agent proves ships, replays taught
+# flows, and files failures back onto the task. Requires node+npx in the target env
+# (Playwright MCP is fetched via npx — never an engine dependency). When present,
+# this supersedes runtime_check: as the post-commit gate.
+# qa:
+#   services:                          # full-stack launch recipe, in start order
+#     - name: api
+#       launch: "npm run dev:api"      # command; run from `cwd` inside the worktree
+#       cwd: "server"                  # optional, default "."
+#       ready: "http://localhost:4000/health"   # optional; polled until HTTP 200
+#     - name: web
+#       launch: "npm run dev"
+#       ready: "http://localhost:3000"
+#   base_url: "http://localhost:3000"  # where the browser starts (required with services)
+#   env: {PORT: "3000"}                # exported into service launches (dedicated QA ports)
+#   ready_timeout_seconds: 90
+#   timeout_seconds: 1200              # whole QA-agent budget per invocation
+#   model: "sonnet"                    # QA runs are frequent — cheaper than the maker
+#   mcp_config: null                   # path to your own mcp json; null → engine auto-generates
+#   browser: "chromium"
+#   headless: true
+#   max_bounces: 2                     # QA→dev re-files before escalating to a human
+#   gate_categories:                   # replaces runtime_check.categories when qa: present
+#     frontend: required               # required = QA fail blocks the ship (bounce/escalate)
+#     feature: required
+#     bug: evidence                    # evidence only, never blocks
+```
+Post-commit, the `/orbit-qa-check <task-id>` agent (`skills/orbit-qa-check.md`)
+launches (or attaches to) the product per `qa.services`/`base_url`, drives the
+SPECIFIC flow the task's acceptance criteria describe through a per-run Playwright
+MCP server (screenshots land under `state/qa/task-<id>/`), and writes a
+`pass`/`fail`/`unable` verdict judged against `qa.gate_categories`.
+
+**The bounce loop:** a `fail` verdict on a `required` category re-files the SAME
+task back onto the queue (`status: queued`) with the QA agent's findings folded
+into its contract (`qa_findings`) and the findings file cited, and bumps its
+`qa_bounces` counter — the next pick sees exactly what QA observed and is
+expected to fix it, up to `qa.max_bounces` (default 2) attempts. Once the cap is
+reached, the cycle escalates instead, attaching the QA verdict plus a screenshot
+and the findings report to the ledger entry so a human sees the evidence on the
+dashboard. `unable` (the environment, not the code, blocked the check) never
+bounces or blocks, and neither does a `fail` on an `evidence`-only category.
+
+**Requirements:** `node`/`npx` on the machine running the loop — Playwright MCP
+(`@playwright/mcp`) is fetched by `npx` at QA-run time, never an engine
+dependency. `orbit doctor` checks `node`/`npx` are on PATH when `qa:` is
+configured (fails the run otherwise) and advises — without failing — if
+`npx playwright --version` isn't already cached; it also flags when both `qa:`
+and `runtime_check:` are configured (`qa:` wins).
+
+**Legacy note:** no `qa:` block in your config → `qa_check.py` runs byte-for-byte
+the same `runtime_check:` behaviour as before (same config keys, same
+`/orbit-runtime-check` skill, same `reviews/task-<id>-runtime.json` verdict) —
+nothing changes until you add one.
+
 ## Opt-in task sources (signal adapters)
 Beyond the native `backlog.yaml`, every extra name in `sources:` runs a matching
 `<name>_to_backlog.py` each cycle — resolved from YOUR repo's `.autopilot/adapters/` first,

@@ -90,7 +90,7 @@ flowchart TD
         build["build ⇄ check<br/>(your gates = definition of done)"]
         verify["verifier judges diff<br/>vs acceptance criteria"]
         commit["one atomic commit<br/>+ review packet"]
-        rt["runtime check (opt-in)<br/>observe the running product"]
+        rt["QA gate (opt-in)<br/>observe the running product"]
     end
     push["wrapper (never the agent) pushes<br/>origin/autopilot/task-id (+ PR)"]
     gate{{"HUMAN GATE 2<br/>merge · reject · revert (dashboard)"}}
@@ -118,7 +118,11 @@ flowchart TD
 
 Two human gates bound the loop: **nothing enters the queue and nothing merges
 without a click**. Every other arrow is machine-driven and leaves evidence
-(review packet, backup patch, ledger entry, log line).
+(review packet, backup patch, ledger entry, log line). One arrow loops back on
+itself: a QA gate fail on a `required` category re-queues the SAME task with its
+findings folded in instead of escalating outright — QA fail → task re-queued
+with findings (max `qa.max_bounces`, default 2) → then escalates to a human like
+any other contradiction.
 
 ### The task lifecycle (the ledger state machine)
 
@@ -133,7 +137,7 @@ stateDiagram-v2
     in_progress --> committed: committed (agent)
     committed --> pushed: pushed (wrapper)
     in_progress --> escalated: escalate
-    committed --> escalated: runtime check contradiction
+    committed --> escalated: QA gate contradiction/fail
     pushed --> escalated: escalate
     pushed --> merged: mark merged (human)
     committed --> merged: mark / autoclose
@@ -182,7 +186,7 @@ Two subtleties the machine encodes deliberately:
   `reverted` is legal from `committed`/`pushed`/`merged`, and why the dashboard
   categorizes by ancestry first.
 - **`escalated → merged` is legal only with ship evidence** — the autoclose
-  reconciler flips a task that committed, escalated at the runtime check, and
+  reconciler flips a task that committed, escalated at the QA gate, and
   whose branch you merged anyway.
 
 The backlog layer has its own, simpler ladder in the task's `status` field —
