@@ -199,6 +199,36 @@ def test_healed_with_dangling_candidate_is_malformed_exit_1(tmp_path):
     assert meta(flow_dir) == before
 
 
+def test_healed_candidate_path_traversal_rejected_exit_1(tmp_path):
+    # A traversal candidate that resolves to a REAL file just outside
+    # qa/heal/ must still be rejected — existence alone is not sufficient,
+    # the resolved path must actually be contained under qa/heal/.
+    r = repo(tmp_path)
+    flow_dir = teach_flow(r)
+    before = meta(flow_dir)
+    outside = r / ".autopilot" / "state" / "qa" / "evil.json"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text(json.dumps({"not": "a real heal candidate"}))
+    result = run(r, "login-flow", run_cmd=fake_agent(tmp_path, verdict={
+        "verdict": "healed", "failed_step": None, "screenshot": None,
+        "summary": "drift", "healed_candidate": "../evil.json"}))
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert meta(flow_dir) == before
+
+
+def test_healed_candidate_absolute_path_rejected_exit_1(tmp_path):
+    r = repo(tmp_path)
+    flow_dir = teach_flow(r)
+    before = meta(flow_dir)
+    outside = tmp_path / "evil-abs.json"
+    outside.write_text(json.dumps({"not": "a real heal candidate"}))
+    result = run(r, "login-flow", run_cmd=fake_agent(tmp_path, verdict={
+        "verdict": "healed", "failed_step": None, "screenshot": None,
+        "summary": "drift", "healed_candidate": str(outside)}))
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert meta(flow_dir) == before
+
+
 # ===========================================================================
 # fail verdict
 # ===========================================================================
@@ -228,6 +258,19 @@ def test_fail_without_failed_step_is_malformed_exit_1(tmp_path):
     assert meta(flow_dir) == before
 
 
+def test_fail_without_screenshot_is_malformed_exit_1(tmp_path):
+    # skills/orbit-qa-flow.md: "verdict: 'fail' REQUIRES failed_step set AND
+    # a screenshot of the failure — never fail on a hunch."
+    r = repo(tmp_path)
+    flow_dir = teach_flow(r)
+    before = meta(flow_dir)
+    result = run(r, "login-flow", run_cmd=fake_agent(tmp_path, {
+        "verdict": "fail", "failed_step": 1, "screenshot": None,
+        "summary": "broke somewhere", "healed_candidate": None}))
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert meta(flow_dir) == before
+
+
 # ===========================================================================
 # unable verdict
 # ===========================================================================
@@ -244,6 +287,19 @@ def test_unable_exit_1_echoes_summary(tmp_path):
     fm = flowmap_text(r)
     row = [ln for ln in fm.splitlines() if ln.startswith("| login-flow |")][0]
     assert row.rstrip().endswith("| unable |")
+
+
+def test_unable_with_failed_step_is_malformed_exit_1(tmp_path):
+    # skills/orbit-qa-flow.md: "verdict: 'unable' NEVER pairs with a
+    # failed_step — the environment, not a step, is what gave out."
+    r = repo(tmp_path)
+    flow_dir = teach_flow(r)
+    before = meta(flow_dir)
+    result = run(r, "login-flow", run_cmd=fake_agent(tmp_path, {
+        "verdict": "unable", "failed_step": 1, "screenshot": None,
+        "summary": "env trouble mid-step", "healed_candidate": None}))
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert meta(flow_dir) == before
 
 
 # ===========================================================================
@@ -274,6 +330,38 @@ def test_stale_preexisting_verdict_ignored_exit_1(tmp_path):
     result = run(r, "login-flow", run_cmd=fake_agent(tmp_path, verdict=None))
     assert result.returncode == 1, result.stdout + result.stderr
     assert meta(flow_dir)["runs"] == 0                   # stale file never counted as this run
+
+
+def fake_agent_writes_sibling_flow_verdict(tmp_path, other_flow, name="sibling_flow_agent"):
+    """Writes a FRESH (mtime >= this run's start) verdict for `other_flow`,
+    never for the flow actually requested — used to prove the filename-
+    suffix glob (`*-<flow>.json`) alone is never trusted for identity: flow
+    "app" suffix-matches a file like "<ts>-my-app.json" just as much as
+    "<ts>-app.json" would."""
+    script = tmp_path / f"{name}.py"
+    script.write_text(textwrap.dedent(f"""\
+        import json, os
+        from datetime import datetime, timezone
+        from pathlib import Path
+        ap_state = Path(os.environ["AP_STATE"])
+        runs = ap_state / "qa" / "runs"
+        runs.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S.%fZ")
+        v = {{"flow": {other_flow!r}, "verdict": "pass", "failed_step": None,
+             "screenshot": None, "summary": "unrelated flow", "healed_candidate": None}}
+        (runs / f"{{ts}}-{other_flow}.json").write_text(json.dumps(v))
+        """))
+    return f"{sys.executable} {script}"
+
+
+def test_locate_verdict_ignores_suffix_matching_sibling_flow(tmp_path):
+    r = repo(tmp_path)
+    teach_flow(r, name="app")
+    result = run(r, "app", run_cmd=fake_agent_writes_sibling_flow_verdict(tmp_path, "my-app"))
+    # "app"'s own agent never wrote an "app" verdict — only a fresher,
+    # filename-suffix-matching "my-app" one — so this must still read as
+    # no-verdict-for-app, not silently pass off "my-app"'s outcome.
+    assert result.returncode == 1, result.stdout + result.stderr
 
 
 # ===========================================================================

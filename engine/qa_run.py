@@ -213,7 +213,13 @@ def _run_flow_agent(qa_cfg: dict, cfg_all: dict, flow_name: str, target: Path,
 def _locate_verdict(ap_state: Path, flow_name: str, start: float) -> Path | None:
     """Newest $AP_STATE/qa/runs/*-<flow>.json with mtime >= start — a stale
     file from a PRIOR run of this (or another) flow must never be mistaken
-    for this run's own outcome. None if nothing fresh is found."""
+    for this run's own outcome. None if nothing fresh is found.
+
+    The glob is a filename SUFFIX match (`*-<flow>.json`) which a sibling
+    flow name can accidentally satisfy too — flow "app" suffix-matches
+    "...-my-app.json" just as much as "...-app.json". The filename alone is
+    never trusted for identity: each mtime-fresh candidate is parsed and
+    only kept if its own JSON `flow` field equals the requested flow."""
     runs_dir = ap_state / "qa" / "runs"
     if not runs_dir.is_dir():
         return None
@@ -225,6 +231,12 @@ def _locate_verdict(ap_state: Path, flow_name: str, start: float) -> Path | None
             continue
         if mtime < start:
             continue
+        try:
+            v = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(v, dict) or v.get("flow") != flow_name:
+            continue          # filename-suffix false match — not actually this flow's verdict
         if best is None or mtime > best[0]:
             best = (mtime, p)
     return best[1] if best else None
@@ -243,11 +255,26 @@ def _validate_verdict(v, flow_name: str, ap_state: Path) -> str | None:
         candidate = v.get("healed_candidate")
         if not candidate:
             return "verdict is 'healed' but healed_candidate is missing"
-        if not (ap_state / "qa" / "heal" / candidate).is_file():
+        # Path-containment discipline, mirrored from qa_check.py's
+        # _unsafe_qa_path_reason (same threat class: an agent-written field
+        # naming a path must never be trusted to stay inside the directory
+        # it's supposed to point into) — reused via a local import for the
+        # same reason _flow_mcp_config's import of qa_check is local/lazy.
+        import qa_check
+        heal_dir = ap_state / "qa" / "heal"
+        reason = qa_check._unsafe_qa_path_reason(heal_dir, candidate)
+        if reason:
+            return f"verdict names heal candidate {candidate!r} which is unsafe ({reason})"
+        if not (heal_dir / candidate).is_file():
             return (f"verdict names heal candidate {candidate!r} but no such file exists "
-                     f"under {ap_state / 'qa' / 'heal'}")
-    if verdict == "fail" and v.get("failed_step") is None:
-        return "verdict is 'fail' but failed_step is missing"
+                     f"under {heal_dir}")
+    if verdict == "fail":
+        if v.get("failed_step") is None:
+            return "verdict is 'fail' but failed_step is missing"
+        if not v.get("screenshot"):
+            return "verdict is 'fail' but screenshot is missing"
+    if verdict == "unable" and v.get("failed_step") is not None:
+        return "verdict is 'unable' but failed_step is set (environment trouble never pairs with a step)"
     return None
 
 
