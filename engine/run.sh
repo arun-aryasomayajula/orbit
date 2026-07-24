@@ -262,12 +262,20 @@ one_iteration() {
     # observed behaviour contradicting a `required` category's contract — blocks
     # the ship; every other outcome (skipped, unable-to-run, agent error) ships.
     if [ -n "$tid" ]; then
-      python3 "$ENGINE/qa_check.py" "$tid" "$WT" >>"$LOGDIR/orbit.log" 2>&1
-      if [ "$?" = "3" ]; then
+      python3 "$ENGINE/qa_check.py" "$tid" "$WT" "$patch" >>"$LOGDIR/orbit.log" 2>&1
+      local qa_rc="$?"
+      if [ "$qa_rc" = "3" ]; then
         log "runtime check contradicted the contract — escalating instead of shipping (patch kept: ${patch:-none})"
         python3 "$ENGINE/ledger.py" escalate "$tid" "runtime check: observed behaviour contradicts acceptance criteria (see reviews/task-$tid-runtime.md)" >>"$LOGDIR/orbit.log" 2>&1 \
           || log "WARN: ledger escalate not recorded for $tid (lifecycle gate or write error — see orbit.log)"
         notify "🛑 Orbit runtime check" "task $tid: the running product contradicts the contract — escalated, nothing pushed" "$DASH"
+        rm -f "$marker" "$STATE/.cycle-candidate" 2>/dev/null || true
+        echo OK; return
+      elif [ "$qa_rc" = "4" ]; then
+        # dev⇄QA bounce: qa_check.py already re-filed the SAME task (status
+        # queued, findings folded in) and cleared its ledger entry — nothing
+        # to push, nothing to escalate, and qa_check.py already notified.
+        log "QA bounced task $tid back to the queue"
         rm -f "$marker" "$STATE/.cycle-candidate" 2>/dev/null || true
         echo OK; return
       fi

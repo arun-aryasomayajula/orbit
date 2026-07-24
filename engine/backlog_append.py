@@ -108,6 +108,28 @@ def set_task_field(backlog: Path, tid: str, field: str, value: str) -> bool:
     return True
 
 
+def get_task_field(backlog: Path, tid: str, field: str) -> str | None:
+    """Read one scalar field's raw (un-parsed) value off one task's block.
+
+    Sibling reader to `set_task_field` — same block-location discipline
+    (locate `- id:`, bound at the next `- id:`), no YAML round-trip. Returns
+    the raw text after `field:` (still quoted/escaped if it was written
+    quoted — callers that need the Python value should json/yaml-decode it
+    themselves). → None if the task isn't in the backlog, or the field isn't
+    present on its block.
+    """
+    text = backlog.read_text()
+    start = re.search(rf"^(\s*)- id:\s*{re.escape(tid)}\s*(?:#.*)?$", text, re.MULTILINE)
+    if not start:
+        return None
+    nxt = re.search(r"^\s*- id:\s*\S", text[start.end():], re.MULTILINE)
+    end = start.end() + (nxt.start() if nxt else len(text) - start.end())
+    block = text[start.end():end]
+    pat = re.compile(rf"^\s*{re.escape(field)}:(.*)$", re.MULTILINE)
+    m = pat.search(block)
+    return m.group(1).strip() if m else None
+
+
 def append_tasks(backlog: Path, proposals: list[dict], source: str,
                  header: str, dry_run: bool = False) -> tuple[list[str], list[tuple[str, str]]]:
     """Append valid, new proposals to backlog.yaml. → (added_ids, [(id, why-skipped)])."""

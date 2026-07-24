@@ -11,6 +11,7 @@
 # Run: python3 -m pytest tests/test_qa_check.py -v   (from orbit/)
 import json
 import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -30,7 +31,7 @@ def target(tmp_path, extra_cfg="", category="frontend"):
     return tmp_path / "repo"
 
 
-def run(repo, agent_cmd=None, qa_agent_cmd=None, tid="t1"):
+def run(repo, agent_cmd=None, qa_agent_cmd=None, tid="t1", patch=None):
     env = dict(os.environ, AP_HOME=str(repo / ".autopilot"),
                AP_STATE=str(repo / ".autopilot" / "state"), ORBIT_HOME=str(ROOT))
     env.pop("ORBIT_RUNTIME_CMD", None)
@@ -39,8 +40,10 @@ def run(repo, agent_cmd=None, qa_agent_cmd=None, tid="t1"):
         env["ORBIT_RUNTIME_CMD"] = agent_cmd
     if qa_agent_cmd:
         env["ORBIT_QA_CMD"] = qa_agent_cmd
-    return subprocess.run([sys.executable, str(CHECK), tid, str(repo)],
-                          capture_output=True, text=True, env=env)
+    argv = [sys.executable, str(CHECK), tid, str(repo)]
+    if patch is not None:
+        argv.append(patch)
+    return subprocess.run(argv, capture_output=True, text=True, env=env)
 
 
 # ===========================================================================
@@ -316,3 +319,201 @@ def test_qa_stale_verdict_removed_before_run(tmp_path):
     r = run(repo, qa_agent_cmd=f"{sys.executable} -c 'pass'")   # agent writes nothing this run
     assert r.returncode == 0                          # missing-verdict path, not the stale fail
     assert not stale.exists()
+
+
+# ===========================================================================
+# Section 5 — dev⇄QA bounce protocol (Task 16): decide_fail_action on a
+# fail/required verdict either bounces the SAME task back onto the queue
+# (qa_bounces < qa.max_bounces → exit 4) or escalates with evidence attached
+# at the cap (exit 3) — with a safe-fallback-to-escalate on any error.
+# ===========================================================================
+
+def bounce_target(tmp_path, max_bounces=2, qa_bounces=None, category="feature",
+                  ledger_state="committed"):
+    """A QA-gated target (config.yaml + queue.json via target()) PLUS the
+    backlog.yaml + ledger.json the bounce protocol reads/writes.
+    `ledger_state=None` → no ledger.json entry at all (tests the CRITICAL
+    missing-entry WARN)."""
+    cfg = textwrap.dedent(f"""\
+        qa:
+          max_bounces: {max_bounces}
+          gate_categories:
+            {category}: required
+        """)
+    repo = target(tmp_path, cfg, category=category)
+    ap = repo / ".autopilot"
+    lines = [
+        "tasks:",
+        "  - id: t1",
+        '    title: "Fix the login button click handler"',
+        "    status: queued",
+        "    autopilot: allow",
+        f"    category: {category}",
+    ]
+    if qa_bounces is not None:
+        lines.append(f"    qa_bounces: {qa_bounces}")
+    lines += [
+        "    acceptance_criteria:",
+        '      - "Clicking login navigates to the dashboard"',
+        "",
+    ]
+    (ap / "backlog.yaml").write_text("\n".join(lines))
+    if ledger_state is not None:
+        (ap / "state" / "ledger.json").write_text(json.dumps(
+            {"entries": {"t1": {"state": ledger_state, "title": "fix login"}}}))
+    return repo
+
+
+def _backlog_text(repo):
+    return (repo / ".autopilot" / "backlog.yaml").read_text()
+
+
+def _ledger_entries(repo):
+    p = repo / ".autopilot" / "state" / "ledger.json"
+    return json.loads(p.read_text())["entries"] if p.exists() else {}
+
+
+def _queue_tasks(repo):
+    p = repo / ".autopilot" / "state" / "queue.json"
+    return json.loads(p.read_text()).get("tasks", []) if p.exists() else []
+
+
+def _qa_findings_value(text):
+    m = re.search(r'(?m)^\s*qa_findings:(.*)$', text)
+    assert m, f"no qa_findings field in:\n{text}"
+    return json.loads(m.group(1).strip())
+
+
+def test_qa_fail_bounces_below_cap(tmp_path):
+    repo = bounce_target(tmp_path, max_bounces=2, qa_bounces=None)   # absent → reads as 0
+    r = run(repo, qa_agent_cmd=qa_agent(tmp_path, {
+        "ran": True, "verdict": "fail", "contradicts": True,
+        "summary": "login button contradicted"}))
+    assert r.returncode == 4, r.stdout + r.stderr
+
+    text = _backlog_text(repo)
+    assert re.search(r"(?m)^\s*qa_bounces: 1\s*$", text), text
+    assert re.search(r"(?m)^\s*status: queued\s*$", text), text
+    findings = _qa_findings_value(text)
+    assert "login button contradicted" in findings
+    assert ".autopilot/state/qa/task-t1/findings.md" in findings
+    assert "previous attempt patch: none kept" in findings   # no patch arg passed
+
+    # qa-verdict is stamped, then clear immediately removes the whole entry —
+    # clear wins; the ledger ends up with NO entry for a bounced task.
+    assert _ledger_entries(repo) == {}
+
+    tasks = _queue_tasks(repo)
+    assert len(tasks) == 1 and tasks[0]["id"] == "t1"
+    assert "QA FINDINGS" in tasks[0]["task"]
+    assert "login button contradicted" in tasks[0]["task"]
+
+
+def test_qa_fail_bounce_records_patch_path(tmp_path):
+    repo = bounce_target(tmp_path, max_bounces=2, qa_bounces=1)
+    patch_file = tmp_path / "cycle.patch"
+    patch_file.write_text("diff --git a/x b/x\n")
+    r = run(repo, qa_agent_cmd=qa_agent(tmp_path, {
+        "ran": True, "verdict": "fail", "contradicts": True, "summary": "still broken"}),
+        patch=str(patch_file))
+    assert r.returncode == 4, r.stdout + r.stderr
+
+    text = _backlog_text(repo)
+    assert re.search(r"(?m)^\s*qa_bounces: 2\s*$", text), text
+    findings = _qa_findings_value(text)
+    assert f"previous attempt patch: {patch_file}" in findings
+
+
+def test_qa_fail_argv2_only_still_works_no_patch_arg(tmp_path):
+    # run.sh's 3rd argv (patch) is optional — argv-2-only invocations (any
+    # caller that predates this change) must still bounce cleanly.
+    repo = bounce_target(tmp_path, max_bounces=2, qa_bounces=0)
+    r = run(repo, qa_agent_cmd=qa_agent(tmp_path, {
+        "ran": True, "verdict": "fail", "contradicts": True, "summary": "x"}))   # patch=None
+    assert r.returncode == 4, r.stdout + r.stderr
+
+
+def test_qa_fail_escalates_at_cap_with_attachments(tmp_path):
+    repo = bounce_target(tmp_path, max_bounces=2, qa_bounces=2)
+    qa_dir = repo / ".autopilot" / "state" / "qa" / "task-t1"
+    qa_dir.mkdir(parents=True)
+    (qa_dir / "01-login.png").write_bytes(b"fake png")
+    (qa_dir / "findings.md").write_text("drove the login flow; button did nothing")
+
+    before_text = _backlog_text(repo)
+    r = run(repo, qa_agent_cmd=qa_agent(tmp_path, {
+        "ran": True, "verdict": "fail", "contradicts": True, "summary": "login dead",
+        "screenshots": ["task-t1/01-login.png"]}))
+    assert r.returncode == 3, r.stdout + r.stderr
+
+    assert _backlog_text(repo) == before_text     # NOT re-queued — cap reached, backlog untouched
+
+    entries = _ledger_entries(repo)
+    e = entries["t1"]
+    assert e["qa"]["verdict"] == "fail" and e["qa"]["summary"] == "login dead"
+    kinds = {a["kind"]: a["path"] for a in e.get("attachments", [])}
+    assert kinds["screenshot"] == str((qa_dir / "01-login.png").resolve())
+    assert kinds["report"] == str((qa_dir / "findings.md").resolve())
+
+
+def test_qa_fail_at_cap_no_screenshots_or_report_attaches_nothing(tmp_path):
+    repo = bounce_target(tmp_path, max_bounces=2, qa_bounces=2)   # no qa/task-t1/ dir at all
+    r = run(repo, qa_agent_cmd=qa_agent(tmp_path, {
+        "ran": True, "verdict": "fail", "contradicts": True, "summary": "login dead"}))
+    assert r.returncode == 3, r.stdout + r.stderr
+    e = _ledger_entries(repo)["t1"]
+    assert e["qa"]["verdict"] == "fail"
+    assert not e.get("attachments")
+    assert "WARN" in r.stdout
+
+
+def test_qa_fail_at_cap_traversal_screenshot_rejected(tmp_path):
+    repo = bounce_target(tmp_path, max_bounces=2, qa_bounces=2)
+    r = run(repo, qa_agent_cmd=qa_agent(tmp_path, {
+        "ran": True, "verdict": "fail", "contradicts": True, "summary": "login dead",
+        "screenshots": ["../../etc/x.png"]}))
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert "WARN" in r.stdout
+
+    entries = _ledger_entries(repo)
+    atts = entries.get("t1", {}).get("attachments", [])
+    assert not any(a["kind"] == "screenshot" for a in atts)
+
+
+def test_qa_fail_at_cap_absolute_screenshot_rejected(tmp_path):
+    repo = bounce_target(tmp_path, max_bounces=2, qa_bounces=2)
+    r = run(repo, qa_agent_cmd=qa_agent(tmp_path, {
+        "ran": True, "verdict": "fail", "contradicts": True, "summary": "login dead",
+        "screenshots": ["/etc/passwd"]}))
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert "WARN" in r.stdout
+    entries = _ledger_entries(repo)
+    atts = entries.get("t1", {}).get("attachments", [])
+    assert not any(a["kind"] == "screenshot" for a in atts)
+
+
+def test_qa_fail_at_cap_missing_ledger_entry_warns_loudly(tmp_path):
+    repo = bounce_target(tmp_path, max_bounces=2, qa_bounces=2, ledger_state=None)
+    r = run(repo, qa_agent_cmd=qa_agent(tmp_path, {
+        "ran": True, "verdict": "fail", "contradicts": True, "summary": "login dead"}))
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert "WARN" in r.stdout and "no ledger entry" in r.stdout.lower()
+    assert _ledger_entries(repo) == {}   # confirmed: still nothing recorded — no silent success
+
+
+def test_qa_fail_bounce_path_exception_falls_back_to_escalate(tmp_path):
+    # No backlog.yaml at all (unlike a normal target, which never creates one
+    # either) — reading qa_bounces raises inside the bounce path. Must fail
+    # SAFE (escalate), never half-bounce and never silently ship.
+    cfg = textwrap.dedent("""\
+        qa:
+          max_bounces: 2
+          gate_categories:
+            feature: required
+        """)
+    repo = target(tmp_path, cfg, category="feature")
+    r = run(repo, qa_agent_cmd=qa_agent(tmp_path, {
+        "ran": True, "verdict": "fail", "contradicts": True, "summary": "x broke"}))
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert "WARN" in r.stdout
+    assert "escalat" in r.stdout.lower()
