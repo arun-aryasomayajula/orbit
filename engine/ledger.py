@@ -25,6 +25,8 @@ Usage:
   ledger.py escalate <id> <reason>      # mark escalated (needs a human)
   ledger.py pr <id> <url>               # record the PR the wrapper opened for the ship
   ledger.py attach-patch <id> <path>    # record the wrapper's captured patch (backup)
+  ledger.py attach <id> screenshot|log|report <path> [label]  # record a QA artifact
+  ledger.py qa-verdict <id> pass|fail|unable [summary]  # record the QA gate's verdict
   ledger.py mark <id> merged|rejected [note]  # review outcome (feeds merge-rate metrics)
   ledger.py reverted <id> [note]        # record a post-merge revert + the operator's why
   ledger.py can <id> <event>            # would <event> be legal now? exit 0/3 (dry check)
@@ -180,6 +182,42 @@ def cmd_attach_patch(tid, path):
         _save(data)
 
 
+ATTACHMENT_KINDS = ("screenshot", "log", "report")
+QA_VERDICTS = ("pass", "fail", "unable")
+
+
+def cmd_attach(tid, kind, path, label=""):
+    # Record a QA-produced artifact (screenshot/log/report) for this task —
+    # metadata only, no lifecycle transition, no `state` change. Mirrors
+    # cmd_attach_patch: an absent entry is left untouched (silent no-op)
+    # rather than auto-vivified like cmd_pr does.
+    if kind not in ATTACHMENT_KINDS:
+        print(f"invalid attachment kind '{kind}' ({'|'.join(ATTACHMENT_KINDS)})", file=sys.stderr)
+        sys.exit(2)
+    data = _load()
+    if str(tid) in data["entries"]:
+        e = data["entries"][str(tid)]
+        e.setdefault("attachments", []).append(
+            {"kind": kind, "path": path, "label": label, "at": _now()})
+        e["updated_at"] = _now()
+        _save(data)
+
+
+def cmd_qa_verdict(tid, verdict, summary=""):
+    # Record the QA gate's verdict for this task — metadata only, no
+    # lifecycle transition, no `state` change. Overwrites on repeat (latest
+    # wins). Mirrors cmd_attach_patch: an absent entry is a silent no-op.
+    if verdict not in QA_VERDICTS:
+        print(f"invalid qa verdict '{verdict}' ({'|'.join(QA_VERDICTS)})", file=sys.stderr)
+        sys.exit(2)
+    data = _load()
+    if str(tid) in data["entries"]:
+        e = data["entries"][str(tid)]
+        e["qa"] = {"verdict": verdict, "summary": summary, "at": _now()}
+        e["updated_at"] = _now()
+        _save(data)
+
+
 def cmd_mark(tid, outcome, note="", force=False):
     # Record the human review outcome (merged / rejected) — the raw data behind
     # the dashboard's merge-rate-per-source metric. Keeps the entry so the
@@ -307,6 +345,13 @@ def cmd_show():
             line += f"\n      patch: {e['patch']}"
         if e.get("reason"):
             line += f"\n      reason: {e['reason']}"
+        for a in e.get("attachments") or []:
+            line += (f"\n      attach[{a.get('kind')}]: {a.get('path')}"
+                      + (f" — {a['label']}" if a.get("label") else ""))
+        if e.get("qa"):
+            q = e["qa"]
+            line += (f"\n      qa: {q.get('verdict')}"
+                      + (f" — {q.get('summary')}" if q.get("summary") else ""))
         print(line)
 
 
@@ -330,6 +375,10 @@ def main(argv):
             cmd_pr(rest[0], rest[1])
         elif cmd == "attach-patch":
             cmd_attach_patch(rest[0], rest[1])
+        elif cmd == "attach":
+            cmd_attach(rest[0], rest[1], rest[2], rest[3] if len(rest) > 3 else "")
+        elif cmd == "qa-verdict":
+            cmd_qa_verdict(rest[0], rest[1], rest[2] if len(rest) > 2 else "")
         elif cmd == "mark":
             cmd_mark(rest[0], rest[1], rest[2] if len(rest) > 2 else "", force=force)
         elif cmd == "reverted":
