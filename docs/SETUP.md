@@ -274,18 +274,77 @@ into its `meta.json` + `FLOWMAP.md` row. Exit codes:
 The replay agent tells drift from breakage: if it needed one OBVIOUSLY-equivalent path to
 still satisfy every success criterion (a renamed button, a moved-but-recognizable
 control), the verdict is **healed** — a corrected-steps candidate is written to
-`$AP_STATE/qa/heal/`, **pending approval** (the dashboard shows the pending count;
-the approval action itself lands next phase) — the flow dir's own steps are never
-touched by a heal. If the intent genuinely can't be achieved, the verdict is **fail** —
-one row is appended to `ops/qa/SEEN.md`, which the `qa` signal adapter turns into a
-`status: proposed` task for a human to triage, the same discovery pipeline any other
-adapter-sourced finding flows through.
+`$AP_STATE/qa/heal/`, **pending approval** on the dashboard's QA view (see
+"Self-healing" below) — the flow dir's own steps are never touched by a heal
+until a human approves it. If the intent genuinely can't be achieved, the
+verdict is **fail** — one row is appended to `ops/qa/SEEN.md`, which the `qa`
+signal adapter turns into a `status: proposed` task for a human to triage, the
+same discovery pipeline any other adapter-sourced finding flows through.
 
 On a flow's first fully-clean replay (no drift, every success criterion met), the
 agent also writes `steps.json` into the flow dir, alongside its own `meta.json`/
 `FLOWMAP.md` updates. Treat that the same as any other flow-dir change: review the
 new `steps.json` against `steps.spec.ts` and `git add`/commit it once you're happy —
 `orbit qa --flow` never commits on your behalf, replay or teach alike.
+
+**Regression sweeps:**
+```bash
+orbit qa <target> --regression [--if-changed] [--timeout N]
+```
+Replays every APPROVED flow (has a `steps.json` — replay-proven at least
+once, not merely taught) sequentially, through the exact same per-flow path
+`--flow` uses; sorted by name, capped at `qa.regression.max_flows_per_run`
+(default 10 — a dropped flow is always printed, never silently). In operator
+terms:
+- **`--if-changed`** is the form `run.sh` calls inline every cycle (right
+  after the knowledge autorefresh line, logged best-effort — a failed sweep
+  never breaks your loop). It's a no-op UNLESS a cursor
+  (`$AP_STATE/qa/.regression-cursor`) says a sweep is due: either
+  `qa.regression.schedule_hours` has elapsed since the last one (default 24;
+  0 disables the cadence), or `qa.regression.on_merge` (default true) and
+  `origin/<base_branch>` has moved (or new merge markers landed) since the
+  cursor was last written.
+- **Without `--if-changed`** (a direct CLI call, or the dashboard's
+  "Sweep flows now" button) the cursor is ignored entirely — every
+  invocation just sweeps, unconditionally.
+- **Locking:** `$AP_STATE/qa/.qa-running` keeps a sweep from overlapping a
+  second sweep, a `--flow` replay, or an `--explore` crawl — a busy lock is a
+  benign skip (exit 0), never a failure.
+- **Deadline:** a sweep stops LAUNCHING new flows once its own elapsed time
+  passes twice `qa.timeout_seconds` — a flow already running keeps its full
+  per-flow timeout, and a deadline-truncated sweep is still logged, never
+  silently cut short.
+
+Exit codes mirror `--flow`: `0` no fails / lock busy / not due, `3` any flow
+failed, `1` an infra crash, `2` usage (bad `qa.flows_dir`, or no `qa:` block
+on a non-`--if-changed` call).
+
+**Self-healing: heal approval.** A `healed` verdict from either `--flow` or a
+regression sweep mines a candidate under `$AP_STATE/qa/heal/<flow>--<ts>.json`
+— it is NEVER applied automatically. On the dashboard's QA view, each pending
+candidate shows the flow, the mined reason, a step diff, and a screenshot;
+**Approve** overwrites that flow's own `steps.json` with the corrected steps
+and archives the candidate to `heal/approved/`; **Reject** requires a reason
+and archives it to `heal/rejected/` untouched. Either way, the resulting
+change under `<flows_dir>/<name>/` is a normal git diff — review and
+`git add`/commit it like any other flow-dir change; the dashboard writes the
+file, but nothing reaches your base branch without your own commit.
+
+**Exploratory crawls (opt-in):**
+```bash
+orbit qa <target> --explore [--timeout N]
+```
+Off by default (`qa.exploratory.enabled: false`). When enabled, a bounded,
+same-origin crawl starts from `qa.base_url` (breadth-first, capped by
+`qa.exploratory.max_pages`) looking for defects your taught flows and task
+criteria never touch — console errors, broken navigation, dead links,
+obviously broken rendering. It never produces a verdict against any task;
+brand-new findings are filed straight to `ops/qa/SEEN.md`, the same
+`qa` signal adapter turns into `status: proposed` tasks for triage. Trigger
+it manually (the CLI above), from the dashboard's **🔭 Explore now**
+button (visible only when enabled), or from your own scheduler — there is no
+`--if-changed`/cursor variant and no `run.sh` wiring; a human decides when to
+explore.
 
 ## Opt-in task sources (signal adapters)
 Beyond the native `backlog.yaml`, every extra name in `sources:` runs a matching

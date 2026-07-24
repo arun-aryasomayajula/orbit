@@ -7,13 +7,14 @@ surveys the repo into an evidence-backed backlog, **epics** plan big work into
 human-approved specs and loop-sized slices, the **build loop** works one task at a
 time around the clock, each ship lands as **one atomic commit on its own review
 branch** (optionally as a ready-made PR), and **signal adapters** feed production
-evidence back into the backlog. Two things never happen without a human click:
-work entering the queue, and work merging.
+evidence back into the backlog — a browser-driving QA gate adds its own regression
+sweeps and self-healing flow replays to that same evidence stream. Two things never
+happen without a human click: work entering the queue, and work merging.
 
 ```
 intake ─▶ backlog ─▶ (epic? plan ─▶ you approve ─▶ decompose) ─▶ you queue
 one cycle:  pick task ─▶ route (maker · model · skill · tracks) ─▶ plan ─▶ build ⇄ check ─▶ verify-spec ─▶ commit ─▶ push review branch (+PR) ─▶ you merge
-signals (logs · QA · scorecards) ─▶ proposed tasks ─▶ back to triage
+signals (logs · QA · regression sweeps · scorecards) ─▶ proposed tasks ─▶ back to triage
 ```
 
 One notch forward per cycle, never backward, every change independently reviewable.

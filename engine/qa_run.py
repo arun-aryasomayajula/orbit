@@ -143,8 +143,11 @@ Regression sweeps (Task 27, `--regression [--if-changed]`):
     ordering.
 
 Exit codes (--flow):
-    0   pass, or healed (candidate is printed — "pending approval", the
-        dashboard approval UI itself is Phase 5; this is a forward pointer)
+    0   pass, or healed (candidate is printed — "pending approval"; approve or
+        reject it from the dashboard's QA view, which writes the corrected
+        steps into the flow's own committed steps.json or archives the
+        candidate — see command_center.py's do_qa_action heal-approve/
+        heal-reject, Task 26)
     3   fail (the SEEN.md pointer is printed — see skills/orbit-qa-flow.md)
     1   unable, no verdict found (incl. only-stale-files-present), a
         malformed verdict, or the agent itself could not be run/finished

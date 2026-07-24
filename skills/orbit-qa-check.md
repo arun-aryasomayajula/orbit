@@ -60,7 +60,25 @@ ONE row to `ops/qa/SEEN.md` (create it with a header if missing) —
 NEVER affect `criteria` or `verdict` below — they are separately triaged, not
 this task's business.
 
-## 5. Write outputs — verdict LAST (it is the completion signal)
+## 5. Replay overlapping taught flows (if any)
+Check for `$AP_HOME/<flows_dir>/FLOWMAP.md` (default `qa/flows` — the map file
+sits one directory UP from `flows_dir`, so `$AP_HOME/qa/FLOWMAP.md` by
+default). If it exists, read it. For each row whose flow dir
+(`$AP_HOME/<flows_dir>/<name>/`) has a `steps.json` (replay-proven, not
+merely taught) AND whose entry path/pages overlap what this task's change
+touches (judge from the criteria + the diff, e.g. `git show HEAD --stat`),
+navigate the SAME browser there and replay it briefly — same MCP session, no
+second agent invocation. Cap: at most 3 overlapping flows; skip any you don't
+have time for — this check is deadline-conscious and never worth blowing
+your budget over.
+
+A broken overlapping flow: screenshot it, note it in findings.md, and append
+a `SEEN.md` row (step 4's format). It colors THIS task's `verdict` ONLY if it
+directly contradicts one of the task's own acceptance criteria (fold that
+into the criterion's judgment above, evidence cited); otherwise it's an
+unrelated finding like any other and never touches `criteria` or `verdict`.
+
+## 6. Write outputs — verdict LAST (it is the completion signal)
 - `$AP_STATE/qa/task-<id>/findings.md` — human narrative: what you launched,
   what you drove, per-criterion evidence, trimmed log excerpts.
 - `$AP_STATE/reviews/task-<id>-runtime.md` — copy/condense findings.md here

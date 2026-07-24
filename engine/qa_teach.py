@@ -5,7 +5,7 @@ committed flow library. The supervised-learning entry point of the QA vision
 once, states their intent + success criteria, and Orbit commits all three
 (intent, raw steps, replay bookkeeping) as one flow under
 `$AP_HOME/<qa.flows_dir>/<name>/` — ground truth the replay skill (Task 21)
-and heal protocol (Phase 5) both consume later.
+and heal protocol (Task 26) both consume later.
 
 No agent is present during a `teach` session — this is a deterministic CLI
 tool the human runs directly, which is why it does its own qa.services
@@ -218,7 +218,7 @@ def _update_flowmap(flowmap_path: Path, name: str, intent: str,
                      entry_path: str, last_verdict: str) -> None:
     """Append a `| name | intent | entry path | last verdict |` row, or
     replace it in place if `name` already has one — idempotent-safe so a
-    re-run (or a future Phase-5 re-teach) can never duplicate a flow's row."""
+    re-run (or a future re-teach) can never duplicate a flow's row."""
     flowmap_path.parent.mkdir(parents=True, exist_ok=True)
     text = flowmap_path.read_text() if flowmap_path.exists() else ""
     if not text.strip():

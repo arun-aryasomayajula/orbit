@@ -88,12 +88,25 @@ against the flow's own intent rather than a task's criteria. It's the supervised
 learning loop in miniature: the human demonstrates once, the machine imitates it
 thereafter, and drift never edits the demonstration in place — a UI change that still
 honors the intent mines a **heal candidate** under `$AP_STATE/qa/heal/`, gated on human
-approval (the dashboard surfaces the pending count; the approval action itself lands
-next phase), while a genuine break grades **fail** and feeds `ops/qa/SEEN.md` into the
-same triage pipeline any other signal adapter uses. `steps.json` — the normalized,
-healable step list — is written by the replay agent itself, only on the first fully
-clean pass (`teach` never writes it), and reviewed/committed the same way as any other
-flow-dir change.
+approval (the dashboard's QA view surfaces each candidate with its diff and a
+screenshot; **Approve** overwrites that flow's own `steps.json` with the corrected
+steps, **Reject** requires a reason and leaves it untouched — either way you review
+and commit the resulting flow-dir diff yourself, same as `teach`), while a genuine
+break grades **fail** and feeds `ops/qa/SEEN.md` into the same triage pipeline any
+other signal adapter uses. `steps.json` — the normalized, healable step list — is
+written by the replay agent itself, only on the first fully clean pass (`teach` never
+writes it), and reviewed/committed the same way as any other flow-dir change.
+
+**Closing the loop:** `orbit qa --regression` is what keeps this whole supervised-
+learning cycle honest over time rather than only at the moment a task's own QA gate
+happens to touch a page. A cursor-triggered (loop-driven, on merge/cadence) or
+human "sweep now" run replays every approved flow — teach once, replay on demand,
+heal what drifts with a human's approval, and sweep the library on a schedule so
+regressions on flows NO current task is touching still surface, feed `SEEN.md`, and
+come back around as proposed work. Teach → replay → heal-candidate → human approves
+→ regression sweep is the supervised-learning story in full: the machine imitates
+and mines corrections, but every write that sticks — the taught flow, the healed
+steps, the merge that ships — passes through a human click first.
 
 ## Model tiering (grounded in evidence, not vibes)
 The router assigns opus to hard-judgment categories (bug/feature/refactor/security) and sonnet to
