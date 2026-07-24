@@ -40,6 +40,7 @@ from pathlib import Path
 import yaml
 
 from backlog_lint import lint_task
+from backlog_append import SLUG_RE
 
 # ── path model ───────────────────────────────────────────────────────────────
 # ENGINE       : this repo's engine dir (ships command_center.py, its converter,
@@ -111,6 +112,9 @@ SHELL_FILE = ENGINE / "cc_shell.html"         # the SPA shell — read per reque
 REVIEWS = AP_STATE / "reviews"                # per-ship review packets (review_packet.py)
 DIFFDIR = AP_STATE / "diffs"                  # wrapper backup patches
 QA_DIR = AP_STATE / "qa"                      # QA gate screenshots/reports (confined /qa-shot, /qa-report)
+DEFAULT_QA_FLOWS_DIR = "qa/flows"             # mirrors qa_teach.py/qa_run.py's own default (each script
+                                               # carries its own copy of this small default — see qa_teach.py's
+                                               # _bad_flows_dir_reason comment for why)
 # launchd job label (used only to detect whether the daemon is loaded).
 LAUNCHD_LABEL = os.environ.get("ORBIT_LAUNCHD_LABEL", "com.orbit.autopilot")
 # Dollar spend is informational only — displayed, never a cap (the wrapper's
@@ -1117,6 +1121,154 @@ def read_qa_report(p: str) -> str | None:
     return resolved.read_text(errors="ignore")[:400_000]
 
 
+# ── QA flow library (Task 23) — the dashboard's QA view ──────────────────────
+# Data sources: $AP_HOME/<flows_dir>/<name>/{intent.md, meta.json} (the flow-
+# file format Task 20's `orbit teach` writes — see qa_teach.py), $AP_STATE/
+# qa/runs/*.json (run verdicts Task 21's replay skill writes, read by Task
+# 22's qa_run.py), $AP_STATE/qa/heal/*.json (heal candidates — Phase 5 owns
+# approve/reject; this view only counts the pending ones).
+_FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)$", re.DOTALL)
+
+
+def _qa_flows_root() -> Path:
+    cfg = _load_cfg()
+    qa_cfg = cfg.get("qa") if isinstance(cfg.get("qa"), dict) else {}
+    flows_dir = qa_cfg.get("flows_dir")
+    if not isinstance(flows_dir, str) or not flows_dir.strip():
+        flows_dir = DEFAULT_QA_FLOWS_DIR
+    return AP_HOME / flows_dir
+
+
+def _read_flow_intent(flow_dir: Path) -> tuple[str | None, str | None]:
+    """(intent_line, entry_path) from a flow's intent.md: frontmatter
+    (name/created/entry_path/tags) + the user's free-text intent (see
+    qa_teach.py's _render_intent_md — this is that format's reader). Never
+    raises: a missing file, unreadable bytes, no frontmatter, or a bad YAML
+    block all yield (None, None) rather than crash build_state (Task 23
+    requirement — a hand-edited or corrupt flow dir must still list)."""
+    try:
+        text = (flow_dir / "intent.md").read_text()
+    except OSError:
+        return None, None
+    m = _FRONTMATTER_RE.match(text)
+    if not m:
+        return None, None
+    fm_text, body = m.group(1), m.group(2)
+    entry_path = None
+    try:
+        fm = yaml.safe_load(fm_text)
+        if isinstance(fm, dict) and isinstance(fm.get("entry_path"), str):
+            entry_path = fm["entry_path"]
+    except Exception:
+        pass
+    intent_line = None
+    for ln in body.splitlines():
+        if ln.strip():
+            intent_line = ln.strip()
+            break
+    return intent_line, entry_path
+
+
+def _read_flow_meta(flow_dir: Path) -> tuple[str | None, str | None, int | None]:
+    """(last_verdict, last_run_at, runs) from a flow's meta.json. Defensive,
+    same discipline as _read_flow_intent: missing/unreadable/non-JSON/non-dict
+    meta.json, or fields of the wrong type, all yield None rather than a
+    crash or a lying value."""
+    try:
+        meta = json.loads((flow_dir / "meta.json").read_text())
+        if not isinstance(meta, dict):
+            raise ValueError
+    except (OSError, ValueError):
+        return None, None, None
+    lv, lra, runs = meta.get("last_verdict"), meta.get("last_run_at"), meta.get("runs")
+    return (lv if isinstance(lv, str) else None,
+            lra if isinstance(lra, str) else None,
+            runs if isinstance(runs, int) else None)
+
+
+def qa_flow_library() -> dict | None:
+    """The QA view's data: the taught-flow library, the 10 newest run
+    verdicts, and the pending-heal count. None when the target has no flows
+    dir, or it has one with zero flows — build_state then OMITS the
+    `qa_flows` key entirely, so a target with no QA story yet sees a
+    byte-identical /api/state (existing consumers see no change)."""
+    flows_root = _qa_flows_root()
+    if not flows_root.is_dir():
+        return None
+    names = sorted(p.name for p in flows_root.iterdir() if p.is_dir())
+    if not names:
+        return None
+
+    flows = []
+    for name in names:
+        flow_dir = flows_root / name
+        intent_line, entry_path = _read_flow_intent(flow_dir)
+        last_verdict, last_run_at, runs = _read_flow_meta(flow_dir)
+        flows.append({"name": name, "intent_line": intent_line, "entry_path": entry_path,
+                      "last_verdict": last_verdict, "last_run_at": last_run_at, "runs": runs})
+
+    runs_dir = QA_DIR / "runs"
+    recent_runs = []
+    if runs_dir.is_dir():
+        dated = []
+        for p in runs_dir.glob("*.json"):
+            try:
+                dated.append((p.stat().st_mtime, p))
+            except OSError:
+                continue
+        dated.sort(key=lambda t: t[0], reverse=True)
+        for _, p in dated[:10]:
+            try:
+                v = json.loads(p.read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(v, dict):
+                continue
+            row = dict(v)
+            row["file"] = p.name
+            recent_runs.append(row)
+
+    heal_dir = QA_DIR / "heal"
+    pending_heals = 0
+    if heal_dir.is_dir():
+        try:
+            pending_heals = sum(1 for p in heal_dir.iterdir() if p.is_file())
+        except OSError:
+            pending_heals = 0
+
+    return {"flows": flows, "recent_runs": recent_runs, "pending_heals": pending_heals}
+
+
+def do_qa_action(payload: dict) -> dict:
+    """POST /qa-action — flow-library actions from the QA view. Only
+    run-flow is implemented: validates the flow name (SLUG_RE discipline,
+    same as qa_teach.py/qa_run.py) and that the flow actually exists, then
+    spawns `qa_run.py <target> --flow <name>` DETACHED (do_epic_action's
+    Popen pattern), logging to $AP_STATE/logs/qa-run-<name>.log. Heal
+    approve/reject are Phase 5 — refused here with a clear message rather
+    than silently doing nothing."""
+    action = (payload.get("action") or "").strip()
+    flow = (payload.get("flow") or "").strip()
+    if action in ("heal-approve", "heal-reject"):
+        return {"ok": False,
+                "msg": "heal approval is coming in Phase 5 — not available from the dashboard yet"}
+    if action != "run-flow":
+        return {"ok": False, "msg": f"unknown qa action '{action}'"}
+    if not SLUG_RE.match(flow):
+        return {"ok": False,
+                "msg": f"'{flow}' is not a valid flow name — use a lowercase slug "
+                       f"(letters/digits/./_/-, starting with a letter or digit)"}
+    flow_dir = _qa_flows_root() / flow
+    if not flow_dir.is_dir():
+        return {"ok": False, "msg": f"no flow named '{flow}' at {flow_dir}"}
+    log = LOGDIR / f"qa-run-{flow}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("ab") as lf:
+        subprocess.Popen([sys.executable, str(ENGINE / "qa_run.py"), str(REPO), "--flow", flow],
+                         stdout=lf, stderr=lf, stdin=subprocess.DEVNULL, start_new_session=True)
+    return {"ok": True, "msg": f"flow {flow} started"}
+
+
 def cycletail(max_lines: int = 120) -> dict:
     """Human-readable live tail of the newest cycle log. stream-json logs are
     parsed into narrator lines (agent text, tool calls, final cost); legacy
@@ -1924,6 +2076,12 @@ def build_state() -> dict:
                "branches": _branch_rows,
                "counts": {"next": len(next_up), "board": len(board), "done": len(done),
                           "escalated": len(escalated), "skipped": len(skips)}})
+
+    # Present only when the target actually has a flow library — absent (not
+    # null) so a target with no QA story sees a byte-identical /api/state.
+    qa_flows = qa_flow_library()
+    if qa_flows is not None:
+        rt["qa_flows"] = qa_flows
     return rt
 
 
@@ -2082,6 +2240,10 @@ class Handler(BaseHTTPRequestHandler):
                 msg = do_reap()
             elif path == "/lintok":
                 msg = do_lintok(tid)
+            elif path == "/qa-action":
+                result = do_qa_action({"action": (data.get("action", [""])[0]).strip(),
+                                       "flow": (data.get("flow", [""])[0]).strip()})
+                self._send(json.dumps(result).encode(), "application/json"); return
             elif path == "/epic-action":
                 if not tid:
                     self._send(b'{"ok":false,"msg":"missing epic id"}', "application/json", 400); return
