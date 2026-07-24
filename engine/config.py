@@ -133,6 +133,13 @@ def validate(target):
             for field in ("base_url", "model", "browser"):
                 if field in qa and (not isinstance(qa[field], str) or not qa[field]):
                     errs.append(f"qa.{field} must be a non-empty string, got {qa.get(field)!r}")
+            if "flows_dir" in qa:
+                fd = qa["flows_dir"]
+                if (not isinstance(fd, str) or not fd.strip() or fd.startswith("/")
+                        or ".." in fd.split("/")):
+                    errs.append(
+                        f"qa.flows_dir must be a non-empty relative path with no leading "
+                        f"'/' and no '..' segments, got {fd!r}")
             if "mcp_config" in qa and qa["mcp_config"] is not None and not isinstance(qa["mcp_config"], str):
                 errs.append(f"qa.mcp_config must be a string or null, got {qa.get('mcp_config')!r}")
             for field in ("ready_timeout_seconds", "timeout_seconds"):

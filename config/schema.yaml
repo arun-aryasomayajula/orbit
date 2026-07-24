@@ -134,6 +134,7 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
 #       launch: "npm run dev"
 #       ready: "http://localhost:3000"
 #   base_url: "http://localhost:3000"  # where the browser starts (required with services)
+#   flows_dir: "qa/flows"  # under .autopilot/, committed
 #   env: {PORT: "3000"}                # exported into service launches (dedicated QA ports)
 #   ready_timeout_seconds: 90
 #   timeout_seconds: 1200              # whole QA-agent budget per invocation

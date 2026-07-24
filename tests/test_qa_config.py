@@ -167,6 +167,49 @@ def test_validate_rejects_non_string_env_value(tmp_path):
     assert "qa.env" in r.stdout
 
 
+def test_validate_accepts_default_flows_dir(tmp_path):
+    r = _run("config.py", "validate", str(_cfg_repo(tmp_path, (
+        'qa:\n'
+        '  flows_dir: "qa/flows"\n'
+    ))))
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_validate_accepts_custom_flows_dir(tmp_path):
+    r = _run("config.py", "validate", str(_cfg_repo(tmp_path, (
+        'qa:\n'
+        '  flows_dir: "browser-flows"\n'
+    ))))
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_validate_rejects_absolute_flows_dir(tmp_path):
+    r = _run("config.py", "validate", str(_cfg_repo(tmp_path, (
+        'qa:\n'
+        '  flows_dir: "/abs"\n'
+    ))))
+    assert r.returncode == 1
+    assert "qa.flows_dir" in r.stdout
+
+
+def test_validate_rejects_flows_dir_with_dotdot(tmp_path):
+    r = _run("config.py", "validate", str(_cfg_repo(tmp_path, (
+        'qa:\n'
+        '  flows_dir: "../x"\n'
+    ))))
+    assert r.returncode == 1
+    assert "qa.flows_dir" in r.stdout
+
+
+def test_validate_rejects_empty_flows_dir(tmp_path):
+    r = _run("config.py", "validate", str(_cfg_repo(tmp_path, (
+        'qa:\n'
+        '  flows_dir: ""\n'
+    ))))
+    assert r.returncode == 1
+    assert "qa.flows_dir" in r.stdout
+
+
 # === QA permission-settings file — drift-locked to config/orbit.settings.json
 
 def test_qa_settings_file_exists_and_is_valid_json():
