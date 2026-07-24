@@ -34,6 +34,13 @@ spec = importlib.util.spec_from_file_location("qa_teach", ENGINE / "qa_teach.py"
 qa_teach = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(qa_teach)
 
+# Direct (in-process) import of qa_run.py itself — used ONLY for white-box
+# unit tests of _release_lock's ownership check (below); every other test in
+# this file drives the module as a real subprocess (QA_RUN).
+_qa_run_spec = importlib.util.spec_from_file_location("qa_run_direct", QA_RUN)
+qa_run = importlib.util.module_from_spec(_qa_run_spec)
+_qa_run_spec.loader.exec_module(qa_run)
+
 QA_CFG = textwrap.dedent("""\
     qa:
       base_url: "http://example.test/app"
@@ -488,27 +495,63 @@ def run_regression(repo_path, if_changed=False, run_cmd=None, extra_argv=(), tim
     return subprocess.run(argv, capture_output=True, text=True, env=env, timeout=timeout)
 
 
-def fake_agent_by_flow(tmp_path, verdicts, name="fake_regression_agent"):
+def fake_agent_by_flow(tmp_path, verdicts, name="fake_regression_agent", delay_seconds=0):
     """Per-invocation fake ORBIT_QA_RUN_CMD covering MULTIPLE flows in one
     sweep: `verdicts` maps flow name -> verdict dict, read back via FLOW_NAME
     at the fake's OWN runtime (mirrors fake_agent's env-driven flow lookup —
     this is the multi-flow analog, since one qa_run.py --regression process
     invokes the SAME override once per selected flow). A flow with no entry
     gets a default clean 'pass' — keeps selection/cap/pruning tests, which
-    don't care about verdict content, terse."""
+    don't care about verdict content, terse. `delay_seconds` (applied to
+    EVERY flow) simulates a slow flow — used to prove the sweep deadline
+    (Task 27 fix #2) actually stops launching new flows past its budget."""
     default = {"verdict": "pass", "failed_step": None, "screenshot": None,
                "summary": "ok", "healed_candidate": None}
     script = tmp_path / f"{name}.py"
     script.write_text(textwrap.dedent(f"""\
-        import json, os
+        import json, os, time
         from datetime import datetime, timezone
         from pathlib import Path
         flow = os.environ["FLOW_NAME"]
         ap_state = Path(os.environ["AP_STATE"])
         verdicts = {verdicts!r}
         default = {default!r}
+        if {delay_seconds!r}:
+            time.sleep({delay_seconds!r})
         v = dict(verdicts.get(flow, default))
         v.setdefault("flow", flow)
+        (ap_state / "qa" / "runs").mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S.%fZ")
+        (ap_state / "qa" / "runs" / f"{{ts}}-{{flow}}.json").write_text(json.dumps(v))
+        """))
+    return f"{sys.executable} {script}"
+
+
+def fake_agent_touch_probe(tmp_path, sleep_flow, sleep_seconds, probe_flow, report_path,
+                           name="fake_touch_probe_agent"):
+    """A fake agent for a 2-flow sweep: `sleep_flow` sleeps `sleep_seconds`
+    before writing its (pass) verdict; `probe_flow` — run NEXT, after
+    `sleep_flow` completes — reads $AP_STATE/qa/.qa-running's mtime and
+    writes `time.time() - mtime` to `report_path` BEFORE writing its own
+    verdict. A small reported age (well under `sleep_seconds`) proves
+    qa_run.py's _touch_lock() refreshed the lock right after `sleep_flow`
+    finished, rather than the lock sitting stale from whenever the sweep
+    (and thus the lock) was first created."""
+    script = tmp_path / f"{name}.py"
+    script.write_text(textwrap.dedent(f"""\
+        import json, os, time
+        from datetime import datetime, timezone
+        from pathlib import Path
+        flow = os.environ["FLOW_NAME"]
+        ap_state = Path(os.environ["AP_STATE"])
+        if flow == {sleep_flow!r}:
+            time.sleep({sleep_seconds!r})
+        if flow == {probe_flow!r}:
+            lock = ap_state / "qa" / {qa_run.LOCK_NAME!r}
+            age = time.time() - lock.stat().st_mtime
+            Path({str(report_path)!r}).write_text(str(age))
+        v = {{"flow": flow, "verdict": "pass", "failed_step": None, "screenshot": None,
+             "summary": "ok", "healed_candidate": None}}
         (ap_state / "qa" / "runs").mkdir(parents=True, exist_ok=True)
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S.%fZ")
         (ap_state / "qa" / "runs" / f"{{ts}}-{{flow}}.json").write_text(json.dumps(v))
@@ -688,6 +731,120 @@ def test_regression_lock_removed_after_a_failing_sweep(tmp_path):
     assert result.returncode == 3, result.stdout + result.stderr
     lock_path = r / ".autopilot" / "state" / "qa" / ".qa-running"
     assert not lock_path.exists()
+
+
+# --- CRITICAL fix: lock staleness is a PER-FLOW window (proved by a
+# per-flow touch), never the whole sweep's total budget; release is
+# ownership-checked -----------------------------------------------------
+
+def test_lock_widened_staleness_window_honors_a_lock_aged_past_bare_timeout(tmp_path):
+    # A concurrent invocation must NOT mis-diagnose a legitimately still-
+    # running multi-flow sweep as stale just because the lock is older than
+    # ONE flow's own qa.timeout_seconds — the real window is timeout_seconds
+    # + LOCK_STALE_MARGIN_SECONDS (60s). age=20 is > timeout_seconds(5) (the
+    # OLD, too-narrow window this bug used) but well under 5+60=65 (the
+    # fixed window) — must still read as fresh/busy, never replaced.
+    r = repo(tmp_path, qa_cfg_with_regression(timeout_seconds=5))
+    flow_dir = teach_flow(r, name="approved-flow")
+    approve(flow_dir)
+    write_lock(r, age_seconds=20)
+    agent = fake_agent_by_flow(tmp_path, {})
+    result = run_regression(r, run_cmd=agent)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "already running" in (result.stdout + result.stderr).lower()
+    assert meta(flow_dir)["runs"] == 0                 # agent never invoked
+    lock_path = r / ".autopilot" / "state" / "qa" / ".qa-running"
+    assert lock_path.exists()                          # a busy-exit never touches the lock
+
+
+def test_lock_is_touched_after_each_flow_proving_liveness_mid_sweep(tmp_path):
+    # Direct proof of the liveness mechanism itself: flow-a sleeps, THEN
+    # flow-b's own fake agent reads the lock's mtime and reports its age —
+    # a small reported age proves qa_run.py's _touch_lock() refreshed the
+    # lock right after flow-a finished, not that it merely hadn't gone stale
+    # yet from whenever the sweep started.
+    r = repo(tmp_path, qa_cfg_with_regression())
+    flow_a = teach_flow(r, name="flow-a")
+    approve(flow_a)
+    flow_b = teach_flow(r, name="flow-b")
+    approve(flow_b)
+    report = tmp_path / "touch_age.txt"
+    agent = fake_agent_touch_probe(tmp_path, sleep_flow="flow-a", sleep_seconds=2.0,
+                                   probe_flow="flow-b", report_path=report)
+    result = run_regression(r, run_cmd=agent, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    age = float(report.read_text().strip())
+    assert age < 1.0, f"lock mtime was {age}s stale — _touch_lock did not run between flows"
+
+
+def test_release_lock_leaves_a_foreign_pid_lock_in_place(tmp_path):
+    # White-box unit test (direct import — see the module-level qa_run
+    # import above): _release_lock must never unlink a lock file that no
+    # longer records OUR pid — a different, still-running process may have
+    # legitimately replaced it since we last touched it.
+    lock_path = tmp_path / ".qa-running"
+    lock_path.write_text(json.dumps({"pid": 999999, "started_at": "2020-01-01T00:00:00Z"}))
+    qa_run._release_lock(lock_path)
+    assert lock_path.exists()
+
+
+def test_release_lock_removes_a_lock_recorded_as_our_own_pid(tmp_path):
+    lock_path = tmp_path / ".qa-running"
+    lock_path.write_text(json.dumps({"pid": os.getpid(), "started_at": "2020-01-01T00:00:00Z"}))
+    qa_run._release_lock(lock_path)
+    assert not lock_path.exists()
+
+
+# --- Important fix: sweep-level deadline bounds the synchronous loop -------
+
+def test_sweep_deadline_stops_launching_new_flows_and_logs_the_drop(tmp_path):
+    # qa.timeout_seconds=1 -> deadline = 2 x 1 = 2s (from the CONFIG value,
+    # independent of any --timeout override below — see _sweep's
+    # `default_timeout` param). `--timeout 10` overrides each flow's OWN
+    # per-agent budget generously so a 1.1s delay never trips an individual
+    # flow's timeout — only the sweep-level deadline is under test here.
+    # Three flows, each taking ~1.1s: flow-a and flow-b fit inside the 2s
+    # deadline (elapsed checked BEFORE launching each), flow-c's launch-time
+    # check (~2.2s elapsed) trips it — flow-c is dropped, logged, never
+    # invoked.
+    r = repo(tmp_path, qa_cfg_with_regression(timeout_seconds=1))
+    dirs = {}
+    for name in ("flow-a", "flow-b", "flow-c"):
+        d = teach_flow(r, name=name)
+        approve(d)
+        dirs[name] = d
+    agent = fake_agent_by_flow(tmp_path, {}, delay_seconds=1.1)
+    result = run_regression(r, run_cmd=agent, extra_argv=("--timeout", "10"), timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    out = result.stdout + result.stderr
+    assert "deadline" in out.lower()
+    assert "flow-c" in out
+    assert meta(dirs["flow-a"])["runs"] == 1
+    assert meta(dirs["flow-b"])["runs"] == 1
+    assert meta(dirs["flow-c"])["runs"] == 0           # dropped, never launched
+
+
+def test_sweep_deadline_truncated_sweep_still_writes_the_cursor(tmp_path):
+    # A deadline-truncated sweep is still a COMPLETED sweep — --if-changed
+    # must still rewrite the cursor for it (never left stale, which would
+    # cause the next cycle to just re-trigger the exact same truncated sweep).
+    # Same deadline-tripping shape as the test above (timeout_seconds=1 ->
+    # deadline 2s, --timeout 10 keeps each flow's own budget generous).
+    r = repo(tmp_path, qa_cfg_with_regression(timeout_seconds=1, schedule_hours=24))
+    write_cursor(r, base_sha=None, markers_line_count=0, swept_at=_iso_hours_ago(1000))
+    dirs = {}
+    for name in ("flow-a", "flow-b", "flow-c"):
+        d = teach_flow(r, name=name)
+        approve(d)
+        dirs[name] = d
+    agent = fake_agent_by_flow(tmp_path, {}, delay_seconds=1.1)
+    result = run_regression(r, if_changed=True, run_cmd=agent,
+                            extra_argv=("--timeout", "10"), timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "deadline" in (result.stdout + result.stderr).lower()
+    assert meta(dirs["flow-c"])["runs"] == 0           # dropped by the deadline
+    cur = read_cursor(r)
+    assert cur["swept_at"] != _iso_hours_ago(1000)     # cursor still rewritten
 
 
 # --- pruning ---------------------------------------------------------------

@@ -71,26 +71,56 @@ Regression sweeps (Task 27, `--regression [--if-changed]`):
     `qa.regression.on_merge` is true AND either `git -C <repo> rev-parse
     --verify origin/<base_branch>` (hex-validated) differs from the cursor's
     `base_sha`, or `$AP_STATE/merge_markers.jsonl`'s line count differs from
-    the cursor's `markers_line_count` (`on_merge: false` disables BOTH of
-    these merge-detection signals — cadence alone may still fire). Not due
-    → exit 0 immediately, before the lock and before the agent is ever
-    invoked. Due → sweep, then (only once the sweep actually completed —
-    never on a lock-skip, never on a crash) the cursor is rewritten from
-    freshly-read values.
+    the cursor's `markers_line_count` (`on_merge: false` disables BOTH merge
+    signals — the sha check AND the markers-count check — cadence alone may
+    still fire). Not due → exit 0 immediately, before the lock and before the
+    agent is ever invoked. Due → sweep, then (only once the sweep actually
+    completed — never on a lock-skip, never on a crash) the cursor is
+    rewritten from freshly-read values.
 
     Without `--if-changed` (a human "sweep now" click), the cursor is never
     consulted or written — every invocation just sweeps.
 
-    Locking: $AP_STATE/qa/.qa-running (json: pid + started_at), created
-    exclusively. A fresh lock (age < qa.timeout_seconds) → exit 0, "already
-    running", agent never invoked. A stale one is replaced (WARN printed).
-    Always released in a finally — including when a flow's own verdict is
-    "fail", and even if the sweep itself raises.
+    Synchronous, by design, with two bounds on how long that can block the
+    caller (run.sh's one_iteration, or a human's dashboard click): a
+    SWEEP-level deadline (see below) caps total wall time, and everything
+    else about locking exists to keep a second, concurrent invocation from
+    piling a duplicate sweep on top while the first is still legitimately
+    running.
 
-    Pruning: after every completed sweep (even a zero-flow one), the newest
-    200 files directly under $AP_STATE/qa/runs/ are kept, older ones deleted
-    (count pruned is printed) — restricted to files that function's own
-    `iterdir()` lists, so it can never reach outside qa/runs/.
+    Locking: $AP_STATE/qa/.qa-running (json: pid + started_at), created
+    exclusively. A fresh lock → exit 0, "already running", agent never
+    invoked; a stale one is replaced (WARN printed). "Fresh" is age <
+    `qa.timeout_seconds + LOCK_STALE_MARGIN_SECONDS` (60s) — ONE flow's own
+    timeout budget plus a margin, deliberately NOT `max_flows x
+    timeout_seconds`: a running sweep calls `_touch_lock()` after EVERY flow
+    completes (bumping the lock's mtime), so it re-proves its own liveness at
+    least once per flow regardless of how many are left — sizing the window
+    to the whole sweep's total budget was the earlier (fixed) bug: a
+    concurrent invocation would misdiagnose a legitimately still-running
+    multi-flow sweep as stale, replace its lock, and double-execute. Release
+    is ownership-checked: `_release_lock` only unlinks the lock file if its
+    recorded pid is still this process's own — if another process has since
+    decided (rightly or not) that the lock looked stale and replaced it, an
+    unconditional unlink here would free a lock a DIFFERENT live sweep now
+    believes it holds, which is exactly the double-sweep failure mode above.
+    A pid mismatch is left in place with a WARN, never force-removed. Release
+    is attempted in a finally around the whole sweep either way — including
+    when a flow's own verdict is "fail", and even if the sweep itself raises.
+
+    Sweep deadline: `_sweep` stops LAUNCHING new flows once its own elapsed
+    time exceeds `SWEEP_DEADLINE_MULTIPLIER (2) x qa.timeout_seconds` — a
+    flow already in flight still gets its own full per-flow timeout; only
+    flows not yet started are ever dropped, and always with a logged line
+    (never a silent cap, same discipline as the max_flows_per_run cap
+    above). A deadline-truncated sweep is still a COMPLETED sweep — the
+    cursor is written for it exactly like any other completed sweep.
+
+    Pruning: after every completed sweep (even a zero-flow or
+    deadline-truncated one), the newest 200 files directly under
+    $AP_STATE/qa/runs/ are kept, older ones deleted (count pruned is
+    printed) — restricted to files that function's own `iterdir()` lists, so
+    it can never reach outside qa/runs/.
 
     Summary: one printed line per flow (`_replay_flow`'s own outcome — an
     infra "error" outcome from that callable folds into the "unable" tally,
@@ -174,6 +204,20 @@ LOCK_NAME = ".qa-running"
 MAX_RUN_FILES = 200
 GIT_TIMEOUT = 30
 _SHA_RE = re.compile(r"^[0-9a-f]{7,64}$", re.IGNORECASE)
+# The lock's staleness window is sized to ONE flow's own timeout budget (+ a
+# fixed margin for the overhead between flows — MCP config generation, etc.),
+# NEVER to the whole sweep's total budget (max_flows x timeout) — see
+# _touch_lock: a live sweep re-proves its own liveness after every flow, so a
+# concurrent invocation only ever needs to see freshness within one flow's
+# worth of time, however many flows the sweep has left to go.
+LOCK_STALE_MARGIN_SECONDS = 60
+# Sweep-level deadline: stop LAUNCHING new flows once the sweep's own total
+# elapsed time exceeds this multiple of qa.timeout_seconds — bounds a
+# synchronous, one-iteration-blocking sweep under a large flow library
+# without needing an unbounded per-run timeout. A flow already in flight
+# still gets its own full per-flow timeout; only flows not yet STARTED are
+# ever dropped by the deadline, and always with a logged line (see _sweep).
+SWEEP_DEADLINE_MULTIPLIER = 2
 
 USAGE = ("usage: qa_run.py <target> --flow <name> [--timeout N]\n"
          "       qa_run.py <target> --regression [--if-changed] [--timeout N]")
@@ -566,9 +610,10 @@ def _regression_due(repo: Path, base_branch: str, ap_state: Path, cursor: dict |
     unparseable, or old enough) OR (on_merge and (the trunk sha moved OR
     merge_markers.jsonl's line count differs) versus the cursor).
     schedule_hours == 0 permanently disables the cadence signal; on_merge ==
-    False permanently disables BOTH merge-detection signals — with both off,
-    --if-changed never sweeps on its own (a human can still always force one
-    via --regression with no --if-changed)."""
+    False (disables both merge signals — the sha check AND the
+    markers-line-count check, together) — with both off, --if-changed never
+    sweeps on its own (a human can still always force one via --regression
+    with no --if-changed)."""
     now = time.time()
     cadence_due = False
     if schedule_hours > 0:
@@ -591,20 +636,41 @@ def _regression_due(repo: Path, base_branch: str, ap_state: Path, cursor: dict |
 
 def _acquire_lock(lock_path: Path, stale_after_seconds: int) -> bool:
     """True = lock acquired (this call now owns it — the caller MUST release
-    it in a finally). False = a fresh lock already exists elsewhere; the
-    caller must NOT proceed to sweep. A lock older than stale_after_seconds
-    is presumed dead (a crashed prior sweep never reached its own finally)
-    and is replaced, with a WARN — never left to wedge every future sweep
-    forever."""
+    it via _release_lock, and MUST call _touch_lock after every flow so this
+    process's OWN liveness stays provable). False = a fresh lock already
+    exists elsewhere; the caller must NOT proceed to sweep. A lock older than
+    stale_after_seconds (qa.timeout_seconds + LOCK_STALE_MARGIN_SECONDS — see
+    that constant's own comment for why NOT the whole sweep's budget) is
+    presumed dead (a crashed prior sweep never reached its own finally, or
+    never got the chance to touch it again) and is replaced, with a WARN —
+    never left to wedge every future sweep forever."""
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps({"pid": os.getpid(), "started_at": _now_iso()}) + "\n"
     try:
         fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        with os.fdopen(fd, "w") as f:
-            f.write(payload)
-        return True
     except FileExistsError:
-        pass
+        fd = None
+
+    if fd is not None:
+        wrote = False
+        try:
+            try:
+                with os.fdopen(fd, "w") as f:
+                    f.write(payload)
+                wrote = True
+            except OSError:
+                pass          # e.g. disk full mid-write — wrote stays False
+        finally:
+            # A write failure right after a fresh O_CREAT|O_EXCL must never
+            # leave an orphaned (empty/partial) lock file for every future
+            # sweep to trip over as "someone's already running" forever.
+            if not wrote:
+                try:
+                    lock_path.unlink()
+                except OSError:
+                    pass
+        return wrote
+
     try:
         age = time.time() - lock_path.stat().st_mtime
     except OSError:
@@ -622,7 +688,40 @@ def _acquire_lock(lock_path: Path, stale_after_seconds: int) -> bool:
     return True
 
 
+def _touch_lock(lock_path: Path) -> None:
+    """Proves this sweep is still alive after finishing a flow. Called once
+    per flow (see _sweep) — the staleness window (_acquire_lock's
+    stale_after_seconds) only ever needs to cover ONE flow's own timeout
+    budget plus a margin, never the whole sweep's total, because a live
+    sweep re-touches this file at least once every flow. Best-effort: a
+    failure here just means the NEXT touch (or the eventual release) has to
+    carry the proof instead."""
+    try:
+        os.utime(lock_path, None)          # None = now, both atime and mtime
+    except OSError:
+        pass
+
+
 def _release_lock(lock_path: Path) -> None:
+    """Ownership-checked release: unlinks the lock ONLY if its recorded pid
+    is still ours. Between our own acquire/touch calls, another process can
+    have decided (correctly or not) that our lock looked stale and replaced
+    it with its own — at that point the file no longer represents OUR sweep,
+    and unconditionally unlinking it would free a lock a DIFFERENT live
+    sweep believes it still holds (the exact double-sweep bug this whole
+    ownership check exists to close). Mismatch (or anything unreadable) →
+    WARN and leave the file exactly as found; a missing file is simply
+    already gone and needs no action either way."""
+    try:
+        d = json.loads(lock_path.read_text())
+    except (OSError, ValueError):
+        return
+    our_pid = os.getpid()
+    if not isinstance(d, dict) or d.get("pid") != our_pid:
+        other = d.get("pid") if isinstance(d, dict) else "?"
+        print(f"WARN: regression lock at {lock_path} is no longer ours "
+              f"(recorded pid {other!r}, we are {our_pid}) — leaving it in place")
+        return
     try:
         lock_path.unlink()
     except OSError:
@@ -646,10 +745,15 @@ def _select_regression_flows(flows_root: Path, max_flows: int) -> tuple[list[str
 
 
 def _prune_runs(runs_dir: Path, keep: int = MAX_RUN_FILES) -> int:
-    """Keep the newest `keep` files directly under runs_dir (oldest-mtime
-    deleted first). Restricted to files THIS function's own `iterdir()`
-    lists — no recursion, no path built from any untrusted field — so it can
-    never touch anything outside qa/runs/."""
+    """Keep the newest `keep` files directly under runs_dir (oldest deleted
+    first). Restricted to files THIS function's own `iterdir()` lists — no
+    recursion, no path built from any untrusted field — so it can never
+    touch anything outside qa/runs/. Sort key is (mtime, filename): the
+    verdict filename itself embeds a UTC timestamp (see _locate_verdict's
+    `<UTC-ts>-<flow>.json` shape), so the filename is a deterministic
+    tie-break when two files land on the same mtime second — without it, an
+    mtime tie could prune a NEWER run instead of an older one, depending only
+    on filesystem iteration order."""
     if not runs_dir.is_dir():
         return 0
     try:
@@ -658,12 +762,13 @@ def _prune_runs(runs_dir: Path, keep: int = MAX_RUN_FILES) -> int:
         return 0
     if len(files) <= keep:
         return 0
-    def _mtime(p: Path) -> float:
+    def _sort_key(p: Path):
         try:
-            return p.stat().st_mtime
+            mtime = p.stat().st_mtime
         except OSError:
-            return 0.0
-    files.sort(key=_mtime)
+            mtime = 0.0
+        return (mtime, p.name)
+    files.sort(key=_sort_key)
     doomed = files[: len(files) - keep]
     pruned = 0
     for p in doomed:
@@ -697,11 +802,26 @@ def _format_flow_line(flow_name: str, result: dict) -> str:
 
 
 def _sweep(target: Path, ap_home: Path, ap_state: Path, cfg_all: dict, qa_cfg: dict,
-           flows_root: Path, max_flows: int, timeout_arg: int | None, default_timeout: int) -> int:
+           flows_root: Path, max_flows: int, timeout_arg: int | None, default_timeout: int,
+           lock_path: Path) -> int:
     """Runs the selected approved flows sequentially through _replay_flow,
     prints per-flow + summary lines, prunes qa/runs/, and returns the
     aggregate exit code (0 no fails, 3 any fail — never 1: a crash here is
-    the CALLER's infra-error bucket, see _run_regression)."""
+    the CALLER's infra-error bucket, see _run_regression).
+
+    Synchronous and inline — this whole call blocks its caller (run.sh's
+    one_iteration, or a human's dashboard click) for as long as the flows it
+    runs take. Two things bound that: `_touch_lock(lock_path)` after every
+    flow proves liveness for a concurrent invocation (see _acquire_lock's own
+    docstring for why the staleness window doesn't need to scale with
+    max_flows), and a SWEEP-level deadline (SWEEP_DEADLINE_MULTIPLIER x
+    qa.timeout_seconds, measured from this call's own start) stops launching
+    NEW flows once elapsed — a flow already in flight still gets its own
+    full per-flow timeout; only not-yet-started flows are ever dropped by
+    it, and always with a logged line (same "never a silent cap" discipline
+    as the max_flows_per_run cap above). A deadline-truncated sweep is still
+    a COMPLETED one — the caller (_run_regression) still writes the cursor
+    for it."""
     selected, dropped = _select_regression_flows(flows_root, max_flows)
     if dropped:
         print(f"regression: {len(selected) + len(dropped)} approved flow(s) found, cap is "
@@ -716,13 +836,26 @@ def _sweep(target: Path, ap_home: Path, ap_state: Path, cfg_all: dict, qa_cfg: d
         return OK
 
     timeout = timeout_arg if timeout_arg is not None else default_timeout
+    deadline_seconds = SWEEP_DEADLINE_MULTIPLIER * default_timeout
+    sweep_start = time.time()
     counts = {"pass": 0, "healed": 0, "fail": 0, "unable": 0}
-    for flow_name in selected:
+    for i, flow_name in enumerate(selected):
+        if time.time() - sweep_start > deadline_seconds:
+            remaining = selected[i:]
+            print(f"regression: sweep deadline ({deadline_seconds}s = "
+                  f"{SWEEP_DEADLINE_MULTIPLIER}x qa.timeout_seconds) reached after "
+                  f"{sum(counts.values())} flow(s) — dropping {len(remaining)} remaining: "
+                  f"{', '.join(remaining)}")
+            break
         flow_dir = flows_root / flow_name
         result = _replay_flow(qa_cfg, cfg_all, flow_name, flow_dir, target, ap_home, ap_state, timeout)
         tally_kind = result["kind"] if result["kind"] != "error" else "unable"
         counts[tally_kind] += 1
         print(_format_flow_line(flow_name, result))
+        # Liveness proof: a concurrent invocation's staleness check only ever
+        # needs to see freshness within one flow's own budget, however many
+        # flows this sweep has left to run — see _acquire_lock/_touch_lock.
+        _touch_lock(lock_path)
 
     total = sum(counts.values())
     print(f"regression: {total} flow(s) swept — {counts['pass']} pass / {counts['healed']} healed / "
@@ -779,14 +912,18 @@ def _run_regression(target: Path, ap_home: Path, cfg_all: dict, qa_cfg: dict,
 
     timeout_seconds = int(qa_cfg.get("timeout_seconds") or DEFAULT_TIMEOUT)
     lock_path = qa_dir / LOCK_NAME
-    if not _acquire_lock(lock_path, timeout_seconds):
+    # The staleness window covers ONE flow's own budget + a fixed margin —
+    # NOT the whole sweep's (max_flows x timeout_seconds) — because _sweep
+    # re-touches the lock after every flow; see LOCK_STALE_MARGIN_SECONDS.
+    stale_after_seconds = timeout_seconds + LOCK_STALE_MARGIN_SECONDS
+    if not _acquire_lock(lock_path, stale_after_seconds):
         print("regression: a sweep is already running — skipping this pass")
         return OK
 
     swept_ok = False
     try:
         rc = _sweep(target, ap_home, ap_state, cfg_all, qa_cfg, flows_root, max_flows,
-                    timeout_arg, timeout_seconds)
+                    timeout_arg, timeout_seconds, lock_path)
         swept_ok = True
     except Exception as e:                       # noqa: BLE001 — loop safety: never let a
         # sweep-level crash propagate past this module — see the "infra"

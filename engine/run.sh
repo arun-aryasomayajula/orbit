@@ -218,7 +218,9 @@ one_iteration() {
   # unchanged trunk/cadence, or a sweep already running) — this line can never
   # break the loop: any nonzero exit (a failed flow, a bad qa.flows_dir, a crash)
   # just logs a WARN and the iteration continues, exactly like every other
-  # best-effort hook here.
+  # best-effort hook here. Runs inline; bounded by the sweep deadline (qa_run.py
+  # stops LAUNCHING new flows past 2x qa.timeout_seconds of its own elapsed
+  # time — a flow already running still gets its full per-flow timeout).
   python3 "$ENGINE/qa_run.py" "$TARGET" --regression --if-changed >>"$LOGDIR/orbit.log" 2>&1 || log "WARN: regression sweep failed"
   python3 "$ENGINE/backlog_to_tasks.py" >>"$LOGDIR/orbit.log" 2>&1 || log "WARN: backlog→queue refresh failed"
   if [ -f "$STATE/AUTO_PROMOTE" ] && [ "$(count_pickable)" = "0" ]; then
