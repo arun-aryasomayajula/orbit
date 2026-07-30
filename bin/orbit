@@ -17,6 +17,7 @@
 #                            (pass/fail/healed/unable) into the flow's library metadata
 #   orbit doctor <target>    validate wiring (read-only, no cycle)
 #   orbit run <target>       run the loop in the foreground
+#   orbit web                launch the multi-project web launcher (picker + proxy, http://127.0.0.1:8787)
 #   orbit install <target>   install the background service (launchd/systemd)
 #   orbit sync <target>      re-copy the engine's /orbit-cycle command + agents into the target
 #                            (run after `git -C <engine> pull` so engine updates reach the running agent)
@@ -38,6 +39,7 @@ case "$verb" in
   qa)      python3 "$ORBIT_HOME/engine/qa_run.py" "$target" "${@:3}" ;;
   doctor)  python3 "$ORBIT_HOME/engine/doctor.py" "$target" "${3:-}" ;;
   run)     "$ORBIT_HOME/engine/run.sh" "$target" ;;
+  web)     python3 "$ORBIT_HOME/engine/launcher.py" ;;
   install) "$ORBIT_HOME/install/install_service.sh" "$target" "$ORBIT_HOME" ;;
   sync)    mkdir -p "$target/.claude/commands" "$target/.claude/agents";
            cp "$ORBIT_HOME/skills/"*.md "$target/.claude/commands/";

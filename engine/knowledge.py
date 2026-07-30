@@ -18,6 +18,14 @@ post-validates what it wrote:
     there).
   - IF `endpoints.md` exists, it has at least one real markdown-table data
     row (not just the header/separator).
+  - IF `graph.json` exists, it parses as a JSON object with `version` (int),
+    `nodes` (list), and `edges` (list); every node has a unique non-empty
+    string `id`, a `type` in {endpoint, function, table, flow}, and a string
+    `label`; every edge's `source`/`target` reference an existing node id and
+    its `type` is in {handles, calls, reads, writes, relates, step}; an
+    edge's `order`, if present, must be an int (a stringified number is a
+    failure, not a repair — it silently loses flow ordering client-side)
+    (optional — validated only when the file is present).
 
 Any validation failure prints one `VALIDATE: <reason>` line per failure,
 leaves every file on disk for inspection, and exits 1 — a knowledge base a
@@ -45,6 +53,16 @@ exists, stale-doc count >= `knowledge.stale_after_merges` (default 3), and
 loop safety over completeness — printing a `WARN:` line on any failure
 (including unexpected exceptions) instead of ever propagating one.
 
+Before every survey call (build AND refresh), the target's
+`.claude/commands/orbit-knowledge.md` is (re)synced from
+`$ORBIT_HOME/skills/orbit-knowledge.md` — that's what `/orbit-knowledge`
+actually resolves to in the target repo, and a target onboarded before a
+feature landed in this file otherwise runs a stale copy of it forever.
+While the real `claude` call is in flight, a heartbeat line ("· still
+surveying the repo… (elapsed Ns)") is printed to the wrapper's own stdout
+every ORBIT_KNOWLEDGE_HEARTBEAT_SECS (default 20s) so a tail of
+knowledge.log shows movement instead of looking frozen for minutes.
+
 Test hook: ORBIT_KNOWLEDGE_CMD replaces the claude call (shell, same env/cwd)
 — see engine/qa_check.py's legacy-path agent runner for the identical pattern.
 
@@ -60,6 +78,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -73,9 +92,63 @@ DEFAULT_TIMEOUT = 1800      # default cap for the survey call
 GIT_TIMEOUT = 30
 DEFAULT_STALE_AFTER_MERGES = 3
 AUTOREFRESH_COOLDOWN_SECONDS = 24 * 3600
+DEFAULT_HEARTBEAT_SECS = 20.0   # elapsed-time heartbeat cadence during the real survey call
 
 ENDPOINTS_HEADER = ("| method + path | handler (file:symbol) | calls "
                     "| tables read | tables written | auth? |")
+
+GRAPH_NODE_TYPES = {"endpoint", "function", "table", "flow"}
+GRAPH_EDGE_TYPES = {"handles", "calls", "reads", "writes", "relates", "step"}
+
+
+def _sync_knowledge_command(target: Path, quiet: bool) -> None:
+    """Copy $ORBIT_HOME/skills/orbit-knowledge.md into
+    <target>/.claude/commands/orbit-knowledge.md (overwrite), before every
+    survey call — build AND refresh, since both funnel through
+    run_survey_agent. `/orbit-knowledge` resolves from the TARGET repo's own
+    `.claude/commands/`, copied there once at onboarding by install/init.py
+    (or `orbit sync`); a target onboarded before a feature (e.g. graph.json)
+    landed in this file keeps running the STALE copy forever otherwise —
+    confirmed on a real target: 11 docs written, no graph.json, because its
+    command file predated the graph.json instruction. Re-syncing this ONE
+    command file (not the rest of skills/, which onboarding/`orbit sync`
+    already own) on every build/refresh keeps it current with zero extra
+    operator steps. Never abort the build over this: a permission error or a
+    read-only mount becomes a WARN, not a failure — the survey can still run
+    against whatever command version is already there."""
+    src = ORBIT_HOME / "skills" / "orbit-knowledge.md"
+    dest = target / ".claude" / "commands" / "orbit-knowledge.md"
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(src, dest)
+        if not quiet:
+            print("  · synced the /orbit-knowledge command into the project (.claude/commands/)")
+    except OSError as e:
+        print(f"  WARN: could not sync .claude/commands/orbit-knowledge.md ({e})")
+
+
+def _start_heartbeat(interval: float) -> tuple[threading.Thread, threading.Event]:
+    """Daemon thread that prints an elapsed-time line to the wrapper's own
+    stdout (which is what knowledge.log captures) every `interval` seconds
+    while the headless survey subprocess is in flight. Without this,
+    knowledge.log shows the startup banner and the "· survey agent: …" line,
+    then nothing for minutes until "complete" — the UI Run view (tailing
+    /api/cmdlog?name=knowledge) looks frozen even though the agent is working.
+    Not a stream-json parser — just proof of life. Caller must stop_event.set()
+    then thread.join() as soon as the subprocess returns, before printing the
+    real completion line."""
+    stop_event = threading.Event()
+    start = time.monotonic()
+
+    def _loop() -> None:
+        while not stop_event.wait(interval):
+            elapsed = int(time.monotonic() - start)
+            print(f"  · still surveying the repo… (elapsed {elapsed}s)")
+            sys.stdout.flush()
+
+    thread = threading.Thread(target=_loop, daemon=True)
+    thread.start()
+    return thread, stop_event
 
 
 def run_survey_agent(target: Path, cfg: dict, timeout: int, quiet: bool,
@@ -90,6 +163,9 @@ def run_survey_agent(target: Path, cfg: dict, timeout: int, quiet: bool,
     env = dict(os.environ)
     env.update(AP_HOME=str(ap), AP_STATE=str(ap / "state"), ORBIT_HOME=str(ORBIT_HOME),
                ORBIT_KNOWLEDGE_SKILL=skill or "build")
+
+    _sync_knowledge_command(target, quiet)
+
     if override:
         cmd = shlex.split(override) + ([skill] if skill else [])
     else:
@@ -105,6 +181,14 @@ def run_survey_agent(target: Path, cfg: dict, timeout: int, quiet: bool,
                "--add-dir", str(ORBIT_HOME)]
     if not quiet:
         print(f"  · survey agent: {' '.join(shlex.quote(c) for c in cmd[:3])} … (≤{timeout}s)")
+
+    # Heartbeat only on the real `claude` path (no ORBIT_KNOWLEDGE_CMD override)
+    # — that's the call that can genuinely run for minutes; a test fake
+    # returns effectively instantly and would never emit a tick anyway.
+    heartbeat_thread = heartbeat_stop = None
+    if not override:
+        hb_interval = float(os.environ.get("ORBIT_KNOWLEDGE_HEARTBEAT_SECS", DEFAULT_HEARTBEAT_SECS))
+        heartbeat_thread, heartbeat_stop = _start_heartbeat(hb_interval)
     try:
         p = subprocess.run(cmd, cwd=target, env=env, timeout=timeout,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -116,6 +200,10 @@ def run_survey_agent(target: Path, cfg: dict, timeout: int, quiet: bool,
     except OSError as e:
         print(f"  ✗ survey agent failed to start: {e}")
         return False
+    finally:
+        if heartbeat_thread is not None:
+            heartbeat_stop.set()
+            heartbeat_thread.join()
 
 
 def _git_head_sha(repo: Path) -> str | None:
@@ -173,6 +261,83 @@ def _unsafe_doc_reason(kdir: Path, doc) -> str | None:
     if not resolved.is_relative_to(kdir.resolve()):
         return "escapes knowledge/ (path traversal)"
     return None
+
+
+def _graph_json_failures(graph: dict) -> list[str]:
+    """Field-level checks for an already-parsed `graph.json` object. Returns
+    human-readable reasons (without the 'graph.json' prefix — the caller adds
+    that); empty = valid. Mirrors validate()'s never-crash-on-untrusted-input
+    discipline: a survey agent's graph.json is treated exactly like its
+    manifest.json — checked, never trusted enough to index into blindly."""
+    failures: list[str] = []
+    if not isinstance(graph.get("version"), int):
+        failures.append("missing/invalid 'version' (must be an int)")
+
+    nodes = graph.get("nodes")
+    if not isinstance(nodes, list):
+        failures.append("'nodes' must be a list")
+        nodes = []
+    edges = graph.get("edges")
+    if not isinstance(edges, list):
+        failures.append("'edges' must be a list")
+        edges = []
+
+    seen_ids: set = set()
+    node_ids: set = set()
+    for i, node in enumerate(nodes):
+        if not isinstance(node, dict):
+            failures.append(f"node at index {i} is not an object")
+            continue
+        node_id = node.get("id")
+        if not isinstance(node_id, str) or not node_id:
+            failures.append(f"node at index {i} has no valid non-empty string 'id'")
+        else:
+            if node_id in seen_ids:
+                failures.append(f"node id {node_id!r} is not unique")
+            seen_ids.add(node_id)
+            node_ids.add(node_id)
+        # A node's 'type' can legally be JSON of any shape (a list/dict is
+        # valid JSON, just not a valid type) — `x not in a_set` HASHES x, so
+        # checking membership before confirming x is even a string would
+        # crash with an unhandled TypeError on that input instead of
+        # reporting it as the VALIDATE failure it is.
+        node_type = node.get("type")
+        if not isinstance(node_type, str):
+            failures.append(f"node {node.get('id', i)!r} has non-string 'type' {node_type!r} "
+                             f"(must be one of {sorted(GRAPH_NODE_TYPES)})")
+        elif node_type not in GRAPH_NODE_TYPES:
+            failures.append(f"node {node.get('id', i)!r} has invalid 'type' {node_type!r} "
+                             f"(must be one of {sorted(GRAPH_NODE_TYPES)})")
+        if not isinstance(node.get("label"), str):
+            failures.append(f"node {node.get('id', i)!r} has no string 'label'")
+
+    for i, edge in enumerate(edges):
+        if not isinstance(edge, dict):
+            failures.append(f"edge at index {i} is not an object")
+            continue
+        # Same unhashable-value guard as node 'type' above, for 'source'/
+        # 'target' (membership-tested against the node_ids set) and 'type'.
+        source, target = edge.get("source"), edge.get("target")
+        if not isinstance(source, str):
+            failures.append(f"edge at index {i} has non-string 'source' {source!r}")
+        elif source not in node_ids:
+            failures.append(f"edge at index {i} has source {source!r} which is not a known node id")
+        if not isinstance(target, str):
+            failures.append(f"edge at index {i} has non-string 'target' {target!r}")
+        elif target not in node_ids:
+            failures.append(f"edge at index {i} has target {target!r} which is not a known node id")
+        edge_type = edge.get("type")
+        if not isinstance(edge_type, str):
+            failures.append(f"edge at index {i} has non-string 'type' {edge_type!r} "
+                             f"(must be one of {sorted(GRAPH_EDGE_TYPES)})")
+        elif edge_type not in GRAPH_EDGE_TYPES:
+            failures.append(f"edge at index {i} has invalid 'type' {edge_type!r} "
+                             f"(must be one of {sorted(GRAPH_EDGE_TYPES)})")
+        if "order" in edge and not isinstance(edge.get("order"), int):
+            failures.append(f"edge at index {i} has non-int 'order' {edge.get('order')!r} "
+                             f"(the UI silently drops a non-numeric order, losing flow ordering)")
+
+    return failures
 
 
 def validate(kdir: Path, repo: Path) -> list[str]:
@@ -267,6 +432,26 @@ def validate(kdir: Path, repo: Path) -> list[str]:
         elif not _has_endpoints_data_row(text):
             failures.append("endpoints.md has no data rows (only a header/separator) under "
                              f"{kdir}/")
+
+    graph_path = kdir / "graph.json"
+    if graph_path.exists():
+        text, err = _read_text(graph_path)
+        if err:
+            failures.append(f"graph.json could not be read ({err})")
+        else:
+            graph: dict | None = None
+            try:
+                loaded = json.loads(text)
+            except ValueError as e:
+                failures.append(f"graph.json is not valid JSON ({e})")
+            else:
+                if not isinstance(loaded, dict):
+                    failures.append("graph.json must be a JSON object")
+                else:
+                    graph = loaded
+            if graph is not None:
+                for reason in _graph_json_failures(graph):
+                    failures.append(f"graph.json {reason}")
 
     return failures
 

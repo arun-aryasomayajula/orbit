@@ -24,7 +24,10 @@ actions yourself; the engine never parses TS). `mkdir -p "$AP_STATE/qa/runs"
 "$AP_STATE/qa/flow-$FLOW_NAME"` — every artifact you write lands there.
 
 ## 1. Bring the product up (or attach)
-Orbit-qa-check discipline, verbatim: `qa.services` configured → you launch
+**If `$ORBIT_QA_ATTACH` is set** (quick `echo`/env read — a persistent dev
+session is already running the services): attach to `base_url` directly, do
+NOT launch any service, and do NOT kill anything on exit. Otherwise,
+orbit-qa-check discipline, verbatim: `qa.services` configured → you launch
 each in order from its `cwd` (default `.`) with `qa.env` exported, log to
 `$AP_STATE/qa/flow-$FLOW_NAME/<name>.log`, poll `ready` until HTTP 200 or
 `ready_timeout_seconds` elapses; any service that never comes up in time is
@@ -33,6 +36,16 @@ verdict (step 6). Only `base_url` → attach to what's already running. You
 MUST kill every process you started before exiting, on every exit path.
 
 ## 2. Replay
+**Chained prerequisites**: if `$ORBIT_QA_CHAIN` lists more than one flow
+(prerequisites, then the target, comma-separated), read+replay each
+PREREQUISITE's own steps first (step 0's read, per flow), in order, in
+THIS SAME browser session — never close/restart it between them, so login
+state carries forward. Don't grade a prerequisite (no steps.json, no
+verdict); if one can't complete, write the TARGET's own verdict as
+`unable`, naming it, and stop (skip to step 6). Otherwise replay + grade
+the LAST flow (the target) exactly as below — a single-flow chain (no
+`requires`) is unchanged from today.
+
 Execute the steps in order via `mcp__playwright__*` against `qa.base_url`,
 screenshotting key states into `$AP_STATE/qa/flow-$FLOW_NAME/`, numbered:
 `01-<slug>.png`, `02-<slug>.png`, ... . If a step's selector/element fails,
@@ -119,8 +132,6 @@ touch it again on later runs (a heal candidate is how it ever gets updated).
 - Always kill every service you launched, on every exit path.
 - Unrelated bugs you notice mid-replay → `ops/qa/SEEN.md` only; they never
   change this run's verdict.
-- One equivalent-path attempt per step, max (step 2) — when in doubt whether
-  it was OBVIOUSLY equivalent, it's a fail, not a heal.
 
 ## Clean up and exit
 Kill every process you started; leave the worktree exactly as you found it —

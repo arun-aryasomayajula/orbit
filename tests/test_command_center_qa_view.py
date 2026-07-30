@@ -239,7 +239,32 @@ def test_qa_flows_root_falls_back_to_default_on_escaping_flows_dir(cc):
 
     assert cc._qa_flows_root() == cc.AP_HOME / cc.DEFAULT_QA_FLOWS_DIR
     st = cc.build_state()
-    assert "qa_flows" not in st   # default flows dir doesn't exist -> omitted, planted flow never seen
+    # A qa: block IS configured, so the QA view is present (the "New test" panel
+    # must be reachable to teach the first flow) — but the escape guard means the
+    # planted-outside flow is never listed: the flows list stays empty.
+    assert "qa_flows" in st
+    assert st["qa_flows"]["flows"] == []
+
+
+def test_qa_view_present_with_qa_block_even_when_no_flows_yet(cc):
+    # The "New test" (teach) panel lives inside the QA view; it must be reachable
+    # to record the FIRST flow. A qa: block with zero taught flows and no
+    # exploratory must still surface qa_flows (empty flows list) so the QA nav +
+    # panel render — otherwise it's chicken-and-egg (was hidden until a flow existed).
+    (cc.AP_HOME / "config.yaml").write_text('qa:\n  base_url: "http://localhost:3000"\n')
+    st = cc.build_state()
+    assert "qa_flows" in st
+    assert st["qa_flows"]["flows"] == []
+    assert st["qa_flows"]["explore_enabled"] is False
+    assert st["qa_flows"]["base_url"] == "http://localhost:3000"
+
+
+def test_qa_view_omitted_when_no_qa_block_and_no_flows(cc):
+    # Byte-neutral: a project with no QA story at all (no qa: block, no flows,
+    # no exploratory) still omits qa_flows entirely.
+    (cc.AP_HOME / "config.yaml").write_text('gates:\n  smoke: {cmd: "true"}\n')
+    st = cc.build_state()
+    assert "qa_flows" not in st
 
 
 def test_qa_flows_excludes_non_slug_flow_dir_names(cc):
@@ -492,6 +517,32 @@ def test_do_heal_approve_happy_path_writes_steps_and_meta_and_moves_file(cc):
     assert result2["ok"] is False
     meta2 = json.loads((fd / "meta.json").read_text())
     assert len(meta2["heals"]) == 1   # unchanged
+
+
+def test_do_heal_approve_preserves_requires_and_provides_auth(cc):
+    # Test chaining (Task "prerequisites"): _do_heal_approve does a read-
+    # modify-write of the flow's meta.json (only `heals` is ever set on the
+    # parsed dict — see its own docstring), so `requires`/`provides_auth` on
+    # a chained flow must survive a heal approval untouched, exactly like
+    # qa_run.py's _update_meta already preserves them across a verdict write.
+    fd = _write_flow(cc, "checkout")
+    meta_path = fd / "meta.json"
+    meta = json.loads(meta_path.read_text())
+    meta["requires"] = ["login"]
+    meta["provides_auth"] = False
+    meta_path.write_text(json.dumps(meta))
+
+    new_steps = [{"action": "click", "selector": "#new-btn", "value": "", "note": "renamed button"}]
+    _write_heal(cc, "checkout--20260722T000000Z.json", flow="checkout",
+                reason="button renamed", new_steps=new_steps)
+
+    result = cc.do_qa_action({"action": "heal-approve", "file": "checkout--20260722T000000Z.json"})
+    assert result["ok"] is True
+
+    after = json.loads(meta_path.read_text())
+    assert after["requires"] == ["login"]          # preserved, not dropped
+    assert after["provides_auth"] is False
+    assert len(after["heals"]) == 1                # the heal append itself did happen
 
 
 def test_do_heal_approve_rejects_unknown_flow_and_touches_nothing(cc):

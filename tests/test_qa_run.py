@@ -57,15 +57,19 @@ def repo(tmp_path, extra_cfg=QA_CFG):
 
 
 def teach_flow(r, name="login-flow", flows_sub="qa/flows", intent="user can log in",
-               criteria=("sees the dashboard",), entry_path="http://example.test/app"):
+               criteria=("sees the dashboard",), entry_path="http://example.test/app",
+               requires=(), provides_auth=False):
     """Build a taught-flow fixture directly with qa_teach.py's own writer
-    functions, so it matches Task 20's binding format byte-for-byte."""
+    functions, so it matches Task 20's binding format byte-for-byte.
+    `requires`/`provides_auth` (test chaining, Task "prerequisites") default
+    to empty/False so every existing call site is unaffected."""
     ap = r / ".autopilot"
     flow_dir = ap / flows_sub / name
     spec_tmp = ap / "_tmp_steps.spec.ts"
     spec_tmp.parent.mkdir(parents=True, exist_ok=True)
     spec_tmp.write_text("// recorded steps\n")
-    qa_teach._write_flow(flow_dir, name, entry_path, intent, list(criteria), spec_tmp)
+    qa_teach._write_flow(flow_dir, name, entry_path, intent, list(criteria), spec_tmp,
+                         requires=list(requires), provides_auth=provides_auth)
     spec_tmp.unlink()
     flowmap = (ap / flows_sub).parent / "FLOWMAP.md"
     qa_teach._update_flowmap(flowmap, name, intent, entry_path, "never run")
@@ -99,13 +103,19 @@ def run(repo_path, flow_name, run_cmd=None, timeout_flag=None, extra_argv=(), ti
 # ---------------------------------------------------------------------------
 
 def fake_agent(tmp_path, verdict=None, heal_file=None, heal_content=None,
-               mcp_log=None, name="fake_qa_run_agent", sleep_before_write=0.0):
+               mcp_log=None, attach_log=None, chain_log=None, name="fake_qa_run_agent",
+               sleep_before_write=0.0):
     """`verdict` (dict or None) is folded straight into the run-verdict json
     (flow/UTC-ts filename resolved by the fake itself from FLOW_NAME/AP_STATE
     env vars) — None means "write nothing" (simulates a missing verdict).
     `heal_file`/`heal_content`, if given, are written under
     $AP_STATE/qa/heal/ BEFORE the run verdict (mirrors the skill's own
-    heal-then-verdict write order)."""
+    heal-then-verdict write order). `attach_log`, if given, records the
+    ORBIT_QA_ATTACH env var this invocation actually saw (empty string when
+    unset) — same env-capture mechanism as `mcp_log`'s own QA_MCP_CONFIG
+    dump, used to prove --attach's env-var contract from outside the
+    process. `chain_log` (test chaining, Task "prerequisites") is the same
+    mechanism again, for ORBIT_QA_CHAIN."""
     lines = [
         "import json, os, time",
         "from datetime import datetime, timezone",
@@ -115,6 +125,10 @@ def fake_agent(tmp_path, verdict=None, heal_file=None, heal_content=None,
     ]
     if mcp_log is not None:
         lines.append(f'Path({str(mcp_log)!r}).write_text(os.environ.get("QA_MCP_CONFIG", ""))')
+    if attach_log is not None:
+        lines.append(f'Path({str(attach_log)!r}).write_text(os.environ.get("ORBIT_QA_ATTACH", ""))')
+    if chain_log is not None:
+        lines.append(f'Path({str(chain_log)!r}).write_text(os.environ.get("ORBIT_QA_CHAIN", ""))')
     if heal_file is not None:
         lines += [
             '(ap_state / "qa" / "heal").mkdir(parents=True, exist_ok=True)',
@@ -450,6 +464,267 @@ def test_mcp_config_override_skips_autogen(tmp_path):
 
 
 # ===========================================================================
+# --attach (persistent QA app session, Task "persistent QA app session"):
+# --flow-only flag that sets ORBIT_QA_ATTACH=1 in the child env instead of
+# launching/killing qa.services itself — see module docstring's "Attach
+# mode" section. Rejected (exit 2) combined with --regression/--explore.
+# ===========================================================================
+
+def test_attach_flag_sets_orbit_qa_attach_env_in_child(tmp_path):
+    r = repo(tmp_path)
+    teach_flow(r)
+    attach_log = tmp_path / "attach.log"
+    result = run(r, "login-flow", run_cmd=fake_agent(tmp_path, {
+        "verdict": "pass", "failed_step": None, "screenshot": None,
+        "summary": "attached replay", "healed_candidate": None},
+        attach_log=attach_log), extra_argv=("--attach",))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert attach_log.read_text() == "1"
+
+
+def test_without_attach_flag_orbit_qa_attach_env_is_unset(tmp_path):
+    r = repo(tmp_path)
+    teach_flow(r)
+    attach_log = tmp_path / "attach.log"
+    result = run(r, "login-flow", run_cmd=fake_agent(tmp_path, {
+        "verdict": "pass", "failed_step": None, "screenshot": None,
+        "summary": "clean replay", "healed_candidate": None},
+        attach_log=attach_log))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert attach_log.read_text() == ""
+
+
+def test_attach_with_regression_rejected_exit_2(tmp_path):
+    r = repo(tmp_path)
+    result = subprocess.run(
+        [sys.executable, str(QA_RUN), str(r), "--regression", "--attach"],
+        capture_output=True, text=True, timeout=30)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "--attach" in (result.stdout + result.stderr)
+
+
+def test_attach_with_explore_rejected_exit_2(tmp_path):
+    r = repo(tmp_path)
+    result = subprocess.run(
+        [sys.executable, str(QA_RUN), str(r), "--explore", "--attach"],
+        capture_output=True, text=True, timeout=30)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "--attach" in (result.stdout + result.stderr)
+
+
+# ===========================================================================
+# Test chaining / prerequisites (Task "prerequisites"): --flow resolves a
+# flow's own `requires` (meta.json) into a topologically-ordered chain and
+# exports it as ORBIT_QA_CHAIN before invoking the skill. --regression does
+# NOT resolve chains — out of scope here, see qa_run.py's own docstring.
+# ===========================================================================
+
+def test_no_requires_yields_single_element_chain_byte_neutral(tmp_path):
+    r = repo(tmp_path)
+    teach_flow(r, name="login-flow")   # default requires=()
+    chain_log = tmp_path / "chain.log"
+    result = run(r, "login-flow", run_cmd=fake_agent(tmp_path, {
+        "verdict": "pass", "failed_step": None, "screenshot": None,
+        "summary": "ok", "healed_candidate": None}, chain_log=chain_log))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert chain_log.read_text() == "login-flow"
+
+
+def test_requires_login_yields_two_element_chain_in_order(tmp_path):
+    r = repo(tmp_path)
+    teach_flow(r, name="login", provides_auth=True)
+    teach_flow(r, name="create-vertical", requires=["login"])
+    chain_log = tmp_path / "chain.log"
+    result = run(r, "create-vertical", run_cmd=fake_agent(tmp_path, {
+        "verdict": "pass", "failed_step": None, "screenshot": None,
+        "summary": "ok", "healed_candidate": None}, chain_log=chain_log))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert chain_log.read_text() == "login,create-vertical"
+
+
+def test_three_deep_chain_orders_correctly(tmp_path):
+    r = repo(tmp_path)
+    teach_flow(r, name="login")
+    teach_flow(r, name="add-to-cart", requires=["login"])
+    teach_flow(r, name="checkout", requires=["add-to-cart"])
+    chain_log = tmp_path / "chain.log"
+    result = run(r, "checkout", run_cmd=fake_agent(tmp_path, {
+        "verdict": "pass", "failed_step": None, "screenshot": None,
+        "summary": "ok", "healed_candidate": None}, chain_log=chain_log))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert chain_log.read_text() == "login,add-to-cart,checkout"
+
+
+def test_requires_cycle_exit_2_no_run(tmp_path):
+    r = repo(tmp_path)
+    teach_flow(r, name="flow-a", requires=["flow-b"])
+    teach_flow(r, name="flow-b", requires=["flow-a"])
+    calls_log = tmp_path / "should-not-run.log"
+    result = run(r, "flow-a", run_cmd=fake_agent(tmp_path, {
+        "verdict": "pass", "failed_step": None, "screenshot": None,
+        "summary": "ok", "healed_candidate": None}, mcp_log=calls_log))
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "cycle" in (result.stdout + result.stderr).lower()
+    assert not calls_log.exists()   # the agent was never invoked
+
+
+def test_missing_prerequisite_exit_2_names_it_no_run(tmp_path):
+    r = repo(tmp_path)
+    teach_flow(r, name="create-vertical", requires=["ghost-login"])
+    calls_log = tmp_path / "should-not-run.log"
+    result = run(r, "create-vertical", run_cmd=fake_agent(tmp_path, {
+        "verdict": "pass", "failed_step": None, "screenshot": None,
+        "summary": "ok", "healed_candidate": None}, mcp_log=calls_log))
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "ghost-login" in (result.stdout + result.stderr)
+    assert not calls_log.exists()
+
+
+def test_verdict_still_recorded_for_target_only_in_a_chain(tmp_path):
+    # The prerequisite's own meta.json/FLOWMAP row must be untouched by a
+    # chained run — only the target's own verdict is located/recorded.
+    r = repo(tmp_path)
+    login_dir = teach_flow(r, name="login")
+    target_dir = teach_flow(r, name="create-vertical", requires=["login"])
+    result = run(r, "create-vertical", run_cmd=fake_agent(tmp_path, {
+        "verdict": "pass", "failed_step": None, "screenshot": None,
+        "summary": "ok", "healed_candidate": None}))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert meta(target_dir)["runs"] == 1
+    assert meta(target_dir)["last_verdict"] == "pass"
+    assert meta(login_dir)["runs"] == 0            # prerequisite's own meta untouched
+    assert meta(login_dir)["last_verdict"] is None
+
+
+def test_update_meta_preserves_requires_and_provides_auth_across_a_verdict_write(tmp_path):
+    r = repo(tmp_path)
+    teach_flow(r, name="login")
+    flow_dir = teach_flow(r, name="create-vertical", requires=["login"], provides_auth=False)
+    before = meta(flow_dir)
+    assert before["requires"] == ["login"]
+    assert before["provides_auth"] is False
+    result = run(r, "create-vertical", run_cmd=fake_agent(tmp_path, {
+        "verdict": "pass", "failed_step": None, "screenshot": None,
+        "summary": "ok", "healed_candidate": None}))
+    assert result.returncode == 0, result.stdout + result.stderr
+    after = meta(flow_dir)
+    assert after["requires"] == ["login"]          # preserved, not dropped
+    assert after["provides_auth"] is False
+    assert after["runs"] == 1                      # the verdict update itself did happen
+
+
+def test_diamond_dependency_dedupes_shared_prerequisite(tmp_path):
+    # a requires [b, c]; b and c both require login -> login must appear
+    # exactly once, before both b and c, and a (the target) must be last.
+    r = repo(tmp_path)
+    teach_flow(r, name="login", provides_auth=True)
+    teach_flow(r, name="b", requires=["login"])
+    teach_flow(r, name="c", requires=["login"])
+    teach_flow(r, name="a", requires=["b", "c"])
+    chain_log = tmp_path / "chain.log"
+    result = run(r, "a", run_cmd=fake_agent(tmp_path, {
+        "verdict": "pass", "failed_step": None, "screenshot": None,
+        "summary": "ok", "healed_candidate": None}, chain_log=chain_log))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert chain_log.read_text() == "login,b,c,a"
+
+
+def test_self_loop_cycle_exit_2_no_run(tmp_path):
+    r = repo(tmp_path)
+    teach_flow(r, name="flow-a", requires=["flow-a"])
+    calls_log = tmp_path / "should-not-run.log"
+    result = run(r, "flow-a", run_cmd=fake_agent(tmp_path, {
+        "verdict": "pass", "failed_step": None, "screenshot": None,
+        "summary": "ok", "healed_candidate": None}, mcp_log=calls_log))
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "cycle" in (result.stdout + result.stderr).lower()
+    assert not calls_log.exists()     # the agent was never invoked
+
+
+def test_three_node_cycle_exit_2_no_run(tmp_path):
+    r = repo(tmp_path)
+    teach_flow(r, name="flow-a", requires=["flow-b"])
+    teach_flow(r, name="flow-b", requires=["flow-c"])
+    teach_flow(r, name="flow-c", requires=["flow-a"])
+    calls_log = tmp_path / "should-not-run.log"
+    result = run(r, "flow-a", run_cmd=fake_agent(tmp_path, {
+        "verdict": "pass", "failed_step": None, "screenshot": None,
+        "summary": "ok", "healed_candidate": None}, mcp_log=calls_log))
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "cycle" in (result.stdout + result.stderr).lower()
+    assert not calls_log.exists()
+
+
+def test_read_requires_drops_non_slug_entries_comma_and_traversal(tmp_path):
+    # A hand-edited meta.json (not something _write_flow itself would ever
+    # produce, since it SLUG_RE-validates `requires` up front) could sneak a
+    # comma-bearing string into `requires` — which would corrupt
+    # ORBIT_QA_CHAIN's comma-separated parsing — or a '../'-style string,
+    # which would flow straight into `(flows_root / name).is_dir()`. Both
+    # must be silently dropped from the resolved chain, not trusted.
+    r = repo(tmp_path)
+    teach_flow(r, name="good-prereq")
+    target_dir = teach_flow(r, name="target", requires=["good-prereq"])
+    meta_path = target_dir / "meta.json"
+    m = json.loads(meta_path.read_text())
+    m["requires"] = ["good-prereq", "bad,name", "../evil"]
+    meta_path.write_text(json.dumps(m))
+
+    chain_log = tmp_path / "chain.log"
+    result = run(r, "target", run_cmd=fake_agent(tmp_path, {
+        "verdict": "pass", "failed_step": None, "screenshot": None,
+        "summary": "ok", "healed_candidate": None}, chain_log=chain_log))
+    assert result.returncode == 0, result.stdout + result.stderr
+    # Only the legit slug survived — the comma-bearing and traversal entries
+    # were dropped, never even considered as a (missing) prerequisite.
+    assert chain_log.read_text() == "good-prereq,target"
+
+
+def _build_flow_stub(flows_root, name, requires=()):
+    """A minimal flow fixture — just enough for _resolve_chain/_read_requires
+    (a dir + meta.json with a `requires` list) — no intent.md/steps.spec.ts,
+    unlike teach_flow's full qa_teach._write_flow. Used only for the deep-
+    chain test below, where building 1500 fixtures through the full teach
+    machinery would be needlessly slow; _resolve_chain never looks past
+    meta.json and dir-existence either way."""
+    d = flows_root / name
+    d.mkdir(parents=True)
+    meta = {"created_at": None, "last_run_at": None, "last_verdict": None,
+             "runs": 0, "heals": [], "requires": list(requires), "provides_auth": False}
+    (d / "meta.json").write_text(json.dumps(meta))
+    return d
+
+
+def test_deep_chain_resolves_without_recursion_error(tmp_path):
+    # _resolve_chain used to be a Python-recursive post-order DFS, which
+    # raises an uncaught RecursionError past ~995-deep chains (no guard in
+    # main() -> unhandled traceback, exit 1, not the module's own loud-but-
+    # clean exit 2 contract). 1500 flows, each requiring the previous one,
+    # proves the now-iterative version handles a chain far past that depth
+    # cleanly: exit 0, full chain resolved in order, no traceback at all.
+    r = repo(tmp_path)
+    flows_root = r / ".autopilot" / "qa" / "flows"
+    flows_root.mkdir(parents=True)
+    n = 1500
+    _build_flow_stub(flows_root, "flow-0")
+    for i in range(1, n):
+        _build_flow_stub(flows_root, f"flow-{i}", requires=[f"flow-{i - 1}"])
+
+    chain_log = tmp_path / "chain.log"
+    result = run(r, f"flow-{n - 1}", run_cmd=fake_agent(tmp_path, {
+        "verdict": "pass", "failed_step": None, "screenshot": None,
+        "summary": "ok", "healed_candidate": None}, chain_log=chain_log), timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    out = result.stdout + result.stderr
+    assert "RecursionError" not in out
+    assert "Traceback" not in out
+    chain = chain_log.read_text().split(",")
+    assert len(chain) == n
+    assert chain[0] == "flow-0"
+    assert chain[-1] == f"flow-{n - 1}"
+
+
+# ===========================================================================
 # --regression (Task 27): cursor-triggered sweeps of the taught-flow library
 # ===========================================================================
 
@@ -668,6 +943,50 @@ def test_regression_cap_enforced_with_dropped_log_line(tmp_path):
     assert meta(dirs["flow-a"])["runs"] == 1
     assert meta(dirs["flow-b"])["runs"] == 1
     assert meta(dirs["flow-c"])["runs"] == 0
+
+
+# --- chaining is out of scope for --regression (see qa_run.py's module
+# docstring: "--regression's sweep does NOT resolve chains") -----------------
+
+def fake_agent_by_flow_chain_probe(tmp_path, target_flow, report_path,
+                                   name="fake_regression_chain_probe"):
+    """Per-invocation fake ORBIT_QA_RUN_CMD for a regression sweep: when
+    FLOW_NAME == target_flow, records ORBIT_QA_CHAIN's value to report_path
+    (same env-capture mechanism as --flow's own chain_log fakes) before
+    writing a clean 'pass' verdict for whichever flow it's invoked for."""
+    script = tmp_path / f"{name}.py"
+    script.write_text(textwrap.dedent(f"""\
+        import json, os
+        from datetime import datetime, timezone
+        from pathlib import Path
+        flow = os.environ["FLOW_NAME"]
+        ap_state = Path(os.environ["AP_STATE"])
+        if flow == {target_flow!r}:
+            Path({str(report_path)!r}).write_text(os.environ.get("ORBIT_QA_CHAIN", ""))
+        v = {{"flow": flow, "verdict": "pass", "failed_step": None, "screenshot": None,
+             "summary": "ok", "healed_candidate": None}}
+        (ap_state / "qa" / "runs").mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S.%fZ")
+        (ap_state / "qa" / "runs" / f"{{ts}}-{{flow}}.json").write_text(json.dumps(v))
+        """))
+    return f"{sys.executable} {script}"
+
+
+def test_regression_sweep_does_not_resolve_chain_byte_neutral(tmp_path):
+    # A swept flow that HAS `requires` must still get the trivial single-
+    # element chain (--regression never resolves prerequisite chains, unlike
+    # --flow) — ORBIT_QA_CHAIN is just the flow's own name, byte-neutral with
+    # a flow that has no `requires` at all.
+    r = repo(tmp_path, qa_cfg_with_regression())
+    teach_flow(r, name="login")   # never approved — proves it's not swept either
+    checkout = teach_flow(r, name="checkout", requires=["login"])
+    approve(checkout)
+    report = tmp_path / "chain.log"
+    agent = fake_agent_by_flow_chain_probe(tmp_path, "checkout", report)
+    result = run_regression(r, run_cmd=agent)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert report.read_text() == "checkout"
+    assert meta(checkout)["runs"] == 1
 
 
 # --- exit codes -------------------------------------------------------------
@@ -1182,3 +1501,315 @@ def test_explore_lock_released_after_missing_result(tmp_path):
     assert result.returncode == 1, result.stdout + result.stderr
     lock_path = r / ".autopilot" / "state" / "qa" / ".qa-running"
     assert not lock_path.exists()
+
+
+# ===========================================================================
+# --generate: AI-authored candidate tests via /orbit-qa-generate, staged for
+# human review (never written straight into the committed flow library).
+# ===========================================================================
+
+def run_generate(repo_path, run_cmd=None, extra_argv=(), timeout=30):
+    env = dict(os.environ)
+    env.pop("ORBIT_QA_RUN_CMD", None)
+    if run_cmd:
+        env["ORBIT_QA_RUN_CMD"] = run_cmd
+    argv = [sys.executable, str(QA_RUN), str(repo_path), "--generate"]
+    argv += list(extra_argv)
+    return subprocess.run(argv, capture_output=True, text=True, env=env, timeout=timeout)
+
+
+def fake_generate_agent(tmp_path, result=None, mcp_log=None, max_log=None, attach_log=None,
+                         name="fake_generate_agent", sleep_before_write=0.0):
+    """`result` (dict or None) is written as $AP_STATE/qa/generate-<UTC-ts>.json
+    — None means "write nothing" (simulates a missing result), mirroring
+    fake_explore_agent's own result=None convention. `max_log`/`attach_log`,
+    if given, record the ORBIT_QA_GENERATE_MAX/ORBIT_QA_ATTACH env vars this
+    invocation actually saw — same env-capture mechanism as `mcp_log`."""
+    lines = [
+        "import json, os, time",
+        "from datetime import datetime, timezone",
+        "from pathlib import Path",
+        'ap_state = Path(os.environ["AP_STATE"])',
+    ]
+    if mcp_log is not None:
+        lines.append(f'Path({str(mcp_log)!r}).write_text(os.environ.get("QA_MCP_CONFIG", ""))')
+    if max_log is not None:
+        lines.append(f'Path({str(max_log)!r}).write_text(os.environ.get("ORBIT_QA_GENERATE_MAX", ""))')
+    if attach_log is not None:
+        lines.append(f'Path({str(attach_log)!r}).write_text(os.environ.get("ORBIT_QA_ATTACH", ""))')
+    if sleep_before_write:
+        lines.append(f"time.sleep({sleep_before_write})")
+    if result is not None:
+        lines += [
+            '(ap_state / "qa").mkdir(parents=True, exist_ok=True)',
+            'ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S.%fZ")',
+            f'r = {result!r}',
+            '(ap_state / "qa" / f"generate-{ts}.json").write_text(json.dumps(r))',
+        ]
+    script = tmp_path / f"{name}.py"
+    script.write_text("\n".join(lines) + "\n")
+    return f"{sys.executable} {script}"
+
+
+# --- gating / usage ----------------------------------------------------------
+
+def test_generate_no_qa_block_exit_2(tmp_path):
+    r = repo(tmp_path, extra_cfg="")   # no qa: block at all
+    result = run_generate(r)
+    assert result.returncode == 2, result.stdout + result.stderr
+
+
+def test_generate_and_flow_mutually_exclusive_exit_2(tmp_path):
+    r = repo(tmp_path)
+    result = subprocess.run(
+        [sys.executable, str(QA_RUN), str(r), "--generate", "--flow", "x"],
+        capture_output=True, text=True, timeout=30)
+    assert result.returncode == 2, result.stdout + result.stderr
+
+
+def test_generate_and_regression_mutually_exclusive_exit_2(tmp_path):
+    r = repo(tmp_path)
+    result = subprocess.run(
+        [sys.executable, str(QA_RUN), str(r), "--regression", "--generate"],
+        capture_output=True, text=True, timeout=30)
+    assert result.returncode == 2, result.stdout + result.stderr
+
+
+def test_generate_and_explore_mutually_exclusive_exit_2(tmp_path):
+    r = repo(tmp_path)
+    result = subprocess.run(
+        [sys.executable, str(QA_RUN), str(r), "--explore", "--generate"],
+        capture_output=True, text=True, timeout=30)
+    assert result.returncode == 2, result.stdout + result.stderr
+
+
+def test_generate_rejects_if_changed_exit_2(tmp_path):
+    r = repo(tmp_path)
+    result = subprocess.run(
+        [sys.executable, str(QA_RUN), str(r), "--generate", "--if-changed"],
+        capture_output=True, text=True, timeout=30)
+    assert result.returncode == 2, result.stdout + result.stderr
+
+
+def test_max_flag_rejected_with_flow_exit_2(tmp_path):
+    r = repo(tmp_path)
+    result = subprocess.run(
+        [sys.executable, str(QA_RUN), str(r), "--flow", "x", "--max", "3"],
+        capture_output=True, text=True, timeout=30)
+    assert result.returncode == 2, result.stdout + result.stderr
+
+
+def test_generate_max_must_be_an_integer_exit_2(tmp_path):
+    r = repo(tmp_path)
+    result = subprocess.run(
+        [sys.executable, str(QA_RUN), str(r), "--generate", "--max", "nope"],
+        capture_output=True, text=True, timeout=30)
+    assert result.returncode == 2, result.stdout + result.stderr
+
+
+# --- happy path: count echoed -------------------------------------------------
+
+def test_generate_enabled_result_exit_0_echoes_count(tmp_path):
+    r = repo(tmp_path)
+    agent = fake_generate_agent(tmp_path, {
+        "candidates": ["checkout-flow", "signup-flow"], "skipped": [],
+        "count": 2, "summary": "wrote 2 candidates"})
+    result = run_generate(r, run_cmd=agent)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "2 candidate test" in result.stdout
+    assert "review & approve on the dashboard" in result.stdout
+    assert "wrote 2 candidates" in result.stdout
+
+
+def test_generate_zero_candidates_is_exit_1(tmp_path):
+    # Manual-CLI posture: unlike --explore (a clean crawl finding nothing new
+    # IS the happy path), a generate pass with nothing to propose leaves
+    # nothing on the dashboard for the human to review — loud, exit 1.
+    r = repo(tmp_path)
+    agent = fake_generate_agent(tmp_path, {
+        "candidates": [], "skipped": ["already-covered-flow"],
+        "count": 0, "summary": "everything already has a flow"})
+    result = run_generate(r, run_cmd=agent)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "everything already has a flow" in (result.stdout + result.stderr)
+
+
+# --- missing / stale / malformed result -> exit 1 ----------------------------
+
+def test_generate_missing_result_exit_1(tmp_path):
+    r = repo(tmp_path)
+    agent = fake_generate_agent(tmp_path, result=None)
+    result = run_generate(r, run_cmd=agent)
+    assert result.returncode == 1, result.stdout + result.stderr
+
+
+def test_generate_stale_result_ignored_exit_1(tmp_path):
+    r = repo(tmp_path)
+    qa_dir = r / ".autopilot" / "state" / "qa"
+    qa_dir.mkdir(parents=True)
+    stale = qa_dir / "generate-2000-01-01T00-00-00Z.json"
+    stale.write_text(json.dumps({"candidates": ["old"], "skipped": [], "count": 1, "summary": "ancient"}))
+    old = time.time() - 3600
+    os.utime(stale, (old, old))
+    agent = fake_generate_agent(tmp_path, result=None)
+    result = run_generate(r, run_cmd=agent)
+    assert result.returncode == 1, result.stdout + result.stderr
+
+
+def test_generate_malformed_count_mismatch_exit_1(tmp_path):
+    r = repo(tmp_path)
+    agent = fake_generate_agent(tmp_path, {
+        "candidates": ["a"], "skipped": [], "count": 2, "summary": "mismatched"})
+    result = run_generate(r, run_cmd=agent)
+    assert result.returncode == 1, result.stdout + result.stderr
+
+
+def test_generate_malformed_non_list_candidates_exit_1(tmp_path):
+    r = repo(tmp_path)
+    agent = fake_generate_agent(tmp_path, {
+        "candidates": "not-a-list", "skipped": [], "count": 0, "summary": "bad shape"})
+    result = run_generate(r, run_cmd=agent)
+    assert result.returncode == 1, result.stdout + result.stderr
+
+
+def test_generate_malformed_non_string_summary_exit_1(tmp_path):
+    r = repo(tmp_path)
+    agent = fake_generate_agent(tmp_path, {
+        "candidates": [], "skipped": [], "count": 0, "summary": None})
+    result = run_generate(r, run_cmd=agent)
+    assert result.returncode == 1, result.stdout + result.stderr
+
+
+# --- --max / --attach env plumbing -------------------------------------------
+
+def test_generate_max_defaults_to_ten(tmp_path):
+    r = repo(tmp_path)
+    max_log = tmp_path / "max.txt"
+    agent = fake_generate_agent(tmp_path, {
+        "candidates": [], "skipped": [], "count": 0, "summary": "x"}, max_log=max_log)
+    run_generate(r, run_cmd=agent)
+    assert max_log.read_text() == "10"
+
+
+def test_generate_max_flag_overrides_default(tmp_path):
+    r = repo(tmp_path)
+    max_log = tmp_path / "max.txt"
+    agent = fake_generate_agent(tmp_path, {
+        "candidates": [], "skipped": [], "count": 0, "summary": "x"}, max_log=max_log)
+    run_generate(r, run_cmd=agent, extra_argv=["--max", "3"])
+    assert max_log.read_text() == "3"
+
+
+def test_generate_attach_unset_by_default(tmp_path):
+    r = repo(tmp_path)
+    attach_log = tmp_path / "attach.txt"
+    agent = fake_generate_agent(tmp_path, {
+        "candidates": [], "skipped": [], "count": 0, "summary": "x"}, attach_log=attach_log)
+    run_generate(r, run_cmd=agent)
+    assert attach_log.read_text() == ""
+
+
+def test_generate_attach_flag_sets_env(tmp_path):
+    r = repo(tmp_path)
+    attach_log = tmp_path / "attach.txt"
+    agent = fake_generate_agent(tmp_path, {
+        "candidates": [], "skipped": [], "count": 0, "summary": "x"}, attach_log=attach_log)
+    run_generate(r, run_cmd=agent, extra_argv=["--attach"])
+    assert attach_log.read_text() == "1"
+
+
+# --- MCP filename distinct (extends the Phase-4 collision-test discipline) --
+
+def test_generate_mcp_autogen_writes_generate_output_dir_and_distinct_filename(tmp_path):
+    r = repo(tmp_path)
+    mcp_log = tmp_path / "mcp-generate.txt"
+    result = run_generate(r, run_cmd=fake_generate_agent(tmp_path, {
+        "candidates": [], "skipped": [], "count": 0, "summary": "clean"}, mcp_log=mcp_log))
+    assert result.returncode == 1, result.stdout + result.stderr   # 0 candidates -> exit 1, MCP still generated
+
+    generated = r / ".autopilot" / "state" / "qa" / "mcp-run-generate.json"
+    assert generated.exists()
+    cfg = json.loads(generated.read_text())
+    args = cfg["mcpServers"]["playwright"]["args"]
+    out_dir = args[args.index("--output-dir") + 1]
+    assert out_dir.endswith(str(Path("qa") / "generate"))
+    assert Path(out_dir).is_dir()
+    assert mcp_log.read_text() == str(generated)
+    assert not (r / ".autopilot" / "state" / "qa" / "mcp-run-explore.json").exists()
+
+
+# --- shares Task 27's .qa-running lock with --regression/--explore ----------
+
+def test_generate_shares_qa_running_lock_fresh_lock_skips(tmp_path):
+    r = repo(tmp_path, QA_CFG + "  timeout_seconds: 5\n")
+    write_lock(r, age_seconds=0)
+    agent = fake_generate_agent(tmp_path, {
+        "candidates": ["a"], "skipped": [], "count": 1, "summary": "x"})
+    result = run_generate(r, run_cmd=agent)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "already running" in (result.stdout + result.stderr).lower()
+    qa_dir = r / ".autopilot" / "state" / "qa"
+    assert not any(qa_dir.glob("generate-*.json"))    # agent never invoked
+
+
+def test_generate_stale_lock_is_replaced_and_run_proceeds(tmp_path):
+    r = repo(tmp_path, QA_CFG + "  timeout_seconds: 5\n")
+    write_lock(r, age_seconds=9999)
+    agent = fake_generate_agent(tmp_path, {
+        "candidates": ["a"], "skipped": [], "count": 1, "summary": "ok"})
+    result = run_generate(r, run_cmd=agent)
+    assert result.returncode == 0, result.stdout + result.stderr
+    out = (result.stdout + result.stderr).lower()
+    assert "stale" in out and "replac" in out
+    lock_path = r / ".autopilot" / "state" / "qa" / ".qa-running"
+    assert not lock_path.exists()                    # released after
+
+
+def test_generate_lock_released_after_missing_result(tmp_path):
+    r = repo(tmp_path)
+    agent = fake_generate_agent(tmp_path, result=None)
+    result = run_generate(r, run_cmd=agent)
+    assert result.returncode == 1, result.stdout + result.stderr
+    lock_path = r / ".autopilot" / "state" / "qa" / ".qa-running"
+    assert not lock_path.exists()
+
+
+# ── _sync_qa_command: keep the target's /orbit-qa-* slash command current ────
+# The bug this guards against: a target onboarded before a QA skill existed
+# (e.g. /orbit-qa-generate, added after the target was set up) never had the
+# command installed, so `claude --print /orbit-qa-generate` invoked a
+# non-existent command, the agent wrote no result, and the run failed
+# silently. Every agent runner now re-syncs its own command from
+# $ORBIT_HOME/skills before invoking claude — same fix as knowledge.py's
+# _sync_knowledge_command. (White-box, in-process — the real runners only hit
+# this on the live-claude path, which the ORBIT_QA_RUN_CMD test hook skips.)
+
+def test_sync_qa_command_installs_missing_command(tmp_path):
+    target = tmp_path / "repo"
+    target.mkdir()
+    qa_run._sync_qa_command(target, "orbit-qa-generate.md")
+    dest = target / ".claude" / "commands" / "orbit-qa-generate.md"
+    assert dest.is_file()
+    # byte-identical to the engine's own copy (the source of truth)
+    src = qa_run.ORBIT_HOME / "skills" / "orbit-qa-generate.md"
+    assert dest.read_text() == src.read_text()
+
+
+def test_sync_qa_command_overwrites_stale_command(tmp_path):
+    target = tmp_path / "repo"
+    cmd_dir = target / ".claude" / "commands"
+    cmd_dir.mkdir(parents=True)
+    stale = cmd_dir / "orbit-qa-generate.md"
+    stale.write_text("STALE — predates a feature")
+    qa_run._sync_qa_command(target, "orbit-qa-generate.md")
+    assert stale.read_text() != "STALE — predates a feature"
+    assert "STALE" not in stale.read_text()
+
+
+def test_sync_qa_command_never_raises_on_unwritable_target(tmp_path):
+    # A permission error / read-only mount is a WARN, not a crash — the agent
+    # still runs against whatever copy is already there.
+    target = tmp_path / "repo"
+    target.mkdir()
+    (target / ".claude").write_text("not a dir")   # mkdir(parents) under a FILE errors
+    qa_run._sync_qa_command(target, "orbit-qa-generate.md")   # must not raise

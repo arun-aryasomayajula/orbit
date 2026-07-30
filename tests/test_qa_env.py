@@ -287,3 +287,169 @@ def test_up_ctx_tears_down_on_clean_exit(tmp_path):
         assert alive(pid)
 
     assert wait_until(lambda: not alive(pid)), "service leaked past clean up_ctx exit"
+
+
+# ===========================================================================
+# restart_one() — per-service restart for a long-lived services session
+# (command_center.py's persistent "Dev session"), as opposed to up()/down()'s
+# whole-set bring-up/teardown.
+# ===========================================================================
+
+def test_restart_one_replaces_named_service_leaves_other_untouched(tmp_path):
+    port_a = free_port()
+    port_b = free_port()
+    qa_cfg = {"services": [
+        {"name": "web", "launch": http_server_cmd(port_a), "ready": f"http://127.0.0.1:{port_a}/"},
+        {"name": "api", "launch": http_server_cmd(port_b), "ready": f"http://127.0.0.1:{port_b}/"},
+    ]}
+    log_dir = tmp_path / "logs"
+    handles = qa_env.up(tmp_path, qa_cfg, log_dir)
+    try:
+        assert [h.name for h in handles] == ["web", "api"]
+        web_pid_before = handles[0].proc.pid
+        api_pid_before = handles[1].proc.pid
+        assert alive(web_pid_before) and alive(api_pid_before)
+
+        new_handles = qa_env.restart_one(tmp_path, qa_cfg, "web", handles, log_dir)
+
+        # A brand new list, same length, same order, only "web" replaced.
+        assert new_handles is not handles
+        assert [h.name for h in new_handles] == ["web", "api"]
+        web = new_handles[0]
+        api = new_handles[1]
+
+        # web's process changed (killed + fresh spawn)...
+        assert web.proc.pid != web_pid_before
+        assert web.proc.poll() is None
+        assert wait_until(lambda: not alive(web_pid_before)), "old 'web' process not killed"
+        # ...web is genuinely ready again on the same port.
+        with urllib.request.urlopen(f"http://127.0.0.1:{port_a}/", timeout=1) as resp:
+            assert resp.status == 200
+
+        # ...while api's handle (and process) is the EXACT same object/pid —
+        # restart_one() must never touch a handle it wasn't asked to restart.
+        assert api is handles[1]
+        assert api.proc.pid == api_pid_before
+        assert alive(api_pid_before)
+
+        handles = new_handles
+    finally:
+        qa_env.down(handles)
+
+
+def test_restart_one_unnamed_service_fallback_name_uses_current_position_not_stale_handles_index(tmp_path):
+    # Regression (review fix): restart_one() must derive an unnamed
+    # service's fallback name (f"service{i}") from ITS OWN position in the
+    # CURRENT qa.services list (re-read fresh every call), never from the
+    # position of the (possibly stale, built-at-Start) handles-list entry
+    # it's replacing — those two indices can disagree if qa.services was
+    # edited while running. Constructed to isolate the two: at Start,
+    # position 0 is EXPLICITLY named "service1" (legal, if perverse — it
+    # deliberately collides with the fallback pattern for a DIFFERENT
+    # index); by restart time that entry is gone from config and a
+    # genuinely unnamed service now legitimately sits at position 1 (whose
+    # own correct fallback name is "service1" too).
+    port_keepalive = free_port()
+    port_old = free_port()
+    port_new = free_port()
+
+    started_cfg = {"services": [
+        {"name": "service1", "launch": http_server_cmd(port_old), "ready": f"http://127.0.0.1:{port_old}/"},
+        {"name": "keepalive", "launch": http_server_cmd(port_keepalive), "ready": f"http://127.0.0.1:{port_keepalive}/"},
+    ]}
+    log_dir = tmp_path / "logs"
+    handles = qa_env.up(tmp_path, started_cfg, log_dir)
+    try:
+        assert [h.name for h in handles] == ["service1", "keepalive"]
+
+        # Config edited while running: the old explicit "service1" entry is
+        # gone; a genuinely unnamed service now legitimately occupies
+        # position 1.
+        edited_cfg = {"services": [
+            {"name": "keepalive", "launch": http_server_cmd(port_keepalive),
+             "ready": f"http://127.0.0.1:{port_keepalive}/"},
+            {"launch": http_server_cmd(port_new), "ready": f"http://127.0.0.1:{port_new}/"},
+        ]}
+
+        new_handles = qa_env.restart_one(tmp_path, edited_cfg, "service1", handles, log_dir)
+
+        # The freshly spawned handle's name must match ITS current position
+        # in edited_cfg (index 1 -> "service1"), not the stale handles-list
+        # index of the entry it's replacing (index 0 -> would wrongly come
+        # out "service0").
+        assert [h.name for h in new_handles] == ["service1", "keepalive"]
+        restarted = new_handles[0]
+        assert restarted.name == "service1"
+        # ...and it's genuinely the NEW (unnamed) entry's launch command,
+        # not the old, now-removed "service1" entry's — proving `svc`
+        # itself was resolved to the right config entry too.
+        with urllib.request.urlopen(f"http://127.0.0.1:{port_new}/", timeout=1) as resp:
+            assert resp.status == 200
+
+        handles = new_handles
+    finally:
+        qa_env.down(handles)
+
+
+def test_restart_one_unknown_name_raises(tmp_path):
+    port = free_port()
+    qa_cfg = {"services": [
+        {"name": "web", "launch": http_server_cmd(port), "ready": f"http://127.0.0.1:{port}/"},
+    ]}
+    log_dir = tmp_path / "logs"
+    handles = qa_env.up(tmp_path, qa_cfg, log_dir)
+    try:
+        with pytest.raises(qa_env.QaEnvError, match="no-such-service"):
+            qa_env.restart_one(tmp_path, qa_cfg, "no-such-service", handles, log_dir)
+        # Untouched: still the same, still alive.
+        assert handles[0].proc.poll() is None
+    finally:
+        qa_env.down(handles)
+
+
+def test_restart_one_service_removed_from_config_raises(tmp_path):
+    port = free_port()
+    qa_cfg = {"services": [
+        {"name": "web", "launch": http_server_cmd(port), "ready": f"http://127.0.0.1:{port}/"},
+    ]}
+    log_dir = tmp_path / "logs"
+    handles = qa_env.up(tmp_path, qa_cfg, log_dir)
+    try:
+        # The handle exists (it's running), but the config no longer
+        # mentions it by that name — restart_one must refuse, not guess.
+        changed_cfg = {"services": [
+            {"name": "other", "launch": "true"},
+        ]}
+        with pytest.raises(qa_env.QaEnvError, match="web"):
+            qa_env.restart_one(tmp_path, changed_cfg, "web", handles, log_dir)
+        assert handles[0].proc.poll() is None   # untouched
+    finally:
+        qa_env.down(handles)
+
+
+def test_restart_one_ready_timeout_raises_and_kills_the_fresh_attempt(tmp_path, monkeypatch):
+    monkeypatch.setattr(qa_env, "READY_POLL_INTERVAL", 0.2)
+    port = free_port()
+    dead_port = free_port()   # freed immediately; nothing will ever listen here
+    qa_cfg = {
+        "ready_timeout_seconds": 1,
+        "services": [
+            {"name": "flaky", "launch": http_server_cmd(port), "ready": f"http://127.0.0.1:{port}/"},
+        ],
+    }
+    log_dir = tmp_path / "logs"
+    handles = qa_env.up(tmp_path, qa_cfg, log_dir)
+    try:
+        # Point the SAME named service at a launch command that will never
+        # answer its ready URL — restart_one must raise, having already
+        # killed the fresh attempt it just spawned.
+        broken_cfg = {
+            "ready_timeout_seconds": 1,
+            "services": [
+                {"name": "flaky", "launch": "true", "ready": f"http://127.0.0.1:{dead_port}/"},
+            ],
+        }
+        with pytest.raises(qa_env.QaEnvError, match="flaky"):
+            qa_env.restart_one(tmp_path, broken_cfg, "flaky", handles, log_dir)
+    finally:
+        qa_env.down(handles)

@@ -48,6 +48,20 @@ Contract:
         Context manager: `with up_ctx(...) as handles:` — down() runs in a
         finally, so an exception raised inside the with-block (or any early
         return) can never leak a running service.
+    restart_one(target, qa_cfg, name, handles, log_dir) -> list[ServiceHandle]
+        Restarts exactly the ONE running service named `name`: kills its
+        current process (_kill_one), re-reads that service's own spec from
+        qa_cfg['services'] (matched by up()'s own name-defaulting
+        convention — `svc.get('name') or f"service{i}"` — so a service with
+        no explicit `name` key is still found), spawns it fresh (the exact
+        same spawn/log/ready-poll discipline as up(), via the shared
+        `_start_service` helper below), and returns `handles` with THAT ONE
+        entry replaced — every other handle is returned untouched (not
+        re-signalled, not re-created). Raises QaEnvError if `name` isn't one
+        of the handles passed in, if qa.services no longer has an entry by
+        that name, or if the fresh process never becomes ready (its own
+        failed process is already killed by `_start_service` before the
+        error propagates — the OTHER handles are never touched either way).
 
 Not wired into bin/orbit — internal tool, CLI usage for manual/testing use:
     qa_env.py <target> up-check
@@ -135,19 +149,12 @@ def _wait_ready(url: str, timeout: int) -> bool:
         time.sleep(READY_POLL_INTERVAL)
 
 
-def up(target: str | Path, qa_cfg: dict, log_dir: str | Path) -> list[ServiceHandle]:
-    """Bring qa_cfg['services'] up in order. See module docstring for the
-    full contract. Raises QaEnvError (after tearing down anything already
-    started) on any malformed service shape, launch failure, or ready
-    timeout."""
-    target = Path(target)
-    log_dir = Path(log_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
-
-    services = qa_cfg.get("services") or []
-    if not isinstance(services, list):
-        raise QaEnvError(f"qa.services must be a list, got {type(services).__name__}")
-
+def _env_and_timeout(qa_cfg: dict) -> tuple[dict, int]:
+    """Shared by up() and restart_one(): validates + merges qa.env into a
+    full process env, and resolves qa.ready_timeout_seconds (default
+    DEFAULT_READY_TIMEOUT) — the exact same validation and error messages
+    up() has always raised, factored out here so restart_one() enforces the
+    identical shape checks instead of a second, potentially-drifting copy."""
     extra_env = qa_cfg.get("env") or {}
     if not isinstance(extra_env, dict):
         raise QaEnvError(f"qa.env must be an object/mapping, got {type(extra_env).__name__}")
@@ -163,45 +170,91 @@ def up(target: str | Path, qa_cfg: dict, log_dir: str | Path) -> list[ServiceHan
         except (TypeError, ValueError):
             raise QaEnvError(
                 f"qa.ready_timeout_seconds must be a number, got {raw_timeout!r}")
+    return env, ready_timeout
+
+
+def _start_service(svc, target: Path, env: dict, ready_timeout: int, log_dir: Path,
+                    idx: int = 0) -> ServiceHandle:
+    """Launch ONE service dict and wait for it to become ready — the exact
+    per-service spawn/log/ready-poll discipline up() has always used,
+    factored out so restart_one() shares it byte-for-byte rather than a
+    second copy that could drift. `idx` only feeds the default-name
+    fallback (`f"service{idx}"`, matching a service with no explicit
+    'name' key) — up() passes its own loop index over `services`;
+    restart_one() passes the by-name search loop's OWN index over the
+    CURRENT `services` list (where it found `svc`), NOT the position of the
+    handle it's replacing in the (possibly stale, built-at-Start) `handles`
+    list — those two indices can disagree if qa.services was edited while
+    running, and matching up()'s own current-position naming is what keeps
+    a fresh restart's fallback name consistent with what a full up() would
+    call this service today.
+
+    Raises QaEnvError on a malformed shape, a launch OSError, or a ready
+    timeout — in the ready-timeout case ONLY, this function has already
+    killed the process IT just started (via _kill_one) before raising: the
+    caller never has to know how to tear down a single not-yet-returned
+    handle, only whatever ELSE it may already own (see up()'s own
+    try/except and restart_one()'s docstring)."""
+    if not isinstance(svc, dict):
+        raise QaEnvError(f"qa.services entry is not an object: {svc!r}")
+
+    name = str(svc.get("name") or f"service{idx}")
+    launch = svc.get("launch")
+    if not launch or not isinstance(launch, str):
+        raise QaEnvError(f"service {name!r} has no 'launch' command")
+
+    raw_cwd = svc.get("cwd") or "."
+    if not isinstance(raw_cwd, str):
+        raise QaEnvError(f"service {name!r} has a non-string 'cwd': {raw_cwd!r}")
+    cwd = target / raw_cwd
+    log_path = log_dir / f"{name}.log"
+    try:
+        proc = _spawn(launch, cwd, env, log_path)
+    except OSError as e:
+        raise QaEnvError(f"service {name!r} failed to launch: {e}") from e
+
+    handle = ServiceHandle(name=name, proc=proc, log_path=log_path)
+
+    ready = svc.get("ready")
+    if ready:
+        if not _wait_ready(str(ready), ready_timeout):
+            _kill_one(handle)   # this attempt's own process never came up — always cleaned up here
+            raise QaEnvError(
+                f"service {name!r} never became ready at {ready!r} "
+                f"within {ready_timeout}s")
+    else:
+        time.sleep(NO_READY_SLEEP)
+
+    return handle
+
+
+def up(target: str | Path, qa_cfg: dict, log_dir: str | Path) -> list[ServiceHandle]:
+    """Bring qa_cfg['services'] up in order. See module docstring for the
+    full contract. Raises QaEnvError (after tearing down anything already
+    started) on any malformed service shape, launch failure, or ready
+    timeout."""
+    target = Path(target)
+    log_dir = Path(log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    services = qa_cfg.get("services") or []
+    if not isinstance(services, list):
+        raise QaEnvError(f"qa.services must be a list, got {type(services).__name__}")
+
+    env, ready_timeout = _env_and_timeout(qa_cfg)
 
     # Everything from here on can have started a real process — one
     # try/except around the whole loop is the structural teardown guarantee:
-    # ANY exception raised while bringing services up (the QaEnvErrors below,
-    # today, or anything a future change might let through — e.g. a bug in
-    # _http_ok's catch-all) tears down everything already started before
-    # propagating. Safety net, not a substitute for raising QaEnvError at the
-    # actual point of failure (still done below, for a clear message).
+    # ANY exception raised while bringing services up (the QaEnvErrors
+    # _start_service raises, today, or anything a future change might let
+    # through) tears down everything already started before propagating.
+    # Safety net, not a substitute for raising QaEnvError at the actual
+    # point of failure (still done inside _start_service, for a clear
+    # message naming the offending service).
     handles: list[ServiceHandle] = []
     try:
-        for svc in services:
-            if not isinstance(svc, dict):
-                raise QaEnvError(f"qa.services entry is not an object: {svc!r}")
-
-            name = str(svc.get("name") or f"service{len(handles)}")
-            launch = svc.get("launch")
-            if not launch or not isinstance(launch, str):
-                raise QaEnvError(f"service {name!r} has no 'launch' command")
-
-            raw_cwd = svc.get("cwd") or "."
-            if not isinstance(raw_cwd, str):
-                raise QaEnvError(f"service {name!r} has a non-string 'cwd': {raw_cwd!r}")
-            cwd = target / raw_cwd
-            log_path = log_dir / f"{name}.log"
-            try:
-                proc = _spawn(launch, cwd, env, log_path)
-            except OSError as e:
-                raise QaEnvError(f"service {name!r} failed to launch: {e}") from e
-
-            handles.append(ServiceHandle(name=name, proc=proc, log_path=log_path))
-
-            ready = svc.get("ready")
-            if ready:
-                if not _wait_ready(str(ready), ready_timeout):
-                    raise QaEnvError(
-                        f"service {name!r} never became ready at {ready!r} "
-                        f"within {ready_timeout}s")
-            else:
-                time.sleep(NO_READY_SLEEP)
+        for i, svc in enumerate(services):
+            handles.append(_start_service(svc, target, env, ready_timeout, log_dir, idx=i))
     except Exception:
         down(handles)
         raise
@@ -274,6 +327,68 @@ def up_ctx(target: str | Path, qa_cfg: dict, log_dir: str | Path):
         yield handles
     finally:
         down(handles)
+
+
+# ---------------------------------------------------------------------------
+# restart_one — per-service restart for a long-lived services session (e.g.
+# command_center.py's persistent "Dev session"), as opposed to up()/down()'s
+# whole-set bring-up/teardown.
+# ---------------------------------------------------------------------------
+
+def restart_one(target: str | Path, qa_cfg: dict, name: str,
+                 handles: list[ServiceHandle], log_dir: str | Path) -> list[ServiceHandle]:
+    """Restart exactly the ONE running service named `name` — see the module
+    docstring's own `restart_one` entry for the full contract. `handles` is
+    NEVER mutated in place; a new list (a shallow copy with one entry
+    replaced) is returned, so a caller holding the old list's reference
+    elsewhere still sees the pre-restart state until it adopts the return
+    value. On a QaEnvError (unknown name, no matching qa.services entry, or
+    a ready timeout), the OTHER handles are left completely untouched — only
+    the named service's old process is already dead (killed before the
+    fresh spawn attempt) and, on a ready-timeout, the fresh attempt's own
+    process too (via _start_service)."""
+    target = Path(target)
+    log_dir = Path(log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    idx = next((i for i, h in enumerate(handles or []) if h.name == name), None)
+    if idx is None:
+        raise QaEnvError(f"no running service named {name!r} to restart")
+
+    services = qa_cfg.get("services") or []
+    if not isinstance(services, list):
+        raise QaEnvError(f"qa.services must be a list, got {type(services).__name__}")
+
+    # Same name-defaulting convention up() uses (`svc.get('name') or
+    # f"service{i}"`) — a service with no explicit 'name' key must still be
+    # found by the same identity up() gave it.
+    svc = None
+    svc_idx = None
+    for i, s in enumerate(services):
+        if isinstance(s, dict) and str(s.get("name") or f"service{i}") == name:
+            svc = s
+            svc_idx = i
+            break
+    if svc is None:
+        raise QaEnvError(f"no qa.services entry named {name!r} found in the current config")
+
+    env, ready_timeout = _env_and_timeout(qa_cfg)
+
+    _kill_one(handles[idx])
+    # `idx` (position in the STALE `handles` list built at Start) is only
+    # used above to find which handle to replace — it must NOT feed
+    # _start_service's own fallback-name derivation below. `services` is
+    # re-read fresh from qa_cfg on every call, so if it was edited while
+    # running, an unnamed service's position there can have drifted from
+    # its position in `handles`. `svc_idx` (this loop's own index into the
+    # CURRENT `services` list) is what up() would use to name this exact
+    # service if it were restarting everything — passing that (not `idx`)
+    # keeps restart_one's fallback name consistent with up()'s.
+    new_handle = _start_service(svc, target, env, ready_timeout, log_dir, idx=svc_idx)
+
+    updated = list(handles)
+    updated[idx] = new_handle
+    return updated
 
 
 # ---------------------------------------------------------------------------

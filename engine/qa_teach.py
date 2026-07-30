@@ -19,7 +19,19 @@ Flow-file format (BINDING — see .superpowers/sdd/task-20-brief.md):
                          criteria` list
         steps.spec.ts    raw codegen output, byte-for-byte — ground truth
         meta.json        {"created_at", "last_run_at": null,
-                          "last_verdict": null, "runs": 0, "heals": []}
+                          "last_verdict": null, "runs": 0, "heals": [],
+                          "requires": [], "provides_auth": false}
+                         `requires` (test chaining, Task "prerequisites"):
+                         SLUG_RE-valid flow names this flow depends on — when
+                         replayed, each runs FIRST in the same browser
+                         session (see qa_run.py's chain resolution and
+                         skills/orbit-qa-flow.md). `provides_auth` marks a
+                         flow as one that establishes a login/session (e.g.
+                         the login flow itself) — informational only here,
+                         a hint for the teach UI/operator, never read by the
+                         chain resolver itself. Both default so every
+                         existing caller/flow (no prerequisites) is
+                         unaffected.
     steps.json (the normalized, healable form) is NOT written here — the QA
     agent writes it on first successful replay (Task 22).
     $AP_HOME/<flows_dir's parent>/FLOWMAP.md — one line per flow:
@@ -124,17 +136,37 @@ def _bad_flows_dir_reason(fd) -> str | None:
 # recorder (Playwright codegen), foreground
 # ---------------------------------------------------------------------------
 
-def _run_codegen(target: Path, url: str, output_path: Path) -> int:
+def codegen_argv(url: str, output_path: Path, browser: str | None = None) -> list[str]:
+    """Build the recorder's argv — shared by this module's own foreground
+    `_run_codegen` (below) and command_center.py's dashboard teach session,
+    which backgrounds the exact same command as a non-blocking `Popen`
+    instead of a blocking `subprocess.run` (the two must never drift, or the
+    web UI would record a subtly different flow than the CLI does).
+
+    ORBIT_CODEGEN_CMD replaces this wholesale, same substitution mechanism as
+    every other test hook in engine/ (see module docstring) — the override
+    string IS the argv, `browser` is never consulted in that case. Otherwise:
+    `--channel <browser>` for `browser in ("chrome", "msedge")` makes
+    Playwright drive the operator's already-installed system browser instead
+    of the bundled Chromium `codegen` downloads on first use — honors
+    `qa.browser` from config.yaml."""
+    override = os.environ.get("ORBIT_CODEGEN_CMD")
+    if override:
+        return shlex.split(override)
+    cmd = ["npx", "playwright", "codegen", "--output", str(output_path)]
+    if browser in ("chrome", "msedge"):
+        cmd += ["--channel", browser]
+    cmd.append(url)
+    return cmd
+
+
+def _run_codegen(target: Path, url: str, output_path: Path, browser: str | None = None) -> int:
     """Foreground, blocking: the human interacts with the recording browser
     directly. Never redirects stdio (unlike the backgrounded qa.services
     launches or the headless agent calls elsewhere in engine/) — that's what
     "foreground" means here. Returns the recorder's exit code, or 1 if it
     could not even be launched."""
-    override = os.environ.get("ORBIT_CODEGEN_CMD")
-    if override:
-        cmd = shlex.split(override)
-    else:
-        cmd = ["npx", "playwright", "codegen", "--output", str(output_path), url]
+    cmd = codegen_argv(url, output_path, browser)
     env = dict(os.environ, ORBIT_CODEGEN_OUTPUT=str(output_path), ORBIT_CODEGEN_URL=url)
     try:
         return subprocess.run(cmd, cwd=str(target), env=env).returncode
@@ -192,16 +224,35 @@ def _render_intent_md(name: str, created_at: str, entry_path: str,
 
 
 def _write_flow(flow_dir: Path, name: str, entry_path: str, intent: str,
-                 criteria: list[str], spec_tmp: Path) -> str:
+                 criteria: list[str], spec_tmp: Path, requires: list[str] | None = None,
+                 provides_auth: bool = False) -> str:
     """Creates flow_dir and its three files. Returns created_at. Raises on
-    any failure — caller is responsible for cleaning up flow_dir."""
+    any failure — caller is responsible for cleaning up flow_dir.
+
+    `requires` (test chaining — default `[]` so every existing caller/test is
+    unaffected) names OTHER flows this one depends on: qa_run.py resolves
+    them into an ordered prerequisite chain that replays first, in the same
+    browser session, so auth/session state carries into this flow (see
+    qa_run.py's chain resolution and skills/orbit-qa-flow.md). Each entry
+    must be SLUG_RE-valid — same shape as a flow name itself — checked here
+    (raises ValueError, same "caller cleans up flow_dir" contract as any
+    other failure in this function) rather than trusted from the caller,
+    since both the CLI (no --requires flag today) and the dashboard's teach
+    panel funnel through this one function. `provides_auth` (default
+    `False`) marks a flow as one that establishes a login/session — purely
+    informational (an operator/teach-UI hint), never consulted by the chain
+    resolver itself."""
+    requires = [str(r) for r in (requires or [])]
+    for req in requires:
+        if not SLUG_RE.match(req):
+            raise ValueError(f"invalid requires entry {req!r} — must be a valid flow-name slug")
     flow_dir.mkdir(parents=True)
     created_at = _now_iso()
     (flow_dir / "intent.md").write_text(
         _render_intent_md(name, created_at, entry_path, intent, criteria))
     shutil.copyfile(spec_tmp, flow_dir / "steps.spec.ts")
     meta = {"created_at": created_at, "last_run_at": None, "last_verdict": None,
-             "runs": 0, "heals": []}
+             "runs": 0, "heals": [], "requires": requires, "provides_auth": bool(provides_auth)}
     (flow_dir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
     return created_at
 
@@ -295,7 +346,7 @@ def main(argv: list[str]) -> int:
             with qa_env.up_ctx(target, qa_cfg, log_dir):
                 print(f"Recording {url} — interact in the browser; close its "
                       f"window when the flow is complete.")
-                rc = _run_codegen(target, url, spec_tmp)
+                rc = _run_codegen(target, url, spec_tmp, browser=qa_cfg.get("browser"))
                 if rc != 0:
                     _err(f"recorder exited {rc} — no flow recorded")
                     return 1

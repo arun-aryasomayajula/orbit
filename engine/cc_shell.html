@@ -213,6 +213,19 @@ ul.acc{margin:6px 0 0 16px;padding:0;font-size:11.5px;color:var(--dim)}
 .empty{color:var(--faint);font-size:12px;padding:16px 6px;text-align:center;line-height:1.6}
 .empty b{color:var(--dim)}
 
+/* ── QA running banner: shown while a flow/regression/explore/generate run
+   holds the shared browser lock (qa_flows.qa_busy). A run can take minutes and
+   nothing lands in the UI until it finishes — this is the "something IS
+   happening" signal so the operator never stares at a dead panel. */
+.qa-run-banner{display:flex;align-items:center;gap:10px;margin:0 0 6px;
+  padding:11px 14px;border:1px solid var(--blue-dim);border-radius:10px;
+  background:linear-gradient(90deg,var(--blue-dim),transparent);
+  color:var(--ink);font:500 12.5px var(--mono)}
+.qa-run-banner .sub{color:var(--dim);font-size:11.5px}
+.qa-spin{width:14px;height:14px;flex:none;border-radius:50%;
+  border:2px solid var(--blue-dim);border-top-color:var(--blue);
+  animation:orb .8s linear infinite}
+
 /* ── inbox ──────────────────────────────────────────────────────────────── */
 .inbox-zero{display:flex;align-items:center;gap:12px;padding:16px 18px;background:var(--panel);
   border:1px solid var(--line);border-left:3px solid var(--green);border-radius:11px;color:var(--dim);font-size:12.5px}
@@ -382,6 +395,20 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
 .ds-read-empty b{color:var(--dim)}
 @media (max-width:820px){.ds-wrap{grid-template-columns:1fr}.ds-list{max-height:320px}}
 
+/* ── knowledge graph (Docs ⟷ Graph tabs, cytoscape node graph) ─────────────── */
+.kb-tabs{margin:0 0 14px}
+.kg-wrap{display:grid;grid-template-columns:1fr 280px;gap:14px;align-items:start}
+.kg-canvas-wrap{position:relative;background:var(--panel);border:1px solid var(--line);
+  border-radius:12px;height:min(620px,70vh);overflow:hidden}
+#kgCanvas{width:100%;height:100%}
+.kg-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  text-align:center;padding:24px;color:var(--faint);font-size:12.5px;line-height:1.7;background:var(--panel)}
+.kg-overlay b{color:var(--dim)}
+.kg-overlay code{color:var(--ink);background:var(--card2);padding:1px 5px;border-radius:4px}
+.kg-side .band{margin-bottom:10px}
+.chip .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px;vertical-align:1px}
+@media (max-width:900px){.kg-wrap{grid-template-columns:1fr}.kg-canvas-wrap{height:420px}}
+
 /* rows-only stack (inbox) — never a multi-column grid */
 .rows{display:flex;flex-direction:column;gap:10px}
 
@@ -406,6 +433,22 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
 .set-meta{font:500 11px/1.7 var(--mono);color:var(--faint)}
 .set-meta code{color:var(--dim)}
 @media(max-width:700px){.grid2{grid-template-columns:1fr}}
+
+/* ── project switcher (launcher proxy — hidden when no launcher is in front) */
+.projsw{position:relative;margin-top:9px}
+.projsw-btn{width:100%;display:flex;align-items:center;gap:6px;background:var(--card);border:1px solid var(--line2);
+  border-radius:7px;padding:6px 9px;color:var(--dim);font:600 11px var(--disp);cursor:pointer;text-align:left}
+.projsw-btn:hover{color:var(--ink);border-color:var(--faint)}
+.projsw-btn #projSwName{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.projsw-car{flex:none;color:var(--faint);font-size:9px}
+.projsw-menu{position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--card2);border:1px solid var(--line2);
+  border-radius:8px;box-shadow:0 12px 28px rgba(0,0,0,.5);z-index:30;max-height:280px;overflow-y:auto}
+.projsw-item{padding:8px 10px;font:500 11.5px var(--mono);color:var(--ink);cursor:pointer;border-bottom:1px solid var(--line)}
+.projsw-item:last-child{border-bottom:0}
+.projsw-item:hover{background:var(--card)}
+.projsw-item.mut{color:var(--faint);cursor:default}
+.projsw-item .live-dot{color:var(--green);margin-left:4px}
+.rail-collapsed .projsw{display:none}
 </style></head><body>
 
 <div id="stars" aria-hidden="true"></div><div id="stars2" aria-hidden="true"></div>
@@ -509,6 +552,10 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
     <div class="sat"><span class="orbmark" aria-hidden="true"></span><h1>Orbit</h1>
       <button class="railtoggle" id="railToggle" onclick="toggleRail()" title="Collapse sidebar" aria-label="Toggle sidebar">«</button></div>
     <div class="base">orbiting <b>__BRANCH__</b></div>
+    <div class="projsw" id="projSwitcher" style="display:none">
+      <button class="projsw-btn" onclick="toggleProjMenu()" id="projSwBtn" title="Switch project">📁 <span id="projSwName">project</span><span class="projsw-car">▾</span></button>
+      <div class="projsw-menu" id="projSwMenu" style="display:none"></div>
+    </div>
   </div>
   <nav aria-label="Views">
     <div class="navlbl">Console</div>
@@ -522,6 +569,9 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
     <div class="navlbl">Fleet</div>
     <button class="nav" data-view="agents" onclick="go('agents')"><span class="ico">🚧</span>Feature agents<span class="key">7</span></button>
     <button class="nav" data-view="insights" onclick="go('insights')"><span class="ico">📈</span>Insights<span class="key">8</span></button>
+    <div class="navlbl">Onboarding</div>
+    <button class="nav" data-view="run" onclick="go('run')" title="Run intake / build the knowledge base"><span class="ico">🛫</span>Run</button>
+    <button class="nav" data-view="knowledge" onclick="go('knowledge')" title="Browse the knowledge base"><span class="ico">📚</span>Knowledge<span class="nb" id="nb-knowledge"></span></button>
     <div class="navlbl">Admin</div>
     <button class="nav" data-view="settings" onclick="go('settings')" title="Settings"><span class="ico">⚙</span>Settings</button>
     <div class="navlbl">Help</div>
@@ -610,6 +660,39 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
     <div style="margin:10px 0">
       <button class="btn btn-go btn-mini" title="replay every approved flow (one with a steps.json — replay-proven at least once) right now, capped by qa.regression.max_flows_per_run — ignores the cursor" onclick="sweepFlows()">🧹 Sweep flows now</button>
       <button class="btn btn-go btn-mini" id="qaExploreBtn" style="display:none" title="bounded, same-origin crawl from qa.base_url, capped by qa.exploratory.max_pages — files NEW findings to ops/qa/SEEN.md, never a verdict" onclick="runExplore()">🔭 Explore now</button>
+      <button class="btn btn-go btn-mini" id="qaGenerateBtn" title="reads your knowledge base + drives the browser to propose tests for review — never touches the flow library until you approve a candidate" onclick="runGenerate()">✨ Generate tests</button>
+      <div class="colsub" style="margin-top:4px">Reads your knowledge base + drives the browser to propose tests for review — candidates land below for you to approve or reject.</div>
+    </div>
+    <!-- ── Dev session — bring the app up ONCE and keep it warm; flows/teach
+         then attach instead of relaunching it every run. ── -->
+    <div class="band" id="qaDevBand" style="display:none">
+      <div class="bandhead"><h3>Dev session</h3><span class="bandsum" id="qaDevState"></span></div>
+      <div class="flow" id="qaDevNote"></div>
+      <div id="qaDevServices" style="margin-top:6px"></div>
+      <div style="margin-top:8px;display:flex;gap:8px">
+        <button class="btn btn-go btn-mini" id="qaDevStartBtn" onclick="qaServicesStart()">▶ Start app</button>
+        <button class="btn btn-stop btn-mini" id="qaDevStopBtn" style="display:none" onclick="qaServicesStop()">■ Stop app</button>
+      </div>
+    </div>
+    <!-- ── New test / Record — the web equivalent of `orbit teach` ── -->
+    <div class="band" id="qaTeachBand" style="display:none">
+      <div class="bandhead"><h3>＋ New test</h3><span class="bandsum" id="qtLive"></span></div>
+      <div class="flow">Record a browser flow by demonstration. Brings your app up, opens a recording
+        browser — perform the flow there, close its window when done, then this is saved as a taught
+        flow (the same <code>.autopilot/qa/flows/&lt;name&gt;/</code> format <code>orbit teach</code> writes).</div>
+      <div style="display:flex;flex-direction:column;gap:6px;max-width:520px;margin-top:8px">
+        <input id="qtName" class="tfin" placeholder="name — lowercase slug, e.g. login-flow" autocomplete="off">
+        <input id="qtIntent" class="tfin" placeholder="intent — what this flow proves, in one line" autocomplete="off">
+        <textarea id="qtCriteria" class="tfin" rows="3" placeholder="success criteria — ONE PER LINE"></textarea>
+        <input id="qtUrl" class="tfin" placeholder="URL — optional, defaults to qa.base_url" autocomplete="off">
+        <input id="qtRequires" class="tfin" placeholder="prerequisites — comma-separated existing flow names, e.g. login" autocomplete="off">
+        <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--dim)">
+          <input type="checkbox" id="qtProvidesAuth"> This flow logs in / establishes a session (provides auth)</label>
+      </div>
+      <div style="margin-top:8px;display:flex;gap:8px">
+        <button class="btn btn-go btn-mini" id="qtRecordBtn" onclick="qaTeachStart()">● Record</button>
+        <button class="btn btn-stop btn-mini" id="qtCancelBtn" style="display:none" onclick="qaTeachCancel()">Cancel</button>
+      </div>
     </div>
     <div id="qaBody"></div>
   </section>
@@ -621,6 +704,63 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
       <div class="flow">Dedicated agents for features too big for the one-commit loop. Each builds in its own worktree and pushes its own branch:
         worktree branch → <b style="color:var(--violet)">Merge into loop</b> → <code id="fbLoop"></code> → <i>you merge</i> → <code>phase-2</code>.</div>
       <div id="featureband"></div>
+    </div>
+  </section>
+
+  <!-- ── ONBOARDING: RUN (intake + knowledge build) ── -->
+  <section class="view" id="view-run">
+    <h2 style="margin:0 0 4px">Onboarding <span class=aside>survey the repo, then build its knowledge base</span></h2>
+    <p class="colsub" style="margin:0 0 16px">Both run detached — leave this tab open to watch progress, or come back later; the log picks up where it left off.</p>
+    <div id="onboardGuide"></div>
+    <div class="band">
+      <div class="bandhead"><h3>Intake</h3><span class="bandsum" id="intakeStatus">idle</span></div>
+      <div class="flow">Surveys the repo and proposes backlog tasks (always <code>status: proposed</code> — triage them on <b>Deep space</b>). Safe to re-run any time.</div>
+      <button class="btn btn-go btn-mini" id="intakeBtn" onclick="runIntake()">▶ Run intake</button>
+      <pre class="viewer" id="intakeLog" style="margin-top:10px;display:none"></pre>
+    </div>
+    <div class="band">
+      <div class="bandhead"><h3>Knowledge base</h3><span class="bandsum" id="knowledgeStatus">not built yet</span></div>
+      <div class="flow">Builds <code>.autopilot/knowledge/</code> — the architecture map the agent reads every cycle. Build it once, then Refresh after the codebase drifts.</div>
+      <button class="btn btn-go btn-mini" id="kbBuildBtn" onclick="runKnowledge('build')">▶ Build knowledge base</button>
+      <button class="btn btn-mini" id="kbRefreshBtn" onclick="runKnowledge('refresh')">↻ Refresh</button>
+      <pre class="viewer" id="knowledgeLog" style="margin-top:10px;display:none"></pre>
+    </div>
+  </section>
+
+  <!-- ── ONBOARDING: KNOWLEDGE (doc browser + interactive graph) ── -->
+  <section class="view" id="view-knowledge">
+    <h2 style="margin:0 0 4px">Knowledge <span class=aside>the architecture map under .autopilot/knowledge/</span></h2>
+    <p class="colsub" style="margin:0 0 16px"><b>Docs</b> — the markdown architecture map. <b>Graph</b> — an interactive node graph (endpoints → functions → tables, call chains, flows); click a node to trace its whole chain.</p>
+    <div class="chips kb-tabs">
+      <button class="chip" id="kbTabDocs" onclick="kbSetMode('docs')">📄 Docs</button>
+      <button class="chip" id="kbTabGraph" onclick="kbSetMode('graph')">🕸 Graph</button>
+      <span class="bandsum" id="kbGraphAbsentNote" style="display:none">no graph.json yet — build/refresh the knowledge base to generate one</span>
+    </div>
+
+    <div id="kbDocsPane" class="ds-wrap">
+      <div class="ds-list" id="kbList"></div>
+      <div class="ds-read" id="kbRead"><div class=ds-read-empty>📚<br><b>Pick a doc</b> from the list to view it.</div></div>
+    </div>
+
+    <div id="kbGraphPane" style="display:none">
+      <div class="chips" id="kgFilters">
+        <button class="chip on" id="kgf-endpoint" onclick="kgToggleType('endpoint')"><i class="dot" style="background:var(--blue)"></i>Endpoints</button>
+        <button class="chip on" id="kgf-function" onclick="kgToggleType('function')"><i class="dot" style="background:var(--green)"></i>Functions</button>
+        <button class="chip on" id="kgf-table" onclick="kgToggleType('table')"><i class="dot" style="background:var(--amber)"></i>Tables</button>
+        <button class="chip on" id="kgf-flow" onclick="kgToggleType('flow')"><i class="dot" style="background:var(--violet)"></i>Flows</button>
+        <button class="chip chip-go" onclick="clearHighlight()">✕ Clear highlight</button>
+      </div>
+      <div class="kg-wrap">
+        <div class="kg-canvas-wrap">
+          <div id="kgCanvas"></div>
+          <div class="kg-overlay" id="kgOverlay" style="display:none"></div>
+        </div>
+        <div class="kg-side">
+          <div class="band"><div class="bandhead"><h3>Legend</h3></div><div class="hlegend" id="kgLegend"></div></div>
+          <div class="band"><div class="bandhead"><h3>Node</h3></div>
+            <div id="kgDetailBody" class="empty" style="padding:8px 2px;text-align:left">Click a node to see its details and highlight its call chain. Click empty canvas to clear.</div></div>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -731,6 +871,16 @@ const escJsAttr=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/\\/g,'\\\
 const fmt=s=>{s=Math.max(0,Math.floor(s));const m=Math.floor(s/60),r=s%60;
   return m<60?`${m}:${String(r).padStart(2,'0')}`:`${Math.floor(m/60)}h${String(m%60).padStart(2,'0')}m`;};
 let S=null,fetchedAt=0,serverNow=0,lastSig='';
+// Knowledge-graph + QA-teach state, declared this early (rather than down by
+// their own code) because go('knowledge')/go('qa') — reachable synchronously
+// below on initial load, restoring the last-open view from localStorage —
+// read kbMode / call qaTeachSyncStatus (which reads qaTeachTimer); a `let`
+// declared later in the script would still be in its temporal dead zone at
+// that point and throw (a swallowed ReferenceError, since that call sits
+// behind a try/catch — see below).
+let kbMode=null, cy=null, cyLoadState='idle',
+    kgTypeOn={endpoint:true,function:true,table:true,flow:true}, _cytoscapePromise=null,
+    qaTeachTimer=null;
 const srvClock=()=>serverNow+(Date.now()-fetchedAt)/1000;
 function post(path,params){const b=new URLSearchParams(params).toString();
   fetch(path,{method:'POST',headers:POST_HDRS,body:b})
@@ -742,12 +892,14 @@ function reapStalled(){
     post('/reap',{});}
 
 /* ── navigation ─────────────────────────────────────────────────────────── */
-const VIEWS=['overview','inbox','queue','deepspace','ships','branches','agents','insights','settings','qa'];
+const VIEWS=['overview','inbox','queue','deepspace','ships','branches','agents','insights','settings','qa','run','knowledge'];
 function go(v){
   document.querySelectorAll('.view').forEach(x=>x.classList.toggle('on',x.id==='view-'+v));
   document.querySelectorAll('.nav').forEach(x=>x.classList.toggle('on',x.dataset.view===v));
   try{localStorage.setItem('cc-view',v)}catch(e){}
   if(v==='settings')loadSettings();   // fetch fresh config each time the tab opens
+  if(v==='qa')qaTeachSyncStatus();    // resync the teach panel with server truth
+  if(v==='knowledge')kbMaybeLoadGraph();   // now visible — safe to size a cytoscape canvas
 }
 document.addEventListener('keydown',e=>{
   if(e.key==='Escape'){closePalette();closeModal();closeModal2();closeModal3();closeModal4();closeModal5();return;}
@@ -992,13 +1144,17 @@ function renderTop(){
   nb('nb-ships',(r.done||[]).filter(x=>!x.merged&&!x.rejected).length,false);
   nb('nb-branches',(r.branches||[]).filter(b=>b.category==='awaiting'||b.category==='orphan').length,false);
   // QA nav (Task 23): hidden entirely when the target has no flow library;
-  // its badge only shows a number once there's a pending heal to look at
-  // (unlike the always-on counters above — a "0" pill would just be noise
-  // when the heal strip, Task 26, is empty).
-  const qaNav=document.querySelector('.nav[data-view="qa"]'),qaHeals=(r.qa_flows&&r.qa_flows.pending_heals)||0;
+  // its badge only shows a number once there's a pending human gate to look
+  // at — a pending heal (Task 26) OR an AI-generated test candidate awaiting
+  // approve/reject (--generate). `generated` is omitted server-side when
+  // empty (byte-neutral), so `.length||0` handles both cases. Unlike the
+  // always-on counters above, a "0" pill would just be noise when both strips
+  // are empty.
+  const qaNav=document.querySelector('.nav[data-view="qa"]');
+  const qaPending=((r.qa_flows&&r.qa_flows.pending_heals)||0)+((r.qa_flows&&r.qa_flows.generated&&r.qa_flows.generated.length)||0);
   if(qaNav)qaNav.style.display=r.qa_flows?'':'none';
   const nbQa=document.getElementById('nb-qa');
-  if(nbQa){nbQa.textContent=qaHeals>0?qaHeals:'';nbQa.className='nb'+(qaHeals>0?' hot':'');}
+  if(nbQa){nbQa.textContent=qaPending>0?qaPending:'';nbQa.className='nb'+(qaPending>0?' hot':'');}
   if(!r.loop_loaded)document.getElementById('statusText').innerHTML+=' · <span class=hot>daemon not loaded</span>';
   // pinned-tab notifier: title count + amber-dotted favicon while items wait
   const wantTitle=(ib.n?`(${ib.n}) `:'')+'Orbit — Mission Control';
@@ -1276,10 +1432,20 @@ function runExplore(){
   if(confirm('Run an exploratory crawl now?\n\nWalks qa.base_url breadth-first, same-origin only, capped by qa.exploratory.max_pages. Files only NEW findings to ops/qa/SEEN.md — never a verdict. Runs in the background.'))
     post('/qa-action',{action:'run-explore'});
 }
+function runGenerate(){
+  if(confirm('Generate candidate tests now?\n\nReads your knowledge base and drives the browser to propose new tests, capped by ORBIT_QA_GENERATE_MAX (default 10). Writes CANDIDATES for you to review below — nothing is added to the flow library until you approve it. Runs in the background.'))
+    post('/qa-action',{action:'run-generate'});
+}
 function qaFlowRow(f){
   const runs=f.runs==null?0:f.runs;
   const last=f.last_run_at?relSince(Math.floor(new Date(f.last_run_at).getTime()/1000))+' ago':'never run';
-  return `<div class=brow><code>${esc(f.name)}</code> ${esc(f.intent_line||'—')} ${qaVerdictBadge(f.last_verdict)}
+  // Test chaining (Task "prerequisites"): `requires`/`provides_auth` are only
+  // present on the payload when non-default (see qa_flow_library) — a flow
+  // with no prerequisites renders exactly as before, chip-free.
+  const requires=(f.requires||[]).filter(Boolean);
+  const needsChip=requires.length?badge('needs: '+requires.join(', '),'muted'):'';
+  const authBadge=f.provides_auth?badge('auth','vio'):'';
+  return `<div class=brow><code>${esc(f.name)}</code> ${esc(f.intent_line||'—')} ${qaVerdictBadge(f.last_verdict)} ${needsChip} ${authBadge}
     <span class=aside>${esc(last)} · ${runs} run${runs===1?'':'s'}</span><span class=spacer></span>
     <button class="btn btn-go btn-mini" onclick="runFlow('${escJsAttr(f.name)}')">▶ Run</button></div>`;
 }
@@ -1313,22 +1479,593 @@ function healReject(file){
   if(!why.trim()){toast('A reason is required.');return;}
   post('/qa-action',{action:'heal-reject',file:file,reason:why.trim()});
 }
+
+/* ── generated-candidates strip — the human gate that closes the AI
+   test-generation loop (mirrors the heal strip exactly, one level up: a
+   candidate here IS a whole proposed flow, so Approve MOVES it wholesale
+   into the flow library instead of rewriting one file in place). */
+function generateCard(g){
+  const needsChip=(g.requires||[]).length?badge('needs: '+g.requires.join(', '),'muted'):'';
+  return `<div class=card><div class="card-h"><span class=tid>${esc(g.name)}</span> ${badge('candidate','warn')} ${needsChip}</div>
+    <div class=meta style="white-space:pre-wrap">${esc(g.summary||g.intent||'—')}</div>
+    <div class=btns>
+      <button class="btn btn-go btn-mini" title="add this candidate to the flow library" onclick="if(confirm('Approve candidate ${escJsAttr(g.name)}? It becomes a real flow in the library.'))post('/qa-action',{action:'generate-approve',name:'${escJsAttr(g.name)}'})">Approve</button>
+      <button class="btn btn-stop btn-mini" onclick="generateReject('${escJsAttr(g.name)}')">Reject</button>
+    </div></div>`;
+}
+function generateReject(name){
+  if(confirm('Reject candidate '+name+'? It is archived, never added to the flow library.'))
+    post('/qa-action',{action:'generate-reject',name:name});
+}
+
+/* ── Dev session — persistent qa.services, kept warm across test runs.
+   Start/Stop the whole set; Restart one named service without touching the
+   others. Mirrors the QA teach panel's postJSON discipline. ────────────── */
+function qaServicesStart(){
+  postJSON('/qa-services-start',{}).then(j=>{toast(j.msg||'starting…');refresh();})
+    .catch(e=>toast('error: '+e));
+}
+function qaServicesStop(){
+  if(!confirm('Stop the persistent dev session?\n\nAny test run currently attached to it may fail. Flows/teach will each bring their own copy up again until you Start it here.'))return;
+  postJSON('/qa-services-stop',{}).then(j=>{toast(j.msg||'stopped');refresh();})
+    .catch(e=>toast('error: '+e));
+}
+function qaServicesRestart(name){
+  postJSON('/qa-services-restart',{service:name}).then(j=>{toast(j.msg||'restarted');refresh();})
+    .catch(e=>toast('error: '+e));
+}
+function qaDevServiceRow(s){
+  return `<div class=brow><code>${esc(s.name)}</code>${s.ready?` <span class=aside>${esc(s.ready)}</span>`:''}<span class=spacer></span>
+    <button class="btn btn-mini" onclick="qaServicesRestart('${escJsAttr(s.name)}')">↻ Restart</button></div>`;
+}
+function renderQaDev(){
+  const band=document.getElementById('qaDevBand');
+  if(!band)return;
+  const qs=S&&S.qa_services;
+  if(!qs){band.style.display='none';return;}
+  band.style.display='';
+  const stLabel={stopped:'stopped',starting:'starting…',running:'running',error:'error'}[qs.state]||qs.state;
+  const stClass={stopped:'muted',starting:'warn',running:'ok',error:'stop'}[qs.state]||'muted';
+  const stateEl=document.getElementById('qaDevState');
+  if(stateEl)stateEl.innerHTML=badge(stLabel,stClass);
+  const noteEl=document.getElementById('qaDevNote');
+  if(noteEl)noteEl.textContent=qs.state==='running'
+    ? 'Tests run against the warm app (attach) — no reboot.'
+    : qs.state==='error' ? (qs.error||'could not bring the app up')
+    : 'Bring the app up once, then flows/teach attach instead of relaunching it every run.';
+  const svcEl=document.getElementById('qaDevServices');
+  if(svcEl)svcEl.innerHTML=(qs.services||[]).map(qaDevServiceRow).join('');
+  const busy=qs.state==='running'||qs.state==='starting';
+  const startBtn=document.getElementById('qaDevStartBtn'),stopBtn=document.getElementById('qaDevStopBtn');
+  if(startBtn)startBtn.style.display=busy?'none':'';
+  if(stopBtn)stopBtn.style.display=busy?'':'none';
+}
 function renderQa(){
+  renderQaDev();
   const qf=S&&S.qa_flows;
   const exploreBtn=document.getElementById('qaExploreBtn');
   if(exploreBtn)exploreBtn.style.display=(qf&&qf.explore_enabled)?'':'none';
+  // Generate tests: disabled (not hidden — always offered once a qa: block
+  // exists) while qa_busy — a regression sweep, exploratory crawl, OR a
+  // generate pass already has the browser (all three share one lock, see
+  // qa_run.py's own module docstring), so clicking now would just no-op
+  // skip anyway.
+  const genBtn=document.getElementById('qaGenerateBtn');
+  if(genBtn)genBtn.disabled=!!(qf&&qf.qa_busy);
+  // "New test / Record" panel needs a qa: block to make any sense (no flows
+  // dir, no base_url to fall back to) — hidden right alongside the rest of
+  // the QA view whenever qa_flows is absent (project not QA-configured).
+  const teachBand=document.getElementById('qaTeachBand');
+  if(teachBand)teachBand.style.display=qf?'':'none';
+  if(qf){
+    const urlInput=document.getElementById('qtUrl');
+    if(urlInput)urlInput.placeholder=qf.base_url?('defaults to '+qf.base_url):'URL — required (no qa.base_url configured)';
+  }
   if(!qf){document.getElementById('qaBody').innerHTML='';return;}
   const flows=(qf.flows||[]).map(qaFlowRow).join('') ||
-    `<div class=empty>No flows taught yet — run <b>orbit teach</b> to record one.</div>`;
+    `<div class=empty>No flows taught yet — run <b>orbit teach</b>, or record one above.</div>`;
   const runs=(qf.recent_runs||[]).map(qaRunRow).join('') || `<div class=empty>No runs yet.</div>`;
   const heals=qf.heals||[];
   const healStrip=heals.length?
     `<div class="eyebrow">Pending heals</div>
      <div class=grid>${heals.map(healCard).join('')}</div>`:'';
+  // Generated-candidates strip (AI test generation): hidden entirely when
+  // there's nothing pending — same "hide, don't show empty" posture as the
+  // heal strip above.
+  const generated=qf.generated||[];
+  const generatedStrip=generated.length?
+    `<div class="eyebrow">Generated candidates <span class=aside>review, then approve or reject</span></div>
+     <div class=grid>${generated.map(generateCard).join('')}</div>`:'';
+  // Running banner: a flow/regression/explore/generate run holds the shared
+  // browser lock (qa_busy). These runs are minutes-long and land nothing in
+  // the UI until they finish (generate writes candidates; a flow writes a run
+  // row) — without this the panel looks dead and the operator assumes the
+  // click did nothing (exactly the "no loader, nothing visible" report).
+  const runBanner=(qf.qa_busy)?
+    `<div class="qa-run-banner"><span class="qa-spin"></span>
+       <span>QA is running…<span class="sub"> &nbsp;driving the browser — this can take a few minutes. Results (generated candidates / a new run row) appear here when it finishes.</span></span>
+     </div>`:'';
   document.getElementById('qaBody').innerHTML=
-    `<div class="eyebrow" style="margin-top:0">Flow library</div>${flows}
+    `${runBanner}<div class="eyebrow" style="margin-top:0">Flow library</div>${flows}
      <div class="eyebrow">Recent runs</div>${runs}
-     ${healStrip}`;
+     ${healStrip}
+     ${generatedStrip}`;
+}
+
+/* ── QA teach session — "New test / Record" panel, the web equivalent of
+   `orbit teach`: the form replaces the CLI's stdin prompts, and a
+   start/status/save request trio replaces its one blocking process.
+   Exactly one session at a time, dashboard-wide (see command_center.py's
+   _teach_session). Three button states:
+     idle         — Record starts a session from the form's current values.
+     busy         — starting/recording/saving; Record disabled, Cancel shown.
+     save-pending — recorded, but the auto-save was rejected (or the panel
+                    resynced mid-session with the intent/criteria fields
+                    empty in THIS tab) — Record becomes a Save retry. ────── */
+/* qaTeachTimer declared up by `let S=null` (see comment there). */
+function qaTeachLive(msg){const el=document.getElementById('qtLive');if(el)el.textContent=msg||'';}
+function qaTeachCriteria(){
+  return (document.getElementById('qtCriteria').value||'').split('\n').map(s=>s.trim()).filter(Boolean);
+}
+function qaTeachSetUi(state){
+  const rec=document.getElementById('qtRecordBtn'),can=document.getElementById('qtCancelBtn');
+  if(!rec)return;
+  if(state==='save-pending'){
+    rec.disabled=false;rec.textContent='💾 Save';rec.onclick=qaTeachManualSave;
+    if(can)can.style.display='';
+  }else if(state==='busy'){
+    rec.disabled=true;rec.textContent='● Record';rec.onclick=qaTeachStart;
+    if(can)can.style.display='';
+  }else{
+    rec.disabled=false;rec.textContent='● Record';rec.onclick=qaTeachStart;
+    if(can)can.style.display='none';
+  }
+}
+function qaTeachStart(){
+  const name=(document.getElementById('qtName').value||'').trim();
+  const intent=(document.getElementById('qtIntent').value||'').trim();
+  const criteria=qaTeachCriteria();
+  const url=(document.getElementById('qtUrl').value||'').trim();
+  if(!name){toast('A test name is required.');return;}
+  if(!intent){toast('An intent (one line) is required.');return;}
+  if(!criteria.length){toast('At least one success criterion is required.');return;}
+  qaTeachSetUi('busy');
+  postJSON('/qa-teach-start',{name:name,url:url}).then(j=>{
+    if(!j.ok){toast(j.msg||'could not start');qaTeachSetUi('idle');return;}
+    qaTeachLive('Bringing your app up…');
+    qaTeachPoll();
+  }).catch(e=>{toast('error: '+e);qaTeachSetUi('idle');});
+}
+function qaTeachPoll(){
+  clearTimeout(qaTeachTimer);
+  fetch('/qa-teach-status').then(r=>r.json()).then(j=>{
+    if(!j.active){qaTeachSetUi('idle');qaTeachLive('');return;}
+    if(j.state==='recorded'){qaTeachAutoSave();return;}
+    if(j.state==='failed'){
+      const msg=j.error||'unknown error';
+      qaTeachLive('Failed: '+msg);toast('Teach failed: '+msg);
+      // Clear the dead session server-side so Record (the retry) doesn't
+      // immediately bounce off "a session is already active".
+      postJSON('/qa-teach-cancel',{}).then(()=>qaTeachSetUi('idle'));
+      return;
+    }
+    qaTeachSetUi('busy');
+    qaTeachLive(j.state==='recording'
+      ?'Recording — perform the flow in the browser window that opened, then close it.'
+      :'Bringing your app up…');
+    qaTeachTimer=setTimeout(qaTeachPoll,1500);
+  }).catch(()=>{qaTeachTimer=setTimeout(qaTeachPoll,1500);});
+}
+function qaTeachAutoSave(){
+  const intent=(document.getElementById('qtIntent').value||'').trim();
+  const criteria=qaTeachCriteria();
+  if(!intent||!criteria.length){
+    // Fields got cleared (or this tab resynced fresh) after Record was
+    // clicked — nothing to auto-save; let the operator fill them in.
+    qaTeachLive('Recorded — fill in intent/success criteria above, then click Save.');
+    qaTeachSetUi('save-pending');
+    return;
+  }
+  qaTeachLive('Recorded — saving…');
+  qaTeachDoSave(intent,criteria);
+}
+function qaTeachManualSave(){
+  const intent=(document.getElementById('qtIntent').value||'').trim();
+  const criteria=qaTeachCriteria();
+  if(!intent){toast('An intent is required.');return;}
+  if(!criteria.length){toast('At least one success criterion is required.');return;}
+  qaTeachLive('Saving…');
+  qaTeachDoSave(intent,criteria);
+}
+function qaTeachDoSave(intent,criteria){
+  const requires=(document.getElementById('qtRequires').value||'').split(',').map(s=>s.trim()).filter(Boolean);
+  const providesAuth=!!document.getElementById('qtProvidesAuth').checked;
+  postJSON('/qa-teach-save',{intent:intent,criteria:criteria,requires:requires,provides_auth:providesAuth}).then(j=>{
+    if(j.ok){
+      qaTeachSetUi('idle');qaTeachLive('');
+      toast(j.msg||('flow '+(j.flow||'')+' saved'));
+      ['qtName','qtIntent','qtCriteria','qtUrl','qtRequires'].forEach(id=>{document.getElementById(id).value='';});
+      document.getElementById('qtProvidesAuth').checked=false;
+      refresh();
+    }else{
+      qaTeachLive('Recorded — '+(j.msg||'save failed')+' — fix the form and click Save.');
+      qaTeachSetUi('save-pending');
+    }
+  }).catch(e=>{qaTeachLive('Recorded — click Save to retry.');qaTeachSetUi('save-pending');toast('error: '+e);});
+}
+function qaTeachCancel(){
+  clearTimeout(qaTeachTimer);
+  postJSON('/qa-teach-cancel',{}).then(j=>{
+    toast(j.msg||'cancelled');qaTeachSetUi('idle');qaTeachLive('');
+  }).catch(e=>toast('error: '+e));
+}
+function qaTeachSyncStatus(){
+  // Called on entering the QA view — resyncs the panel with server truth
+  // (e.g. this tab was reloaded mid-session, or another tab started one).
+  if(qaTeachTimer)return;   // already polling from this tab's own session
+  fetch('/qa-teach-status').then(r=>r.json()).then(j=>{
+    if(!j.active)return;
+    if(j.state==='recorded'){qaTeachAutoSave();return;}
+    qaTeachSetUi('busy');
+    qaTeachLive(j.state==='recording'
+      ?'Recording — perform the flow in the browser window that opened, then close it.'
+      :'Bringing your app up…');
+    qaTeachPoll();
+  }).catch(()=>{});
+}
+
+/* ── onboarding: run intake / build knowledge base, live log tail ─────────── */
+let cmdlogTimers={};
+function startCmdlogPoll(name){
+  const pre=document.getElementById(name+'Log');if(!pre)return;
+  pre.style.display='';
+  if(cmdlogTimers[name])return;   // already polling this one
+  const tick=()=>fetch('/api/cmdlog?name='+encodeURIComponent(name)).then(r=>r.text()).then(t=>{
+    const atBottom=pre.scrollHeight-pre.scrollTop-pre.clientHeight<50;
+    pre.textContent=t||'(no output yet)';
+    if(atBottom)pre.scrollTop=pre.scrollHeight;
+  }).catch(()=>{});
+  tick();
+  cmdlogTimers[name]=setInterval(tick,2000);
+}
+function stopCmdlogPoll(name){
+  // Stop polling once the run finishes — otherwise the 2s interval lives on
+  // forever (a leak per intake/knowledge run started over the dashboard's
+  // lifetime), long after there's anything new to fetch.
+  if(cmdlogTimers[name]){clearInterval(cmdlogTimers[name]);delete cmdlogTimers[name];}
+}
+function runIntake(){post('/intake-run',{});startCmdlogPoll('intake');}
+function runKnowledge(sub){post('/knowledge-run',{sub:sub});startCmdlogPoll('knowledge');}
+let _kbWasRunning=false;   // tracks onboarding.knowledge_running across polls — see below
+function renderOnboarding(){
+  if(!S)return;
+  const ob=S.onboarding||{};
+  const ist=document.getElementById('intakeStatus'),kst=document.getElementById('knowledgeStatus');
+  if(ist)ist.textContent=ob.intake_running?'running…':'idle';
+  if(kst)kst.textContent=ob.knowledge_running?'running…':(ob.has_knowledge?'built':'not built yet');
+  const ibtn=document.getElementById('intakeBtn'),kbtn=document.getElementById('kbBuildBtn'),rbtn=document.getElementById('kbRefreshBtn');
+  if(ibtn)ibtn.disabled=!!ob.intake_running;
+  if(kbtn)kbtn.disabled=!!ob.knowledge_running;
+  if(rbtn)rbtn.disabled=!ob.has_knowledge||!!ob.knowledge_running;
+  const guide=document.getElementById('onboardGuide');
+  if(guide){
+    const bits=[];
+    if(!ob.gates_configured)bits.push('⚠ No verification gates configured yet — set <b>gates</b> in Settings before running the loop.');
+    if(!ob.has_knowledge)bits.push('· No knowledge base yet — build it below so the agent understands this repo each cycle.');
+    if(!ob.qa_configured)bits.push('· QA is optional — configure the <code>qa:</code> block in Settings to enable browser-driven checks.');
+    guide.innerHTML=bits.length?`<div class=empty style="text-align:left;padding:10px 12px">${bits.join('<br>')}</div>`:'';
+  }
+  if(ob.intake_running)startCmdlogPoll('intake');else stopCmdlogPoll('intake');
+  if(ob.knowledge_running)startCmdlogPoll('knowledge');else stopCmdlogPoll('knowledge');
+  if(_kbWasRunning&&!ob.knowledge_running){
+    // A build/refresh just finished — the cached graph (if any) is now
+    // stale. cyLoadState==='loaded' never resets on its own, so without
+    // this a Refresh's new graph.json silently never appears until a full
+    // page reload. Drop the cache and, if the Graph tab is visible right
+    // now, reload it immediately.
+    cyLoadState='idle';
+    kbMaybeLoadGraph();
+  }
+  _kbWasRunning=!!ob.knowledge_running;
+  const nbK=document.getElementById('nb-knowledge');
+  if(nbK){const n=(ob.knowledge_docs||[]).length;nbK.textContent=n||'';nbK.className='nb';}
+}
+
+/* ── knowledge base doc browser ────────────────────────────────────────────── */
+let kbSel=null;
+function renderKnowledge(){
+  const list=document.getElementById('kbList');if(!list)return;
+  const docs=(S&&S.onboarding&&S.onboarding.knowledge_docs)||[];
+  const hasGraph=docs.includes('graph.json');
+  const note=document.getElementById('kbGraphAbsentNote');
+  if(note)note.style.display=hasGraph?'none':'';
+  if(kbMode===null){   // first time we've seen onboarding data — pick a default tab
+    // 'cc-kb-mode' is written by kbSetMode on every tab switch — restore it
+    // here so the user's Docs/Graph choice survives a reload. Only fall back
+    // to the hasGraph-based default when nothing (valid) was stored.
+    let stored=null; try{stored=localStorage.getItem('cc-kb-mode');}catch(e){}
+    kbMode=(stored==='docs'||stored==='graph')?stored:(hasGraph?'graph':'docs');
+    kbApplyModeUI(kbMode);
+    kbMaybeLoadGraph();
+  }
+  // graph.json is data for the Graph tab, not a human-readable doc — keep it
+  // out of the plain-text doc list (still counted in the nb-knowledge badge
+  // upstream, since that reads the raw onboarding.knowledge_docs list).
+  const visible=docs.filter(d=>d!=='graph.json');
+  if(!visible.length){
+    list.innerHTML=`<div class=empty style="padding:28px 14px">No knowledge base yet — build it from the <b>Run</b> view.</div>`;
+    return;
+  }
+  list.innerHTML=visible.map(d=>`<button class="ds-row ${d===kbSel?'sel':''}" onclick="openKnowledgeDoc('${escJsAttr(d)}')">
+    <div class=r-title>${esc(d)}</div></button>`).join('');
+}
+function openKnowledgeDoc(name){
+  kbSel=name;renderKnowledge();
+  fetch('/api/knowledge-doc?name='+encodeURIComponent(name)).then(r=>{
+    if(!r.ok)throw new Error('HTTP '+r.status);return r.text();
+  }).then(t=>{document.getElementById('kbRead').innerHTML=`<pre class="viewer" style="max-height:none">${esc(t)}</pre>`;})
+  .catch(e=>{document.getElementById('kbRead').innerHTML=`<div class=empty>Could not load that doc: ${esc(e.message||String(e))}</div>`;});
+}
+
+/* ── knowledge graph: Docs ⟷ Graph tab switch ──────────────────────────────── */
+/* kbMode is 'docs' | 'graph', null until renderKnowledge() picks a default — declared up by `let S=null` (see comment there). */
+function kbApplyModeUI(mode){
+  const dt=document.getElementById('kbTabDocs'),gt=document.getElementById('kbTabGraph');
+  if(dt)dt.classList.toggle('on',mode==='docs');
+  if(gt)gt.classList.toggle('on',mode==='graph');
+  const dp=document.getElementById('kbDocsPane'),gp=document.getElementById('kbGraphPane');
+  if(dp)dp.style.display=mode==='docs'?'':'none';
+  if(gp)gp.style.display=mode==='graph'?'':'none';
+}
+function kbSetMode(mode){
+  kbMode=mode;
+  kbApplyModeUI(mode);
+  try{localStorage.setItem('cc-kb-mode',mode);}catch(e){}
+  kbMaybeLoadGraph();
+  if(cy)setTimeout(()=>cy.resize(),0);   // container may have just become visible
+}
+function kbMaybeLoadGraph(){
+  // Only ever construct cytoscape while the Knowledge view AND the Graph tab
+  // are both actually visible — building it against a display:none container
+  // (0×0) is the classic way a force-directed layout comes out collapsed.
+  const view=document.getElementById('view-knowledge');
+  if(kbMode==='graph'&&view&&view.classList.contains('on'))ensureGraphLoaded();
+}
+
+/* ── knowledge graph: load cytoscape + graph.json, build the node graph ───── */
+const KG_NODE_COLORS={endpoint:'var(--blue)',function:'var(--green)',table:'var(--amber)',flow:'var(--violet)'};
+const KG_NODE_SHAPES={endpoint:'round-rectangle',function:'ellipse',table:'rectangle',flow:'diamond'};
+const KG_EDGE_COLORS={calls:'#7C9CFF',handles:'#4ADE9C',reads:'#FFB35C',writes:'#FFB35C',relates:'#8B96AC',step:'#A78BFA'};
+/* cy/cyLoadState/kgTypeOn/_cytoscapePromise declared up by `let S=null` (see comment there). */
+
+function loadCytoscapeScript(){
+  if(window.cytoscape)return Promise.resolve();
+  if(_cytoscapePromise)return _cytoscapePromise;
+  _cytoscapePromise=new Promise((resolve,reject)=>{
+    const s=document.createElement('script');
+    s.src='/vendor/cytoscape.min.js';
+    s.onload=()=>window.cytoscape?resolve():reject(new Error('vendor script loaded but window.cytoscape is missing'));
+    s.onerror=()=>reject(new Error('vendor script failed to load (404?)'));
+    document.head.appendChild(s);
+  });
+  return _cytoscapePromise;
+}
+function kgShowOverlay(html){
+  const ov=document.getElementById('kgOverlay');if(!ov)return;
+  ov.innerHTML=html;ov.style.display='flex';
+}
+function kgHideOverlay(){const ov=document.getElementById('kgOverlay');if(ov)ov.style.display='none';}
+
+function ensureGraphLoaded(){
+  if(cyLoadState==='loaded'||cyLoadState==='loading')return;
+  cyLoadState='loading';
+  kgShowOverlay('Loading graph…');
+  loadCytoscapeScript()
+    .catch(e=>{throw {kind:'vendor',e}})
+    .then(()=>fetch('/api/knowledge-doc?name=graph.json'))
+    .then(r=>{
+      if(r.status===404){
+        // read_knowledge_doc 404s BOTH when graph.json genuinely doesn't
+        // exist and when it exists but exceeds the server's size gate
+        // (_KDOC_MAX_BYTES) — same status code, very different remediation.
+        // onboarding.knowledge_docs is a live directory listing (populated
+        // regardless of file size), so if it names graph.json, this 404 can
+        // only be the oversize case.
+        const docs=(S&&S.onboarding&&S.onboarding.knowledge_docs)||[];
+        throw {kind:docs.includes('graph.json')?'oversize':'nograph'};
+      }
+      if(!r.ok)throw {kind:'httperr',status:r.status};
+      return r.text();
+    })
+    .then(text=>{
+      let data;
+      try{data=JSON.parse(text);}catch(e){throw {kind:'badjson'};}
+      if(!data||!Array.isArray(data.nodes)||!Array.isArray(data.edges))throw {kind:'badshape'};
+      cyLoadState='loaded';
+      renderGraph(data);
+    })
+    .catch(err=>{
+      cyLoadState='failed';
+      if(err&&err.kind==='nograph'){
+        kgShowOverlay('📊<br><br><b>No graph yet</b><br>Run <code>orbit knowledge &lt;target&gt; build</code> to generate <code>graph.json</code>.');
+      }else if(err&&err.kind==='oversize'){
+        kgShowOverlay('⚠ <b>graph.json is too large to display</b><br>It exists but exceeds the dashboard\'s size limit for this route — regenerate a smaller graph, or raise the server-side limit.');
+      }else if(err&&err.kind==='badjson'){
+        kgShowOverlay('⚠ <b>graph.json isn’t valid JSON</b><br>Rebuild the knowledge base and reload.');
+      }else if(err&&err.kind==='badshape'){
+        kgShowOverlay('⚠ <b>graph.json has an unexpected shape</b><br>(missing/invalid nodes or edges array). Rebuild the knowledge base.');
+      }else if(err&&err.kind==='vendor'){
+        kgShowOverlay('⚠ <b>Graph library failed to load</b><br>engine/vendor/cytoscape.min.js is missing or unreachable — the Docs tab still works.');
+      }else{
+        kgShowOverlay('⚠ <b>Could not load the graph</b><br>'+esc((err&&(err.status?('HTTP '+err.status):err.message))||'unknown error'));
+      }
+    });
+}
+
+function kgStyle(){
+  const styles=[
+    {selector:'node',style:{
+      'background-color':'var(--faint)','label':'data(label)','color':'var(--ink)',
+      'font-size':9,'font-family':'IBM Plex Mono, monospace','text-wrap':'ellipsis','text-max-width':90,
+      'width':26,'height':26,'text-valign':'bottom','text-margin-y':4,'border-width':1.5,'border-color':'var(--line2)'}},
+    {selector:'edge',style:{
+      'width':1.4,'line-color':'var(--faint)','target-arrow-color':'var(--faint)','target-arrow-shape':'triangle',
+      'curve-style':'bezier','arrow-scale':0.8,'opacity':0.85}},
+    {selector:'.kg-dim',style:{'opacity':0.1}},
+    {selector:'node.kg-hl',style:{'border-width':3,'border-color':'var(--ink)','opacity':1,'z-index':10}},
+    {selector:'edge.kg-hl',style:{'width':2.6,'opacity':1,'z-index':9}},
+  ];
+  for(const t in KG_NODE_COLORS)styles.push({selector:`node[type = "${t}"]`,
+    style:{'background-color':KG_NODE_COLORS[t],'border-color':KG_NODE_COLORS[t],'shape':KG_NODE_SHAPES[t]||'ellipse'}});
+  for(const t in KG_EDGE_COLORS){
+    const dashed=(t==='reads'||t==='writes'), dotted=(t==='relates');
+    styles.push({selector:`edge[type = "${t}"]`,style:{
+      'line-color':KG_EDGE_COLORS[t],'target-arrow-color':KG_EDGE_COLORS[t],
+      'width':t==='handles'?2.6:(t==='step'?2.2:1.4),
+      'line-style':dashed?'dashed':(dotted?'dotted':'solid')}});
+  }
+  return styles;
+}
+
+function renderGraph(data){
+  kgHideOverlay();
+  const nodeIds=new Set();
+  const els=[];
+  for(const n of data.nodes){
+    if(!n||typeof n.id!=='string')continue;
+    nodeIds.add(n.id);
+    els.push({data:{id:n.id,label:String(n.label==null?n.id:n.label),type:String(n.type||'other'),
+      file:String(n.file||''),meta:(n.meta&&typeof n.meta==='object')?n.meta:{}}});
+  }
+  if(!els.length){kgShowOverlay('📊<br><br><b>Graph has no nodes</b><br>Rebuild the knowledge base.');return;}
+  let eidx=0;
+  for(const e of data.edges){
+    if(!e||typeof e.source!=='string'||typeof e.target!=='string')continue;
+    if(!nodeIds.has(e.source)||!nodeIds.has(e.target))continue;   // drop dangling edges, never crash
+    els.push({data:{id:'kge'+(eidx++),source:e.source,target:e.target,type:String(e.type||'relates'),
+      label:String(e.label||''),order:(typeof e.order==='number')?e.order:null}});
+  }
+  if(cy){cy.destroy();cy=null;}
+  cy=cytoscape({
+    container:document.getElementById('kgCanvas'),
+    elements:els,
+    style:kgStyle(),
+    layout:{name:'cose',animate:false,nodeRepulsion:9000,idealEdgeLength:90,padding:20},
+    wheelSensitivity:0.25,
+  });
+  cy.on('tap','node',evt=>{highlightChain(evt.target);showNodeDetail(evt.target);});
+  cy.on('tap',evt=>{if(evt.target===cy)clearHighlight();});
+  applyTypeFilter();
+  renderGraphLegend();
+}
+
+// The user's intent for a clicked function/endpoint/table node is the
+// call/data chain ("what does this call, what calls this") — NOT the table-
+// relation web ('relates' edges) or flow paths ('step' edges). Cytoscape's
+// built-in successors()/predecessors() traverse EVERY edge regardless of
+// type, so a click would otherwise balloon straight through a 'relates' or
+// 'step' edge into an unrelated part of the graph. A selector passed to
+// successors()/predecessors() only filters the RESULT set — it doesn't stop
+// the traversal from continuing through a non-matching edge along the way —
+// so this walks the allowed edge set by hand instead (BFS in both
+// directions, one hop at a time, only ever following a chain-type edge).
+const CHAIN_EDGE_TYPES=new Set(['handles','calls','reads','writes']);
+function chainNeighborhood(n){
+  const edges=cy.edges().filter(e=>CHAIN_EDGE_TYPES.has(e.data('type')));
+  let related=n;
+  const seen=new Set([n.id()]);
+  let frontier=[n];
+  while(frontier.length){
+    const next=[];
+    frontier.forEach(cur=>{
+      edges.filter(e=>e.source().id()===cur.id()).forEach(e=>{
+        related=related.union(e).union(e.target());
+        if(!seen.has(e.target().id())){seen.add(e.target().id());next.push(e.target());}
+      });
+      edges.filter(e=>e.target().id()===cur.id()).forEach(e=>{
+        related=related.union(e).union(e.source());
+        if(!seen.has(e.source().id())){seen.add(e.source().id());next.push(e.source());}
+      });
+    });
+    frontier=next;
+  }
+  return related;
+}
+function highlightChain(n){
+  if(!cy)return;
+  let related;
+  if(n.data('type')==='flow'){
+    // A flow's own outgoing 'step' edges, in order — its path, not whatever
+    // those step targets themselves call/read further downstream.
+    const steps=cy.edges().filter(e=>e.data('type')==='step'&&e.source().id()===n.id())
+      .sort((a,b)=>(a.data('order')||0)-(b.data('order')||0));
+    related=n;
+    steps.forEach(e=>{related=related.union(e).union(e.target());});
+  }else{
+    // Call/data chain only — see chainNeighborhood's comment above.
+    related=chainNeighborhood(n);
+  }
+  cy.elements().addClass('kg-dim').removeClass('kg-hl');
+  related.removeClass('kg-dim').addClass('kg-hl');
+}
+function clearHighlight(){
+  if(!cy)return;
+  cy.elements().removeClass('kg-hl kg-dim');
+  hideNodeDetail();
+}
+
+function showNodeDetail(n){
+  const body=document.getElementById('kgDetailBody');if(!body)return;
+  const meta=n.data('meta')||{};
+  const metaKeys=Object.keys(meta);
+  const metaHtml=metaKeys.length?`<div class="meta" style="margin-top:8px">${
+    metaKeys.map(k=>`<div>${esc(k)}: ${esc(String(meta[k]))}</div>`).join('')}</div>`:'';
+  let stepsHtml='';
+  if(n.data('type')==='flow'&&cy){
+    const steps=cy.edges().filter(e=>e.data('type')==='step'&&e.source().id()===n.id())
+      .sort((a,b)=>(a.data('order')||0)-(b.data('order')||0));
+    if(steps.length){
+      stepsHtml=`<div class="meta" style="margin-top:8px">Path:</div>
+        <ol style="margin:4px 0 0 18px;padding:0;font:500 11.5px var(--mono);color:var(--dim)">
+        ${steps.map(e=>`<li>${esc(e.target().data('label')||e.target().id())}</li>`).join('')}</ol>`;
+    }
+  }
+  body.innerHTML=`<div class="title">${esc(n.data('label'))}</div>
+    <div class="meta">type: <b>${esc(n.data('type'))}</b></div>
+    ${n.data('file')?`<div class="meta">file: ${esc(n.data('file'))}</div>`:''}
+    ${metaHtml}${stepsHtml}`;
+}
+function hideNodeDetail(){
+  const body=document.getElementById('kgDetailBody');
+  if(body)body.innerHTML='Click a node to see its details and highlight its call chain. Click empty canvas to clear.';
+}
+
+function kgToggleType(t){
+  kgTypeOn[t]=!kgTypeOn[t];
+  const chip=document.getElementById('kgf-'+t);
+  if(chip)chip.classList.toggle('on',kgTypeOn[t]);
+  applyTypeFilter();
+}
+function applyTypeFilter(){
+  if(!cy)return;
+  cy.nodes().forEach(n=>{n.style('display',kgTypeOn[n.data('type')]!==false?'element':'none');});
+  cy.edges().forEach(e=>{
+    const show=e.source().style('display')!=='none'&&e.target().style('display')!=='none';
+    e.style('display',show?'element':'none');
+  });
+}
+
+function renderGraphLegend(){
+  const wrap=document.getElementById('kgLegend');if(!wrap)return;
+  const nodeRows=Object.keys(KG_NODE_COLORS).map(t=>
+    `<span><i style="background:${KG_NODE_COLORS[t]}"></i>${esc(t)}</span>`).join('');
+  const edgeRows=`<span><i style="background:${KG_EDGE_COLORS.calls}"></i>calls</span>
+    <span><i style="background:${KG_EDGE_COLORS.handles}"></i>handles</span>
+    <span><i style="background:${KG_EDGE_COLORS.reads}"></i>reads/writes</span>
+    <span><i style="background:${KG_EDGE_COLORS.relates}"></i>relates</span>
+    <span><i style="background:${KG_EDGE_COLORS.step}"></i>step (flow)</span>`;
+  wrap.innerHTML=`<div style="width:100%;font:600 10px var(--disp);letter-spacing:.08em;text-transform:uppercase;color:var(--faint)">Nodes</div>${nodeRows}
+    <div style="width:100%;font:600 10px var(--disp);letter-spacing:.08em;text-transform:uppercase;color:var(--faint);margin-top:6px">Edges</div>${edgeRows}`;
 }
 
 /* ── agents view ────────────────────────────────────────────────────────── */
@@ -1732,6 +2469,18 @@ function loadSettings(){
         <div class=field><label>Gates — JSON: name → { cmd, cwd, needs: [] }</label>
           <textarea id="set-gates" spellcheck="false">${esc(JSON.stringify(c.gates||{},null,2))}</textarea>
           <div class=hint>the commands that must pass before a change ships — the #1 thing to set per repo</div></div></div>
+      <div class=setcard><h3>QA <span style="font-weight:500;text-transform:none;letter-spacing:0">(optional)</span></h3>
+        <div class=field><label>qa — JSON: base_url, browser, flows_dir, gate_categories, exploratory, …</label>
+          <textarea id="set-qa" spellcheck="false">${esc(JSON.stringify(c.qa||{},null,2))}</textarea>
+          <div class=hint>leave as {} to opt out — browser-driven QA only activates once this is set</div></div></div>
+      <div class=setcard><h3>Plan <span style="font-weight:500;text-transform:none;letter-spacing:0">(optional)</span></h3>
+        <div class=field><label>plan — JSON: enforce ("verifier"|"block"), categories, model</label>
+          <textarea id="set-plan" spellcheck="false">${esc(JSON.stringify(c.plan||{},null,2))}</textarea>
+          <div class=hint>leave as {} to opt out — gates the planning tier's pre-work spec requirement</div></div></div>
+      <div class=setcard><h3>Knowledge <span style="font-weight:500;text-transform:none;letter-spacing:0">(optional)</span></h3>
+        <div class=field><label>knowledge — JSON: refresh ("manual"|"auto"), stale_after_merges, timeout_seconds</label>
+          <textarea id="set-knowledge" spellcheck="false">${esc(JSON.stringify(c.knowledge||{},null,2))}</textarea>
+          <div class=hint>leave as {} to opt out — controls the every-cycle knowledge-base staleness check</div></div></div>
       <div class=setcard><h3>Advanced</h3>
         ${txt('spec','Standing spec file',c.spec||'','reread by the agent each cycle')}
         ${txt('commit_trailer','Commit trailer',c.commit_trailer||'')}</div>
@@ -1745,9 +2494,11 @@ function loadSettings(){
   }).catch(e=>{document.getElementById('settingsBody').innerHTML=`<div class=empty>Could not load settings: ${esc(String(e))}</div>`;});
 }
 function saveSettings(){
-  let gates;
-  try{gates=JSON.parse(document.getElementById('set-gates').value||'{}');}
-  catch(e){toast('Gates is not valid JSON: '+e.message);return;}
+  const blocks={};
+  for(const id of ['gates','qa','plan','knowledge']){
+    try{blocks[id]=JSON.parse(document.getElementById('set-'+id).value||'{}');}
+    catch(e){toast((id==='gates'?'Gates':id[0].toUpperCase()+id.slice(1))+' is not valid JSON: '+e.message);return;}
+  }
   const v=id=>document.getElementById('set-'+id).value.trim();
   const n=id=>parseInt(document.getElementById('set-'+id).value,10);
   const payload={
@@ -1755,20 +2506,58 @@ function saveSettings(){
     git_host:v('git_host'),git_repo:v('git_repo'),model:v('model'),permission_mode:v('permission_mode'),
     interval_seconds:n('interval_seconds'),max_tasks_per_day:n('max_tasks_per_day'),cycle_timeout_seconds:n('cycle_timeout_seconds'),
     sources:collectChecks('sources'),workable_categories:collectChecks('workable_categories'),
-    spec:v('spec'),commit_trailer:v('commit_trailer'),gates:gates,
+    spec:v('spec'),commit_trailer:v('commit_trailer'),gates:blocks.gates,qa:blocks.qa,plan:blocks.plan,knowledge:blocks.knowledge,
     pull_requests:v('pull_requests')
   };
   postJSON('/api/config',payload).then(j=>toast(j.msg||'saved')).catch(e=>toast('Save failed: '+e));
 }
 
+/* ── project switcher (launcher proxy) ─────────────────────────────────────
+   The browser talks to the launcher, which proxies every path it doesn't own
+   straight through to this dashboard — so /_launcher/* only exists when a
+   launcher is actually in front. A standalone dashboard 404s on it, and the
+   switcher stays hidden (its default state) rather than erroring. */
+function initProjectSwitcher(){
+  fetch('/_launcher/state').then(r=>{if(!r.ok)throw 0;return r.json();}).then(j=>{
+    const sw=document.getElementById('projSwitcher');if(!sw)return;
+    sw.style.display='';
+    document.getElementById('projSwName').textContent=j.active_name||'project';
+    sw.dataset.projects=JSON.stringify(j.projects||[]);
+  }).catch(()=>{});
+}
+function toggleProjMenu(){
+  const sw=document.getElementById('projSwitcher'),menu=document.getElementById('projSwMenu');
+  if(!sw||!menu)return;
+  if(menu.style.display!=='none'){menu.style.display='none';return;}
+  let projects=[];try{projects=JSON.parse(sw.dataset.projects||'[]');}catch(e){}
+  menu.innerHTML=projects.length?projects.map(p=>
+    `<div class="projsw-item" onclick="switchProject('${escJsAttr(p.path)}')">${esc(p.name)}${p.has_autopilot?'':' <span class=mut>(not initialized)</span>'}${p.loop_running?' <span class=live-dot>●</span>':''}</div>`
+  ).join(''):'<div class="projsw-item mut">No other projects</div>';
+  menu.style.display='';
+}
+function switchProject(path){
+  // /_launcher/* is a launcher-owned namespace and takes a JSON body (unlike
+  // this dashboard's own form-encoded POST actions) — postJSON, not post,
+  // same X-CC-Token header discipline either way.
+  document.getElementById('projSwMenu').style.display='none';
+  postJSON('/_launcher/open',{path:path}).then(j=>{
+    toast(j.msg||(j.ok?'switching…':'failed'));
+    if(j.ok)location.reload();   // only reload on success — keep the error toast visible otherwise
+  }).catch(e=>toast('Could not switch project: '+e));
+}
+document.addEventListener('click',e=>{
+  const sw=document.getElementById('projSwitcher');
+  if(sw&&!sw.contains(e.target)){const m=document.getElementById('projSwMenu');if(m)m.style.display='none';}
+});
+
 /* ── render pipeline ────────────────────────────────────────────────────── */
-function sig(r){return JSON.stringify([r.running,r.next_up,r.done,r.board,r.skipped,r.escalated,r.runlog,r.history,r.funnel,r.feature_builds,r.spend_history,r.branches,r.epics,r.qa_flows]);}
+function sig(r){return JSON.stringify([r.running,r.next_up,r.done,r.board,r.skipped,r.escalated,r.runlog,r.history,r.funnel,r.feature_builds,r.spend_history,r.branches,r.epics,r.qa_flows,r.qa_services,r.onboarding]);}
 function renderViews(){
   // Preserve column scroll positions across rebuilds.
   const colsEl=document.getElementById('queueCols');
   const scrolls=[...colsEl.querySelectorAll('.col')].map(c=>c.scrollTop);
   renderStats();renderInboxAll();renderFilters();renderEpics();renderCalibration();renderDeepspace();renderQueue();renderShips();renderBranches();renderAgents();renderQa();
-  renderKpis();renderSpend();renderHistory();renderFunnel();renderRunlog();
+  renderKpis();renderSpend();renderHistory();renderFunnel();renderRunlog();renderOnboarding();renderKnowledge();
   [...colsEl.querySelectorAll('.col')].forEach((c,i)=>{if(scrolls[i])c.scrollTop=scrolls[i];});
 }
 function tick(){
@@ -1799,5 +2588,5 @@ function refresh(){
     if(s2!==lastSig){lastSig=s2;renderViews();}
   }).catch(()=>{document.getElementById('stalePill').style.display='inline';});
 }
-refresh();setInterval(refresh,3000);setInterval(tick,1000);pollTail();setInterval(pollTail,5000);
+refresh();setInterval(refresh,3000);setInterval(tick,1000);pollTail();setInterval(pollTail,5000);initProjectSwitcher();
 </script></body></html>

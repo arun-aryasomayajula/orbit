@@ -18,11 +18,15 @@ import sys
 import textwrap
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 ENGINE = ROOT / "engine"
 TEACH = ENGINE / "qa_teach.py"
+
+sys.path.insert(0, str(ENGINE))
+import qa_teach   # noqa: E402 — codegen_argv unit tests below call this in-process
 
 SPEC_CONTENT = (
     "import { test } from '@playwright/test';\n"
@@ -117,12 +121,19 @@ def test_happy_path_writes_complete_flow(tmp_path):
     assert not (fd / "steps.json").exists()
 
     meta = json.loads((fd / "meta.json").read_text())
-    assert set(meta.keys()) == {"created_at", "last_run_at", "last_verdict", "runs", "heals"}
+    assert set(meta.keys()) == {"created_at", "last_run_at", "last_verdict", "runs", "heals",
+                                 "requires", "provides_auth"}
     assert meta["created_at"]
     assert meta["last_run_at"] is None
     assert meta["last_verdict"] is None
     assert meta["runs"] == 0
     assert meta["heals"] == []
+    # Test chaining (Task "prerequisites"): defaults when the CLI's own
+    # `orbit teach` doesn't pass either (no --requires/--provides-auth flag
+    # exists today — only _write_flow's own params, exercised directly
+    # below, and the dashboard's teach panel via command_center.py).
+    assert meta["requires"] == []
+    assert meta["provides_auth"] is False
 
     flowmap = flowmap_path(r).read_text()
     assert "| login-flow |" in flowmap
@@ -330,3 +341,120 @@ def test_custom_flows_dir_is_honored(tmp_path):
     assert (r / ".autopilot" / "browser-flows" / "custom-dir-flow" / "meta.json").exists()
     assert (r / ".autopilot" / "FLOWMAP.md").exists()
     assert not (r / ".autopilot" / "qa" / "flows").exists()
+
+
+# ===========================================================================
+# _write_flow — requires/provides_auth (Task "prerequisites", test chaining).
+# Exercised directly (in-process, via the qa_teach module imported above),
+# not through the CLI — `orbit teach` itself has no --requires/--provides-
+# auth flag; only _write_flow's own params (consumed by the dashboard's
+# teach panel via command_center.py) and this direct unit-test path do.
+# ===========================================================================
+
+def test_write_flow_defaults_requires_and_provides_auth(tmp_path):
+    flow_dir = tmp_path / "flows" / "plain-flow"
+    spec_tmp = tmp_path / "steps.spec.ts"
+    spec_tmp.write_text(SPEC_CONTENT)
+    qa_teach._write_flow(flow_dir, "plain-flow", "http://example.test/app",
+                         "an intent", ["a criterion"], spec_tmp)
+    meta = json.loads((flow_dir / "meta.json").read_text())
+    assert meta["requires"] == []
+    assert meta["provides_auth"] is False
+
+
+def test_write_flow_writes_requires_and_provides_auth(tmp_path):
+    flow_dir = tmp_path / "flows" / "create-vertical"
+    spec_tmp = tmp_path / "steps.spec.ts"
+    spec_tmp.write_text(SPEC_CONTENT)
+    qa_teach._write_flow(flow_dir, "create-vertical", "http://example.test/app",
+                         "an intent", ["a criterion"], spec_tmp,
+                         requires=["login"], provides_auth=False)
+    meta = json.loads((flow_dir / "meta.json").read_text())
+    assert meta["requires"] == ["login"]
+    assert meta["provides_auth"] is False
+
+
+def test_write_flow_provides_auth_true(tmp_path):
+    flow_dir = tmp_path / "flows" / "login"
+    spec_tmp = tmp_path / "steps.spec.ts"
+    spec_tmp.write_text(SPEC_CONTENT)
+    qa_teach._write_flow(flow_dir, "login", "http://example.test/app",
+                         "user can log in", ["sees the dashboard"], spec_tmp,
+                         requires=[], provides_auth=True)
+    meta = json.loads((flow_dir / "meta.json").read_text())
+    assert meta["requires"] == []
+    assert meta["provides_auth"] is True
+
+
+def test_write_flow_rejects_invalid_requires_slug_and_writes_nothing(tmp_path):
+    flow_dir = tmp_path / "flows" / "bad-requires-flow"
+    spec_tmp = tmp_path / "steps.spec.ts"
+    spec_tmp.write_text(SPEC_CONTENT)
+    with pytest.raises(ValueError):
+        qa_teach._write_flow(flow_dir, "bad-requires-flow", "http://example.test/app",
+                             "an intent", ["a criterion"], spec_tmp,
+                             requires=["Not A Slug!"])
+    assert not flow_dir.exists()
+
+
+def test_write_flow_multiple_requires_entries_preserved_in_order(tmp_path):
+    flow_dir = tmp_path / "flows" / "checkout"
+    spec_tmp = tmp_path / "steps.spec.ts"
+    spec_tmp.write_text(SPEC_CONTENT)
+    qa_teach._write_flow(flow_dir, "checkout", "http://example.test/app",
+                         "an intent", ["a criterion"], spec_tmp,
+                         requires=["login", "add-to-cart"])
+    meta = json.loads((flow_dir / "meta.json").read_text())
+    assert meta["requires"] == ["login", "add-to-cart"]
+
+
+# ===========================================================================
+# codegen_argv — argv construction shared verbatim by this module's own
+# foreground _run_codegen and command_center.py's backgrounded dashboard
+# Popen call (_qa_teach_bring_up): the two must never drift, or the web UI
+# would record a subtly different flow than the CLI does. Exercised directly
+# (in-process), not just indirectly through a subprocess run, so a drift in
+# the exact argv shape fails here instead of only being inferred from
+# steps.spec.ts byte-equality in the tests above.
+# ===========================================================================
+
+def test_codegen_argv_default_no_browser_no_override(tmp_path, monkeypatch):
+    monkeypatch.delenv("ORBIT_CODEGEN_CMD", raising=False)
+    out = tmp_path / "steps.spec.ts"
+    argv = qa_teach.codegen_argv("http://example.test/app", out, None)
+    assert argv == ["npx", "playwright", "codegen", "--output", str(out),
+                     "http://example.test/app"]
+
+
+def test_codegen_argv_chrome_inserts_channel_flag_before_url(tmp_path, monkeypatch):
+    monkeypatch.delenv("ORBIT_CODEGEN_CMD", raising=False)
+    out = tmp_path / "steps.spec.ts"
+    argv = qa_teach.codegen_argv("http://example.test/app", out, "chrome")
+    assert argv == ["npx", "playwright", "codegen", "--output", str(out),
+                     "--channel", "chrome", "http://example.test/app"]
+
+
+def test_codegen_argv_msedge_inserts_channel_flag_before_url(tmp_path, monkeypatch):
+    monkeypatch.delenv("ORBIT_CODEGEN_CMD", raising=False)
+    out = tmp_path / "steps.spec.ts"
+    argv = qa_teach.codegen_argv("http://example.test/app", out, "msedge")
+    assert argv == ["npx", "playwright", "codegen", "--output", str(out),
+                     "--channel", "msedge", "http://example.test/app"]
+
+
+@pytest.mark.parametrize("browser", [None, "chromium", "firefox", "webkit", "safari", "", "Chrome"])
+def test_codegen_argv_only_chrome_and_msedge_get_a_channel_flag(tmp_path, monkeypatch, browser):
+    monkeypatch.delenv("ORBIT_CODEGEN_CMD", raising=False)
+    out = tmp_path / "steps.spec.ts"
+    argv = qa_teach.codegen_argv("http://example.test/app", out, browser)
+    assert "--channel" not in argv
+    assert argv == ["npx", "playwright", "codegen", "--output", str(out),
+                     "http://example.test/app"]
+
+
+def test_codegen_argv_override_replaces_wholesale_and_ignores_browser(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORBIT_CODEGEN_CMD", "my-recorder --flag 'a quoted value'")
+    out = tmp_path / "steps.spec.ts"
+    # browser="chrome" would normally add --channel — the override ignores it entirely.
+    argv = qa_teach.codegen_argv("http://example.test/app", out, "chrome")
+    assert argv == ["my-recorder", "--flag", "a quoted value"]

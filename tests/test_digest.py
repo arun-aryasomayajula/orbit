@@ -213,6 +213,46 @@ def test_qa_malformed_flow_meta_skipped_silently(tmp_path):
     assert "login" in qa_lines[0] and "broken" not in qa_lines[0]
 
 
+def _write_generated_candidates(tgt, names, subdir=None):
+    root = tgt / ".autopilot" / "state" / "qa" / "generated"
+    base = (root / subdir) if subdir else root
+    for name in names:
+        d = base / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "meta.json").write_text(json.dumps({"generated": True, "runs": 0}))
+
+
+def test_qa_pending_generated_line_with_count(tmp_path):
+    tgt = _target(tmp_path)
+    _write_generated_candidates(tgt, ["checkout-flow", "signup-flow"])
+    _, body, _ = digest.build(tgt)
+    assert any("🧪" in l for l in body.splitlines())
+    assert any("2 AI-generated test(s) awaiting review" in l and "dashboard" in l
+               for l in body.splitlines())
+
+
+def test_qa_generated_rejected_subdir_and_non_slug_dirs_not_counted(tmp_path):
+    # generated/rejected/ holds ARCHIVED candidates (do_qa_action's
+    # generate-reject) and a non-slug dir is unapprovable junk — neither is a
+    # pending human gate, so neither is counted (mirrors _qa_generated_candidates).
+    tgt = _target(tmp_path)
+    _write_generated_candidates(tgt, ["real-candidate"])
+    _write_generated_candidates(tgt, ["was-rejected"], subdir="rejected")
+    _write_generated_candidates(tgt, ["UPPER-CASE"])   # non-slug → ignored
+    _, body, _ = digest.build(tgt)
+    assert any("1 AI-generated test(s) awaiting review" in l for l in body.splitlines())
+
+
+def test_qa_pending_generated_joins_heals_under_one_section(tmp_path):
+    tgt = _target(tmp_path)
+    _write_heal_files(tgt, 1)
+    _write_generated_candidates(tgt, ["checkout-flow"])
+    _, body, _ = digest.build(tgt)
+    assert sum(1 for l in body.splitlines() if l.strip() == "🧪 QA:") == 1
+    assert any("1 pending heal" in l for l in body.splitlines())
+    assert any("1 AI-generated test(s) awaiting review" in l for l in body.splitlines())
+
+
 def test_qa_respects_custom_flows_dir(tmp_path):
     ap = tmp_path / ".autopilot"
     state = ap / "state"

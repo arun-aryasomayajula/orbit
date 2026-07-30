@@ -193,6 +193,47 @@ malformed result / agent could not be launched or finished; 2 usage
 (`qa.exploratory.enabled` not true, including no `qa:` block at all, or
 `--if-changed`/`--flow`/`--regression` combined with `--explore`).
 
+AI test generation (`--generate [--max N] [--attach]`): an agent reads the
+project's knowledge base (`$AP_HOME/knowledge/`), drives candidate user
+journeys in a real browser via the `/orbit-qa-generate` skill
+(skills/orbit-qa-generate.md), and writes CANDIDATE flows to
+`$AP_STATE/qa/generated/<slug>/` for a human to review/approve on the
+dashboard (command_center.py's generate-approve/generate-reject) — never
+directly into the committed flow library, mirroring the heal-candidate
+machines-propose/humans-dispose posture. Unlike `--explore`, this needs no
+extra opt-in config block — only a `qa:` block at all (same "manual-CLI,
+loud failure" posture as `--flow`'s own missing-block check: exit 2, agent
+never invoked). `--max N` caps how many candidate journeys the skill may
+attempt this run (exported as `ORBIT_QA_GENERATE_MAX`, default
+DEFAULT_GENERATE_MAX below — the skill's own hard cap, never silently
+raised). `--attach` (same flag `--flow` has, same `ORBIT_QA_ATTACH=1` env
+cue) lets a generate pass attach to an already-warm persistent dev session
+instead of bringing qa.services up/down itself.
+
+Shares `--regression`/`--explore`'s own `.qa-running` lock (Task 27/29) —
+all three drive a real browser against the same `qa.base_url`, so no two of
+them may ever run concurrently; a fresh lock is the same benign "already
+running" skip (exit 0, agent never invoked). Invokes `/orbit-qa-generate`
+exactly once via `_run_generate_agent` (mirrors `_run_explore_agent`, reusing
+the same `ORBIT_QA_RUN_CMD` test hook), then locates the newest
+`$AP_STATE/qa/generate-<UTC-ts>.json` with mtime >= this run's start
+(stale-file discipline mirrors `_locate_explore_result`) and shape-validates
+it (`candidates`/`skipped` lists, `count` a non-negative int matching
+`len(candidates)`, `summary` a string). Missing/malformed/agent-error -> exit
+1, loud. `count == 0` (a clean run that just found nothing new to propose)
+is still exit 1 — parity with `--explore`'s own "0 pages" only ever being a
+launch/config failure never applies here since a truly clean pass is exit 0
+for explore but NOT useful to a human clicking "Generate tests" with nothing
+to review; see `_run_generate`'s own comment for why 0 candidates prints a
+message but does not celebrate as exit 0. `count >= 1` -> exit 0, printing
+"N candidate test(s) generated — review & approve on the dashboard".
+
+Exit codes (--generate): 0 (>=1 candidate written) or lock busy ("already
+running", benign skip, agent never invoked); 1 (0 candidates, missing/
+malformed result, or agent could not be launched/finished); 2 usage (no
+`qa:` block at all, or `--generate` combined with `--flow`/`--regression`/
+`--explore`, or `--if-changed`/`--max` misused).
+
 Config (`.autopilot/config.yaml`, see config/schema.yaml's `qa:` block):
     qa.flows_dir (default "qa/flows"), qa.mcp_config, qa.browser,
     qa.headless, qa.model, qa.timeout_seconds, qa.permission_mode (via the
@@ -201,17 +242,51 @@ Config (`.autopilot/config.yaml`, see config/schema.yaml's `qa:` block):
     qa.exploratory (enabled/max_pages — Task 25, see above).
 
 Test hook: ORBIT_QA_RUN_CMD replaces the `claude --print /orbit-qa-flow ...`
-(or, for --explore, `/orbit-qa-explore`) call verbatim — same substitution
-mechanism as ORBIT_QA_CMD/ORBIT_RUNTIME_CMD/ORBIT_CODEGEN_CMD, its OWN name
-so a fake can tell this hook apart from qa_check.py's loop-gate
-ORBIT_QA_CMD. AP_HOME/AP_STATE/ORBIT_HOME/FLOW_NAME (and QA_MCP_CONFIG,
-regardless of override, same reasoning as qa_check.py) are exported into the
-child's env either way (FLOW_NAME is naturally absent for --explore — there
-is no flow name to export).
+(or, for --explore, `/orbit-qa-explore`; for --generate, `/orbit-qa-generate`)
+call verbatim — same substitution mechanism as ORBIT_QA_CMD/ORBIT_RUNTIME_CMD/
+ORBIT_CODEGEN_CMD, its OWN name so a fake can tell this hook apart from
+qa_check.py's loop-gate ORBIT_QA_CMD. AP_HOME/AP_STATE/ORBIT_HOME/FLOW_NAME
+(and QA_MCP_CONFIG, regardless of override, same reasoning as qa_check.py)
+are exported into the child's env either way (FLOW_NAME is naturally absent
+for --explore/--generate — there is no single flow name to export;
+--generate instead exports ORBIT_QA_GENERATE_MAX).
 
-Usage: qa_run.py <target> --flow <name> [--timeout N]
+Attach mode (`--flow` and `--generate` only, Task "persistent QA app
+session"): `--attach` signals that a persistent dev session
+(command_center.py's "Dev session" panel) already brought `qa.services` up
+and is keeping them warm — the flow (or generate pass) must attach to
+`qa.base_url` instead of launching (and killing) its own copy every run.
+This module never touches qa_env itself for `--flow`/`--generate` (the
+`/orbit-qa-flow`/`/orbit-qa-generate` skill does that, per its own step 1) —
+`--attach` just sets `ORBIT_QA_ATTACH=1` in the env passed to the `claude`
+invocation (or the ORBIT_QA_RUN_CMD test-hook override, same as every other
+exported var here), which is the skill's own cue to skip launch/kill
+entirely (see skills/orbit-qa-flow.md / skills/orbit-qa-generate.md step 1).
+`--attach` with `--regression` or `--explore` is rejected (usage error, exit
+2) — out of scope here; a sweep or a crawl always brings its own services
+up/down today.
+
+Test chaining / prerequisites (`--flow` only, Task "prerequisites"): a flow
+can declare `requires` in its own meta.json (see qa_teach.py's _write_flow).
+Before invoking the skill, main() resolves the FULL prerequisite set into a
+topologically-ordered chain ending with the target flow (`_resolve_chain`) —
+a requires-cycle or a missing prerequisite flow dir is a loud, no-run exit 2,
+named in the error. The resolved chain is exported as `ORBIT_QA_CHAIN`
+(comma-separated flow names) via `_run_flow_agent`; the skill replays every
+flow but the last ungraded, in the SAME browser session, so auth/session
+state carries into the target (see skills/orbit-qa-flow.md) — only the
+target's own verdict is ever located/recorded (`_locate_verdict`/
+`_update_meta` are keyed on the target's name alone, unchanged). A flow with
+empty `requires` resolves to a single-element chain (`[flow_name]`) — the
+skill treats that identically to no chaining, so this is byte-neutral for
+every flow taught before this feature existed. `--regression`'s sweep does
+NOT resolve chains (out of scope for now) — each swept flow still gets its
+own trivial single-element chain via `_run_flow_agent`'s own default.
+
+Usage: qa_run.py <target> --flow <name> [--timeout N] [--attach]
        qa_run.py <target> --regression [--if-changed] [--timeout N]
        qa_run.py <target> --explore [--timeout N]
+       qa_run.py <target> --generate [--max N] [--attach] [--timeout N]
 """
 from __future__ import annotations
 
@@ -261,16 +336,44 @@ LOCK_STALE_MARGIN_SECONDS = 60
 # ever dropped by the deadline, and always with a logged line (see _sweep).
 SWEEP_DEADLINE_MULTIPLIER = 2
 
-USAGE = ("usage: qa_run.py <target> --flow <name> [--timeout N]\n"
+USAGE = ("usage: qa_run.py <target> --flow <name> [--timeout N] [--attach]\n"
          "       qa_run.py <target> --regression [--if-changed] [--timeout N]\n"
-         "       qa_run.py <target> --explore [--timeout N]")
+         "       qa_run.py <target> --explore [--timeout N]\n"
+         "       qa_run.py <target> --generate [--max N] [--attach] [--timeout N]")
 
 # Exit codes (manual-CLI posture — see module docstring).
 OK, ERR, FAIL, USAGE_ERR = 0, 1, 3, 2
+DEFAULT_GENERATE_MAX = 10
 
 
 def _err(msg: str) -> None:
     print(f"qa_run: {msg}", file=sys.stderr)
+
+
+def _sync_qa_command(target: Path, command_file: str) -> None:
+    """Copy $ORBIT_HOME/skills/<command_file> into
+    <target>/.claude/commands/<command_file> (overwrite) right before the
+    agent that invokes `/<command>` runs — the exact same fix, and the exact
+    same reason, as knowledge.py's _sync_knowledge_command: a slash command
+    resolves from the TARGET repo's own `.claude/commands/`, seeded once at
+    onboarding by install/init.py (or `orbit sync`). A target onboarded
+    BEFORE a QA skill existed (or an older version of one) keeps running the
+    stale/absent copy forever otherwise — confirmed on a real target:
+    `/orbit-qa-generate` was never installed, so `claude --print
+    /orbit-qa-generate` invoked a command that didn't exist, the agent wrote
+    no result JSON, and the run failed silently. Re-syncing just THIS one
+    command on every run keeps it current with zero operator steps. Never
+    abort the run over it: a permission error / read-only mount is a WARN, not
+    a failure — the agent can still run against whatever copy is already
+    there."""
+    src = ORBIT_HOME / "skills" / command_file
+    dest = target / ".claude" / "commands" / command_file
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(src, dest)
+    except OSError as e:
+        _err(f"could not sync .claude/commands/{command_file} ({e}) — "
+             f"continuing with whatever copy the target already has")
 
 
 def _now_iso() -> str:
@@ -289,66 +392,89 @@ def _load_cfg(target: Path) -> dict:
 # argv
 # ---------------------------------------------------------------------------
 
+_EXCLUSIVE_MODE_TOKENS = ("--flow", "--regression", "--explore", "--generate")
+
+
 def _parse_args(argv: list[str]):
-    """Returns (target, mode, flow_name, if_changed, timeout_arg, error) —
-    mode is "flow", "regression", or "explore" (Task 29); error is a
-    (message, exit_code) pair, or None on success. The three modes are all
-    mutually exclusive with each other; `--if-changed` only ever applies to
-    `--regression` (a human-triggered `--explore` has no automated-loop
-    variant to gate)."""
+    """Returns (target, mode, flow_name, if_changed, attach, timeout_arg,
+    max_arg, error) — mode is "flow", "regression", "explore" (Task 29), or
+    "generate" (AI test generation); error is a (message, exit_code) pair, or
+    None on success. The four modes are all mutually exclusive with each
+    other; `--if-changed` only ever applies to `--regression` (a human-
+    triggered `--explore`/`--generate` has no automated-loop variant to
+    gate); `--attach` applies to `--flow` and `--generate` (a persistent dev
+    session's services are what a single flow OR a generate pass attaches to
+    — a multi-flow sweep or an exploratory crawl always brings its own
+    up/down today, out of scope here); `--max` (the generate skill's own
+    candidate-journey cap) only ever applies to `--generate`."""
     if not argv:
-        return None, None, None, False, None, (USAGE, USAGE_ERR)
+        return None, None, None, False, False, None, None, (USAGE, USAGE_ERR)
     target = Path(argv[0]).resolve()
     rest = argv[1:]
     mode = None
     flow_name = None
     if_changed = False
+    attach = False
     timeout_arg = None
+    max_arg = None
     i = 0
     while i < len(rest):
         tok = rest[i]
-        if tok == "--flow":
-            if mode in ("regression", "explore"):
-                return None, None, None, False, None, \
-                    (f"--flow, --regression, and --explore are mutually exclusive ({USAGE})", USAGE_ERR)
-            if i + 1 >= len(rest):
-                return None, None, None, False, None, (f"missing value for --flow ({USAGE})", USAGE_ERR)
-            mode = "flow"
-            flow_name = rest[i + 1]
-            i += 2
-        elif tok == "--regression":
-            if mode in ("flow", "explore"):
-                return None, None, None, False, None, \
-                    (f"--flow, --regression, and --explore are mutually exclusive ({USAGE})", USAGE_ERR)
-            mode = "regression"
-            i += 1
-        elif tok == "--explore":
-            if mode in ("flow", "regression"):
-                return None, None, None, False, None, \
-                    (f"--flow, --regression, and --explore are mutually exclusive ({USAGE})", USAGE_ERR)
-            mode = "explore"
-            i += 1
+        if tok in _EXCLUSIVE_MODE_TOKENS:
+            if mode is not None:
+                return None, None, None, False, False, None, None, \
+                    (f"--flow, --regression, --explore, and --generate are mutually exclusive ({USAGE})", USAGE_ERR)
+            if tok == "--flow":
+                if i + 1 >= len(rest):
+                    return None, None, None, False, False, None, None, \
+                        (f"missing value for --flow ({USAGE})", USAGE_ERR)
+                mode = "flow"
+                flow_name = rest[i + 1]
+                i += 2
+            else:
+                mode = tok[2:]
+                i += 1
         elif tok == "--if-changed":
             if_changed = True
             i += 1
+        elif tok == "--attach":
+            attach = True
+            i += 1
         elif tok == "--timeout":
             if i + 1 >= len(rest):
-                return None, None, None, False, None, (f"missing value for --timeout ({USAGE})", USAGE_ERR)
+                return None, None, None, False, False, None, None, (f"missing value for --timeout ({USAGE})", USAGE_ERR)
             timeout_arg = rest[i + 1]
             i += 2
+        elif tok == "--max":
+            if i + 1 >= len(rest):
+                return None, None, None, False, False, None, None, (f"missing value for --max ({USAGE})", USAGE_ERR)
+            max_arg = rest[i + 1]
+            i += 2
         else:
-            return None, None, None, False, None, (f"unrecognized argument {tok!r} ({USAGE})", USAGE_ERR)
+            return None, None, None, False, False, None, None, (f"unrecognized argument {tok!r} ({USAGE})", USAGE_ERR)
     if mode is None:
-        return None, None, None, False, None, \
-            (f"one of --flow <name>, --regression, or --explore is required ({USAGE})", USAGE_ERR)
-    if mode in ("flow", "explore") and if_changed:
-        return None, None, None, False, None, (f"--if-changed only applies to --regression ({USAGE})", USAGE_ERR)
+        return None, None, None, False, False, None, None, \
+            (f"one of --flow <name>, --regression, --explore, or --generate is required ({USAGE})", USAGE_ERR)
+    if mode in ("flow", "explore", "generate") and if_changed:
+        return None, None, None, False, False, None, None, \
+            (f"--if-changed only applies to --regression ({USAGE})", USAGE_ERR)
+    if mode not in ("flow", "generate") and attach:
+        return None, None, None, False, False, None, None, \
+            (f"--attach only applies to --flow or --generate ({USAGE})", USAGE_ERR)
+    if mode != "generate" and max_arg is not None:
+        return None, None, None, False, False, None, None, \
+            (f"--max only applies to --generate ({USAGE})", USAGE_ERR)
     if timeout_arg is not None:
         try:
             timeout_arg = int(timeout_arg)
         except ValueError:
-            return None, None, None, False, None, (f"--timeout must be an integer ({USAGE})", USAGE_ERR)
-    return target, mode, flow_name, if_changed, timeout_arg, None
+            return None, None, None, False, False, None, None, (f"--timeout must be an integer ({USAGE})", USAGE_ERR)
+    if max_arg is not None:
+        try:
+            max_arg = int(max_arg)
+        except ValueError:
+            return None, None, None, False, False, None, None, (f"--max must be an integer ({USAGE})", USAGE_ERR)
+    return target, mode, flow_name, if_changed, attach, timeout_arg, max_arg, None
 
 
 # ---------------------------------------------------------------------------
@@ -375,10 +501,26 @@ def _flow_mcp_config(qa_cfg: dict, ap_state: Path, flow_name: str) -> Path:
 # ---------------------------------------------------------------------------
 
 def _run_flow_agent(qa_cfg: dict, cfg_all: dict, flow_name: str, target: Path,
-                     mcp_path: Path, timeout: int, ap_home: Path, ap_state: Path) -> int | None:
+                     mcp_path: Path, timeout: int, ap_home: Path, ap_state: Path,
+                     attach: bool = False, chain: list[str] | None = None) -> int | None:
     """Returns None on a clean launch/return (proceed to look for a verdict),
     or an exit code to return immediately (claude missing / launch error —
-    both bucket into exit 1, "agent error", per the exit-code table)."""
+    both bucket into exit 1, "agent error", per the exit-code table).
+    `attach=True` (--flow's own --attach flag) exports ORBIT_QA_ATTACH=1 —
+    see skills/orbit-qa-flow.md step 1: the skill's cue that a persistent
+    dev session already owns qa.services, so it must attach to base_url
+    instead of launching (and killing) its own copy.
+
+    `chain` (test chaining — Task "prerequisites"): the fully-resolved,
+    topologically-ordered prerequisite chain ending with `flow_name` itself
+    (see _resolve_chain), exported as ORBIT_QA_CHAIN (comma-separated) — the
+    skill's cue to replay every flow BEFORE the last one first, ungraded, in
+    the SAME browser session (see skills/orbit-qa-flow.md), so auth/session
+    state carries into the target. None or empty (a flow with no
+    `requires`) falls back to `[flow_name]` — a single-element chain the
+    skill treats identically to no chaining at all, so this is byte-neutral
+    for every flow taught before this feature existed."""
+    chain_list = list(chain) if chain else [flow_name]
     override = os.environ.get("ORBIT_QA_RUN_CMD")
     if override:
         cmd = shlex.split(override)
@@ -387,6 +529,7 @@ def _run_flow_agent(qa_cfg: dict, cfg_all: dict, flow_name: str, target: Path,
         if not claude:
             _err("claude not on PATH — cannot run the QA flow agent")
             return ERR
+        _sync_qa_command(target, "orbit-qa-flow.md")
         cmd = [claude, "--print", f"/orbit-qa-flow {flow_name}",
                "--mcp-config", str(mcp_path),
                "--settings", str(ORBIT_HOME / "config" / "orbit.qa.settings.json"),
@@ -398,7 +541,10 @@ def _run_flow_agent(qa_cfg: dict, cfg_all: dict, flow_name: str, target: Path,
     # wholesale, so this is the only argv-independent way a fake script (or
     # a real skill invocation) can see the resolved MCP config path.
     env = dict(os.environ, AP_HOME=str(ap_home), AP_STATE=str(ap_state),
-               ORBIT_HOME=str(ORBIT_HOME), FLOW_NAME=flow_name, QA_MCP_CONFIG=str(mcp_path))
+               ORBIT_HOME=str(ORBIT_HOME), FLOW_NAME=flow_name, QA_MCP_CONFIG=str(mcp_path),
+               ORBIT_QA_CHAIN=",".join(chain_list))
+    if attach:
+        env["ORBIT_QA_ATTACH"] = "1"
     try:
         subprocess.run(cmd, cwd=str(target), env=env, timeout=timeout,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -486,6 +632,13 @@ def _validate_verdict(v, flow_name: str, ap_state: Path) -> str | None:
 # ---------------------------------------------------------------------------
 
 def _update_meta(flow_dir: Path, verdict: str) -> None:
+    """Read-modify-write: only `runs`/`last_run_at`/`last_verdict` are ever
+    set on the parsed dict, so any OTHER key already in the file — `heals`,
+    and (test chaining, Task "prerequisites") `requires`/`provides_auth` — is
+    carried through untouched, never dropped by a verdict update. Only the
+    "meta.json couldn't even be parsed" fallback below starts from a bare
+    dict with no `requires`/`provides_auth` — there is nothing to preserve
+    from a file that wasn't readable in the first place."""
     meta_path = flow_dir / "meta.json"
     try:
         meta = json.loads(meta_path.read_text())
@@ -533,19 +686,140 @@ def _update_flowmap_verdict(flowmap_path: Path, name: str, verdict: str) -> None
 
 
 # ---------------------------------------------------------------------------
+# test chaining (Task "prerequisites"): a flow can declare `requires` (other
+# flow names) in its own meta.json — see qa_teach.py's _write_flow. --flow
+# resolves the full prerequisite set into a topologically-ordered chain
+# BEFORE ever invoking the skill (see main()'s --flow path below), so the
+# skill can replay every prerequisite first, in order, in ONE browser
+# session, and only then replay + grade the target — carrying auth/session
+# state forward (skills/orbit-qa-flow.md). --regression's sweep does NOT
+# resolve chains (out of scope for now — see _replay_flow's own docstring):
+# each swept flow still gets a trivial single-element chain of itself.
+# ---------------------------------------------------------------------------
+
+def _read_requires(flows_root: Path, flow_name: str) -> list[str]:
+    """This flow's own `requires` list from its meta.json — [] on anything
+    short of a clean, well-shaped list of strings (missing file, unreadable,
+    non-JSON, non-dict, wrong-typed field, non-string entries silently
+    dropped) — mirrors _update_meta's own defensive parsing. Never raises;
+    a flow with a hand-edited or legacy (pre-chaining) meta.json is simply
+    treated as having no prerequisites, not a crash.
+
+    Each surviving entry is also SLUG_RE-gated (same pattern as
+    _select_regression_flows/qa_flow_library gate flow names elsewhere in
+    this codebase) — not just `isinstance(r, str)`: a hand-edited meta.json
+    could otherwise put a comma-bearing string into `requires`, which would
+    corrupt ORBIT_QA_CHAIN's comma-separated parsing, or a `../`-style
+    string, which flows straight into `(flows_root / name).is_dir()` in
+    _resolve_chain below. SLUG_RE forbids commas/slashes/'..', closing both
+    gaps at once; a non-slug entry is simply dropped, same "never raise on a
+    hand-edited file" posture as every other check in this function."""
+    try:
+        meta = json.loads((flows_root / flow_name / "meta.json").read_text())
+    except (OSError, ValueError):
+        return []
+    if not isinstance(meta, dict):
+        return []
+    req = meta.get("requires")
+    if not isinstance(req, list):
+        return []
+    return [r for r in req if isinstance(r, str) and SLUG_RE.match(r)]
+
+
+def _resolve_chain(flows_root: Path, flow_name: str) -> tuple[list[str] | None, str | None]:
+    """Resolves flow_name's full prerequisite set into a topologically-
+    ordered chain ENDING with flow_name itself — [prereq_a, prereq_b, ...,
+    flow_name] — via post-order DFS: each flow is only appended once its own
+    prerequisites are already in the list, so every prerequisite always
+    precedes anything that (transitively) requires it. A flow required by
+    more than one flow in the chain appears exactly once, at the earliest
+    point its own prerequisites are satisfied (`done` below dedupes).
+    Returns (chain, None) on success, or (None, <message>) on either failure
+    mode, checked BEFORE any run is attempted:
+      - a requires-CYCLE (a flow transitively requires itself) — `visiting`
+        catches this (a flow reached while already on the current DFS path).
+      - a MISSING prerequisite — a `requires` entry naming a flow whose dir
+        doesn't exist at all.
+    A flow with empty `requires` (the common case, and every flow taught
+    before this feature existed) resolves to `[flow_name]` — a single-
+    element chain, byte-neutral with today's un-chained replay.
+
+    Iterative (explicit-stack), NOT Python-recursive: a naive recursive
+    post-order DFS here would raise an uncaught RecursionError past roughly
+    ~995-deep requires chains (Python's default recursion limit, minus
+    whatever the caller — main(), a test runner, etc. — already used), and
+    main() has no guard for that — an unhandled traceback / exit 1 would
+    violate this module's own "loud, clean exit 2" contract for a usage
+    error like a cycle or a missing prerequisite. Each stack frame below is
+    `[name, path, reqs, idx]` — `path` is the DFS path to (but not
+    including) `name`, for the cycle message; `reqs` is None until this
+    frame's entry checks (done/visiting/is_dir) have run once, then becomes
+    its (possibly empty) requires list; `idx` is how many of `reqs` this
+    frame has already dispatched a child frame for. This mirrors the
+    recursive version call-for-call: a frame is entered once (`reqs is
+    None`), dispatches one child at a time (never more than one in flight,
+    same left-to-right order the recursive calls would have used), and is
+    finished (dedup + append to `order`) only once every child has
+    returned — so the result (order, dedup, cycle/missing detection) is
+    identical to the recursive form, just bounded by heap memory (a Python
+    list) instead of the C call stack."""
+    order: list[str] = []
+    done: set[str] = set()
+    visiting: set[str] = set()
+
+    stack: list[list] = [[flow_name, [], None, 0]]
+    while stack:
+        frame = stack[-1]
+        name, path, reqs, idx = frame
+
+        if reqs is None:
+            # First (and only) time this frame's own entry checks run —
+            # equivalent to the top of the recursive visit()'s call.
+            if name in done:
+                stack.pop()
+                continue
+            if name in visiting:
+                return None, f"requires-cycle detected: {' -> '.join(path + [name])}"
+            if not (flows_root / name).is_dir():
+                return None, f"prerequisite flow {name!r} does not exist under {flows_root}"
+            visiting.add(name)
+            reqs = _read_requires(flows_root, name)
+            frame[2] = reqs
+
+        if idx < len(reqs):
+            frame[3] = idx + 1
+            stack.append([reqs[idx], path + [name], None, 0])
+        else:
+            visiting.discard(name)
+            done.add(name)
+            order.append(name)
+            stack.pop()
+
+    return order, None
+
+
+# ---------------------------------------------------------------------------
 # the shared per-flow path — used by BOTH --flow and --regression (Task 27:
 # "invoke each flow through the SAME per-flow code path... factor a
 # callable, don't duplicate").
 # ---------------------------------------------------------------------------
 
 def _replay_flow(qa_cfg: dict, cfg_all: dict, flow_name: str, flow_dir: Path, target: Path,
-                  ap_home: Path, ap_state: Path, timeout: int) -> dict:
+                  ap_home: Path, ap_state: Path, timeout: int, attach: bool = False,
+                  chain: list[str] | None = None) -> dict:
     """Builds the flow's own MCP config, invokes the QA flow agent, locates +
     shape-validates the verdict it wrote, and — for any of the four valid
     verdicts — persists it into the flow's meta.json + FLOWMAP.md row (see
     _update_meta/_update_flowmap_verdict above). This is the ONE place that
     logic lives; --flow's main() and --regression's sweep both call this and
-    differ only in how they print/aggregate/exit.
+    differ only in how they print/aggregate/exit. `attach` (default False,
+    so --regression's sweep is byte-for-byte unchanged) is --flow's own
+    --attach flag — see _run_flow_agent's docstring. `chain` (default None —
+    see _run_flow_agent's own docstring for the None/empty -> [flow_name]
+    fallback) is --flow's own resolved prerequisite chain (Task
+    "prerequisites"); --regression's sweep never resolves one (each swept
+    flow still gets its own trivial single-element chain via the default) —
+    chaining is a `--flow`-only feature for now.
 
     Returns {"kind": "pass"|"fail"|"healed"|"unable"|"error",
              "verdict": <parsed+validated verdict dict, or None>,
@@ -558,7 +832,7 @@ def _replay_flow(qa_cfg: dict, cfg_all: dict, flow_name: str, flow_dir: Path, ta
     mcp_path = _flow_mcp_config(qa_cfg, ap_state, flow_name)
     start = time.time()
     launch_rc = _run_flow_agent(qa_cfg, cfg_all, flow_name, target, mcp_path,
-                                 timeout, ap_home, ap_state)
+                                 timeout, ap_home, ap_state, attach=attach, chain=chain)
     if launch_rc is not None:
         return {"kind": "error", "verdict": None,
                 "error": f"QA flow agent for {flow_name!r} could not be launched or finished"}
@@ -1031,6 +1305,7 @@ def _run_explore_agent(qa_cfg: dict, cfg_all: dict, target: Path, mcp_path: Path
         if not claude:
             _err("claude not on PATH — cannot run the QA explore agent")
             return ERR
+        _sync_qa_command(target, "orbit-qa-explore.md")
         cmd = [claude, "--print", "/orbit-qa-explore",
                "--mcp-config", str(mcp_path),
                "--settings", str(ORBIT_HOME / "config" / "orbit.qa.settings.json"),
@@ -1169,11 +1444,208 @@ def _run_explore(target: Path, ap_home: Path, cfg_all: dict, qa_cfg, timeout_arg
 
 
 # ---------------------------------------------------------------------------
+# AI test generation (`--generate`) — an agent reads the project's knowledge
+# base and drives candidate user journeys via /orbit-qa-generate
+# (skills/orbit-qa-generate.md), writing CANDIDATE flows to
+# $AP_STATE/qa/generated/<slug>/ for a human to review/approve on the
+# dashboard (command_center.py's generate-approve/generate-reject) — never
+# directly into the committed flow library. Shares --regression/--explore's
+# own .qa-running lock (see module docstring's "AI test generation" section).
+# ---------------------------------------------------------------------------
+
+GENERATE_MCP_FILENAME = "mcp-run-generate.json"
+
+
+def _generate_mcp_config(qa_cfg: dict, ap_state: Path) -> Path:
+    # Same local/lazy-import reasoning as _flow_mcp_config/_explore_mcp_config
+    # above — qa_check.py resolves its own AP_STATE/AP_HOME globals at import
+    # time, so AP_HOME/AP_STATE must already be set to THIS run's target
+    # before it's imported.
+    import qa_check
+    output_dir = ap_state / "qa" / "generate"
+    return qa_check.build_mcp_config(qa_cfg, ap_state / "qa", output_dir, GENERATE_MCP_FILENAME)
+
+
+def _run_generate_agent(qa_cfg: dict, cfg_all: dict, target: Path, mcp_path: Path,
+                         timeout: int, ap_home: Path, ap_state: Path, max_candidates: int,
+                         attach: bool = False) -> int | None:
+    """Same shape as _run_explore_agent (returns None on a clean launch/
+    return, or an exit code to return immediately). Reuses ORBIT_QA_RUN_CMD —
+    same substitution mechanism as every other agent invocation in this
+    module. `ORBIT_QA_GENERATE_MAX` (this run's own candidate-journey cap,
+    from --max or DEFAULT_GENERATE_MAX) is exported unconditionally, same
+    posture as QA_MCP_CONFIG; `ORBIT_QA_ATTACH=1` only when --attach."""
+    override = os.environ.get("ORBIT_QA_RUN_CMD")
+    if override:
+        cmd = shlex.split(override)
+    else:
+        claude = shutil.which("claude")
+        if not claude:
+            _err("claude not on PATH — cannot run the QA generate agent")
+            return ERR
+        _sync_qa_command(target, "orbit-qa-generate.md")
+        cmd = [claude, "--print", "/orbit-qa-generate",
+               "--mcp-config", str(mcp_path),
+               "--settings", str(ORBIT_HOME / "config" / "orbit.qa.settings.json"),
+               "--permission-mode", cfg_all.get("permission_mode", "acceptEdits"),
+               "--model", qa_cfg.get("model", DEFAULT_MODEL),
+               "--add-dir", str(ORBIT_HOME)]
+    env = dict(os.environ, AP_HOME=str(ap_home), AP_STATE=str(ap_state),
+               ORBIT_HOME=str(ORBIT_HOME), QA_MCP_CONFIG=str(mcp_path),
+               ORBIT_QA_GENERATE_MAX=str(max_candidates))
+    if attach:
+        env["ORBIT_QA_ATTACH"] = "1"
+    try:
+        # Inherit stdout/stderr (NOT DEVNULL) so the agent's own transcript
+        # lands in whatever the caller pointed us at — the dashboard's
+        # run-generate spawn redirects this whole process into
+        # $AP_STATE/logs/qa-generate.log, so a silent "agent never wrote a
+        # result" (e.g. a missing /orbit-qa-generate command, a browser that
+        # never launched) is now diagnosable from that log instead of leaving
+        # nothing behind. `orbit qa --generate` from a terminal simply shows
+        # the agent inline, same as any other foreground command.
+        subprocess.run(cmd, cwd=str(target), env=env, timeout=timeout,
+                       stdin=subprocess.DEVNULL)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        _err(f"QA generate agent failed: {e}")
+        return ERR
+    return None
+
+
+def _locate_generate_result(ap_state: Path, start: float) -> Path | None:
+    """Newest $AP_STATE/qa/generate-*.json with mtime >= start — mirrors
+    _locate_explore_result's stale-file discipline (a leftover file from an
+    earlier run must never be mistaken for this run's own outcome). No
+    filename-identity check needed — there is only ONE kind of generate
+    result per invocation, never one scoped per candidate name."""
+    qa_dir = ap_state / "qa"
+    if not qa_dir.is_dir():
+        return None
+    best: tuple[float, Path] | None = None
+    for p in qa_dir.glob("generate-*.json"):
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            continue
+        if mtime < start:
+            continue
+        if best is None or mtime > best[0]:
+            best = (mtime, p)
+    return best[1] if best else None
+
+
+def _validate_generate_result(r) -> str | None:
+    """None = shape is valid. Else a human-readable reason it's malformed —
+    same discipline as _validate_explore_result: a wiring/agent mistake must
+    never be mistaken for a real result. `count` must be a non-negative int
+    (bool excluded, same reasoning as pages_visited/new_rows) AND must equal
+    len(candidates) — the ONE cross-field check this result shape needs that
+    explore's doesn't, since `count` is meant to be a pure derivative of
+    `candidates`, not an independently-trustable field."""
+    if not isinstance(r, dict):
+        return f"generate result json is a {type(r).__name__}, not an object"
+    candidates = r.get("candidates")
+    if not isinstance(candidates, list) or not all(isinstance(c, str) for c in candidates):
+        return f"candidates {candidates!r} is not a list of strings"
+    skipped = r.get("skipped")
+    if not isinstance(skipped, list):
+        return f"skipped {skipped!r} is not a list"
+    count = r.get("count")
+    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+        return f"count {count!r} is not a non-negative integer"
+    if count != len(candidates):
+        return f"count {count} does not match len(candidates) ({len(candidates)})"
+    if not isinstance(r.get("summary"), str):
+        return f"summary {r.get('summary')!r} is not a string"
+    return None
+
+
+def _run_generate(target: Path, ap_home: Path, cfg_all: dict, qa_cfg, timeout_arg: int | None,
+                   attach: bool, max_arg: int | None) -> int:
+    """--generate: opt-in only in the sense that it needs a `qa:` block at
+    all (same loud, no-run exit 2 as --flow's own missing-block check) — NO
+    extra config flag to flip, unlike --explore's `qa.exploratory.enabled`;
+    generating candidate tests is always available once QA is configured at
+    all, since it never writes into the committed flow library itself (see
+    skills/orbit-qa-generate.md) — only a human clicking Approve does that.
+
+    Shares --regression/--explore's own `.qa-running` lock: all three drive
+    a real browser against the same qa.base_url. A busy (fresh) lock is the
+    same benign "already running" skip (exit 0, agent never invoked)."""
+    if not isinstance(qa_cfg, dict):
+        _err(f"no 'qa:' block configured in {ap_home / 'config.yaml'} — "
+             f"see config/schema.yaml's qa: section and add one first")
+        return USAGE_ERR
+
+    ap_state = ap_home / "state"
+    os.environ.setdefault("AP_HOME", str(ap_home))
+    os.environ.setdefault("AP_STATE", str(ap_state))
+    os.environ.setdefault("ORBIT_HOME", str(ORBIT_HOME))
+
+    max_candidates = max_arg if max_arg is not None else DEFAULT_GENERATE_MAX
+    if max_candidates <= 0:
+        max_candidates = DEFAULT_GENERATE_MAX
+
+    timeout_seconds = int(qa_cfg.get("timeout_seconds") or DEFAULT_TIMEOUT)
+    timeout = timeout_arg if timeout_arg is not None else timeout_seconds
+    qa_dir = ap_state / "qa"
+    lock_path = qa_dir / LOCK_NAME
+    stale_after_seconds = timeout_seconds + LOCK_STALE_MARGIN_SECONDS
+    if not _acquire_lock(lock_path, stale_after_seconds, mode="generate"):
+        print("generate: a QA sweep/explore/generate is already running — skipping this run")
+        return OK
+
+    try:
+        mcp_path = _generate_mcp_config(qa_cfg, ap_state)
+        start = time.time()
+        launch_rc = _run_generate_agent(qa_cfg, cfg_all, target, mcp_path, timeout, ap_home,
+                                         ap_state, max_candidates, attach=attach)
+        if launch_rc is not None:
+            return launch_rc
+
+        result_path = _locate_generate_result(ap_state, start)
+        if result_path is None:
+            _err(f"no generate result found under {qa_dir} written since this run started — "
+                 f"the QA generate agent never wrote one")
+            return ERR
+
+        try:
+            r = json.loads(result_path.read_text())
+        except (OSError, ValueError) as e:
+            _err(f"could not read the generate result at {result_path} ({e})")
+            return ERR
+
+        reason = _validate_generate_result(r)
+        if reason:
+            _err(f"malformed generate result at {result_path}: {reason}")
+            return ERR
+
+        summary = (r.get("summary") or "").strip()
+        count = r["count"]
+        if count <= 0:
+            # Manual-CLI posture: a clean pass that found nothing new to
+            # propose is still not what a human clicking "Generate tests"
+            # wanted to see — unlike --explore (where a clean crawl finding
+            # zero new bugs IS the happy path, exit 0), zero candidates here
+            # means there's nothing on the dashboard to review, so this is
+            # reported the same way --flow's own "unable" bucket is: loud,
+            # exit 1, never silently celebrated as success.
+            _err(f"0 candidate tests generated — {summary or 'nothing new to propose (already covered, or none found)'}")
+            return ERR
+
+        print(f"generate: {count} candidate test(s) generated — review & approve on the dashboard "
+              f"— {summary or 'see the dashboard for details'}")
+        return OK
+    finally:
+        _release_lock(lock_path)
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
 def main(argv: list[str]) -> int:
-    target, mode, flow_name, if_changed, timeout_arg, error = _parse_args(argv)
+    target, mode, flow_name, if_changed, attach, timeout_arg, max_arg, error = _parse_args(argv)
     if error:
         msg, code = error
         _err(msg)
@@ -1182,6 +1654,12 @@ def main(argv: list[str]) -> int:
     ap_home = target / ".autopilot"
     cfg_all = _load_cfg(target)
     qa_cfg = cfg_all.get("qa")
+
+    if mode == "generate":
+        # Manual-CLI posture throughout, same as --explore — no loop-safety
+        # silent-skip exception here; a missing `qa:` block is a loud exit 2,
+        # checked inside _run_generate itself.
+        return _run_generate(target, ap_home, cfg_all, qa_cfg, timeout_arg, attach, max_arg)
 
     if mode == "regression":
         if if_changed and not isinstance(qa_cfg, dict):
@@ -1242,7 +1720,20 @@ def main(argv: list[str]) -> int:
     timeout = timeout_arg if timeout_arg is not None else \
         int(qa_cfg.get("timeout_seconds") or DEFAULT_TIMEOUT)
 
-    result = _replay_flow(qa_cfg, cfg_all, flow_name, flow_dir, target, ap_home, ap_state, timeout)
+    # Test chaining (Task "prerequisites"): resolve flow_name's own
+    # `requires` (meta.json) into a full, topologically-ordered chain BEFORE
+    # ever invoking the skill — a requires-cycle or a missing prerequisite is
+    # a loud, no-run usage error (exit 2), same posture as every other
+    # --flow validation above. A flow with empty requires resolves to
+    # `[flow_name]` — see _resolve_chain/_run_flow_agent's own docstrings for
+    # why that's byte-neutral with today's un-chained replay.
+    chain, chain_err = _resolve_chain(flows_root, flow_name)
+    if chain_err:
+        _err(f"cannot resolve prerequisite chain for {flow_name!r}: {chain_err}")
+        return USAGE_ERR
+
+    result = _replay_flow(qa_cfg, cfg_all, flow_name, flow_dir, target, ap_home, ap_state, timeout,
+                           attach=attach, chain=chain)
     if result["kind"] == "error":
         _err(result["error"])
         return ERR

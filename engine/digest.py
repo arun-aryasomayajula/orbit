@@ -27,6 +27,7 @@ import yaml
 # _qa_flows_root all use — imported (never re-implemented) so it can't drift.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from qa_teach import _bad_flows_dir_reason
+from backlog_append import SLUG_RE   # the one slug gate every QA listing shares
 
 DEFAULT_FLOWS_DIR = "qa/flows"        # each consumer keeps its own copy of the
                                        # literal default; only the guard itself is shared.
@@ -57,6 +58,23 @@ def _qa_pending_heals(state: Path) -> int:
     taught yet) yields 0, never a crash."""
     try:
         return sum(1 for p in (state / "qa" / "heal").glob("*.json") if p.is_file())
+    except OSError:
+        return 0
+
+
+def _qa_pending_generated(state: Path) -> int:
+    """Count of top-level $AP_STATE/qa/generated/<slug>/ directories — AI
+    test candidates (qa_run.py --generate) still awaiting the human
+    approve/reject gate (command_center.py's do_qa_action generate-approve/
+    generate-reject). Mirrors command_center._qa_generated_candidates'
+    listing discipline exactly: directories only (a candidate is a dir, not a
+    file — the inverse of the heal listing above), the reserved `rejected/`
+    archive subdir excluded, and each name SLUG_RE-gated so junk (`.DS_Store`)
+    or a non-conforming dir is never counted. A missing qa/ or generated/ dir
+    (nothing generated yet) yields 0, never a crash."""
+    try:
+        return sum(1 for p in (state / "qa" / "generated").iterdir()
+                   if p.is_dir() and p.name != "rejected" and SLUG_RE.match(p.name))
     except OSError:
         return 0
 
@@ -176,11 +194,15 @@ def build(target: Path) -> tuple[str, str, str]:
     # section; neither means it's entirely absent — same "no content, no
     # line" discipline as the knowledge-staleness line above.
     pending_heals = _qa_pending_heals(state)
+    pending_generated = _qa_pending_generated(state)
     failing_flows = _qa_failing_flows(ap, cfg)
-    if pending_heals or failing_flows:
+    if pending_heals or pending_generated or failing_flows:
         lines.append("🧪 QA:")
         if pending_heals:
             lines.append(f"  · {pending_heals} pending heal(s) — approve on the dashboard")
+        if pending_generated:
+            lines.append(f"  · {pending_generated} AI-generated test(s) awaiting review — "
+                          f"approve on the dashboard")
         if failing_flows:
             shown = ", ".join(failing_flows[:3])
             lines.append(f"  · {len(failing_flows)} flow(s) last failed — "

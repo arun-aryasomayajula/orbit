@@ -65,6 +65,28 @@ VALID_CONVENTIONS = "## naming\n\n**STANDARD** snake_case (routes.py:1)\n"
 ALL_DOCS = ["INDEX.md", "endpoints.md", "er.mmd", "mindmap.mmd",
             "flows/checkout.md", "conventions.md"]
 
+VALID_GRAPH = json.dumps({
+    "version": 1,
+    "generated_at": "2026-07-22T00:00:00Z",
+    "base_sha": "deadbeefcafe",
+    "nodes": [
+        {"id": "GET /health", "type": "endpoint", "label": "GET /health",
+         "file": "routes.py:10", "meta": {"method": "GET"}},
+        {"id": "routes.py:health", "type": "function", "label": "health",
+         "file": "routes.py:12"},
+        {"id": "table:users", "type": "table", "label": "users",
+         "file": "migrations/0001_init.sql:3"},
+        {"id": "flow:checkout", "type": "flow", "label": "checkout flow", "file": None},
+    ],
+    "edges": [
+        {"source": "GET /health", "target": "routes.py:health", "type": "handles"},
+        {"source": "routes.py:health", "target": "table:users", "type": "reads"},
+        {"source": "flow:checkout", "target": "GET /health", "type": "step", "order": 1},
+    ],
+})
+
+ALL_DOCS_WITH_GRAPH = ALL_DOCS + ["graph.json"]
+
 
 def _target(tmp_path):
     """tmp_path fake target: .autopilot/{config.yaml,state/} + a real 1-commit git repo."""
@@ -162,6 +184,13 @@ def _full_files(endpoints=VALID_ENDPOINTS, er=VALID_ER, index=VALID_INDEX, mindm
         "flows/checkout.md": VALID_FLOW,
         "conventions.md": VALID_CONVENTIONS,
     }
+
+
+def _full_files_with_graph(graph=VALID_GRAPH, **kw):
+    """_full_files() plus a graph.json — for graph.json-specific validation tests."""
+    files = _full_files(**kw)
+    files["graph.json"] = graph
+    return files
 
 
 def run(target, agent_cmd, spec_path, extra_args=()):
@@ -315,6 +344,230 @@ def test_build_fails_when_endpoints_has_no_data_rows(tmp_path):
     assert "endpoints.md" in (r.stdout + r.stderr)
 
 
+# --- graph.json ---------------------------------------------------------
+# graph.json is OPTIONAL (validated only if present under knowledge/) — the
+# absent case is covered implicitly by every test above (none of them write
+# one) plus test_build_absent_graph_json_still_valid below for clarity.
+
+def _graph_manifest(**extra_kwargs):
+    return _full_manifest(docs=ALL_DOCS_WITH_GRAPH,
+                          extra={"files": {"routes.py": ["endpoints.md", "graph.json"]}},
+                          **extra_kwargs)
+
+
+def _run_with_graph(t, tmp_path, graph_text):
+    spec = _spec(tmp_path, "spec.json", _full_files_with_graph(graph=graph_text), _graph_manifest())
+    return run(t, _agent_script(tmp_path), spec)
+
+
+def test_build_succeeds_with_a_valid_graph_json(tmp_path):
+    t = _target(tmp_path)
+    r = _run_with_graph(t, tmp_path, VALID_GRAPH)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (t / ".autopilot" / "knowledge" / "graph.json").exists()
+
+
+def test_build_absent_graph_json_still_valid(tmp_path):
+    # existing behavior unchanged: no graph.json written at all → still valid
+    t = _target(tmp_path)
+    spec = _spec(tmp_path, "spec.json", _full_files(), _full_manifest())
+    r = run(t, _agent_script(tmp_path), spec)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not (t / ".autopilot" / "knowledge" / "graph.json").exists()
+
+
+def test_build_fails_when_graph_json_is_invalid_json_syntax(tmp_path):
+    t = _target(tmp_path)
+    r = _run_with_graph(t, tmp_path, "{not valid json")
+    assert r.returncode == 1
+    assert "VALIDATE" in r.stdout
+    assert "graph.json" in (r.stdout + r.stderr)
+    assert "Traceback" not in r.stderr
+
+
+def test_build_fails_when_graph_json_is_not_an_object(tmp_path):
+    t = _target(tmp_path)
+    r = _run_with_graph(t, tmp_path, json.dumps([1, 2, 3]))
+    assert r.returncode == 1
+    assert "graph.json" in (r.stdout + r.stderr)
+    assert "object" in (r.stdout + r.stderr)
+    assert "Traceback" not in r.stderr
+
+
+def test_build_fails_when_graph_json_missing_nodes(tmp_path):
+    t = _target(tmp_path)
+    graph = json.dumps({"version": 1, "generated_at": "2026-07-22T00:00:00Z", "edges": []})
+    r = _run_with_graph(t, tmp_path, graph)
+    assert r.returncode == 1
+    assert "graph.json" in (r.stdout + r.stderr)
+    assert "nodes" in (r.stdout + r.stderr)
+    assert "Traceback" not in r.stderr
+
+
+def test_build_fails_when_graph_json_missing_edges(tmp_path):
+    t = _target(tmp_path)
+    graph = json.dumps({"version": 1, "generated_at": "2026-07-22T00:00:00Z",
+                        "nodes": [{"id": "table:users", "type": "table", "label": "users"}]})
+    r = _run_with_graph(t, tmp_path, graph)
+    assert r.returncode == 1
+    assert "graph.json" in (r.stdout + r.stderr)
+    assert "edges" in (r.stdout + r.stderr)
+    assert "Traceback" not in r.stderr
+
+
+def test_build_fails_when_graph_json_node_has_no_id(tmp_path):
+    t = _target(tmp_path)
+    graph = json.dumps({"version": 1, "generated_at": "2026-07-22T00:00:00Z",
+                        "nodes": [{"type": "table", "label": "users"}], "edges": []})
+    r = _run_with_graph(t, tmp_path, graph)
+    assert r.returncode == 1
+    assert "graph.json" in (r.stdout + r.stderr)
+    assert "id" in (r.stdout + r.stderr)
+    assert "Traceback" not in r.stderr
+
+
+def test_build_fails_when_graph_json_node_has_bad_type(tmp_path):
+    t = _target(tmp_path)
+    graph = json.dumps({"version": 1, "generated_at": "2026-07-22T00:00:00Z",
+                        "nodes": [{"id": "table:users", "type": "bogus", "label": "users"}],
+                        "edges": []})
+    r = _run_with_graph(t, tmp_path, graph)
+    assert r.returncode == 1
+    assert "graph.json" in (r.stdout + r.stderr)
+    assert "type" in (r.stdout + r.stderr)
+    assert "Traceback" not in r.stderr
+
+
+def test_build_fails_when_graph_json_node_id_not_unique(tmp_path):
+    t = _target(tmp_path)
+    graph = json.dumps({"version": 1, "generated_at": "2026-07-22T00:00:00Z",
+                        "nodes": [{"id": "table:users", "type": "table", "label": "users"},
+                                  {"id": "table:users", "type": "table", "label": "again"}],
+                        "edges": []})
+    r = _run_with_graph(t, tmp_path, graph)
+    assert r.returncode == 1
+    assert "graph.json" in (r.stdout + r.stderr)
+    assert "unique" in (r.stdout + r.stderr)
+    assert "Traceback" not in r.stderr
+
+
+def test_build_fails_when_graph_json_edge_source_not_a_node_id(tmp_path):
+    t = _target(tmp_path)
+    graph = json.dumps({"version": 1, "generated_at": "2026-07-22T00:00:00Z",
+                        "nodes": [{"id": "table:users", "type": "table", "label": "users"}],
+                        "edges": [{"source": "table:ghost", "target": "table:users",
+                                   "type": "relates"}]})
+    r = _run_with_graph(t, tmp_path, graph)
+    assert r.returncode == 1
+    assert "graph.json" in (r.stdout + r.stderr)
+    assert "ghost" in (r.stdout + r.stderr)
+    assert "Traceback" not in r.stderr
+
+
+def test_build_fails_when_graph_json_edge_target_not_a_node_id(tmp_path):
+    t = _target(tmp_path)
+    graph = json.dumps({"version": 1, "generated_at": "2026-07-22T00:00:00Z",
+                        "nodes": [{"id": "table:users", "type": "table", "label": "users"}],
+                        "edges": [{"source": "table:users", "target": "table:ghost",
+                                   "type": "relates"}]})
+    r = _run_with_graph(t, tmp_path, graph)
+    assert r.returncode == 1
+    assert "graph.json" in (r.stdout + r.stderr)
+    assert "ghost" in (r.stdout + r.stderr)
+    assert "Traceback" not in r.stderr
+
+
+def test_build_fails_when_graph_json_edge_has_bad_type(tmp_path):
+    t = _target(tmp_path)
+    graph = json.dumps({"version": 1, "generated_at": "2026-07-22T00:00:00Z",
+                        "nodes": [{"id": "table:a", "type": "table", "label": "a"},
+                                  {"id": "table:b", "type": "table", "label": "b"}],
+                        "edges": [{"source": "table:a", "target": "table:b", "type": "bogus"}]})
+    r = _run_with_graph(t, tmp_path, graph)
+    assert r.returncode == 1
+    assert "graph.json" in (r.stdout + r.stderr)
+    assert "type" in (r.stdout + r.stderr)
+    assert "Traceback" not in r.stderr
+
+
+# --- graph.json: unhashable field values must VALIDATE, never crash --------
+# `x not in some_set` HASHES x — a node/edge field that's legal JSON (a list
+# or object) but an illegal graph.json value used to raise an unhandled
+# TypeError instead of reporting a VALIDATE line, which (with no done-marker
+# printed) left the dashboard's Run view stuck on "running" indefinitely.
+
+def test_build_fails_when_graph_json_node_id_is_a_list(tmp_path):
+    t = _target(tmp_path)
+    graph = json.dumps({"version": 1, "generated_at": "2026-07-22T00:00:00Z",
+                        "nodes": [{"id": ["not", "a", "string"], "type": "table", "label": "x"}],
+                        "edges": []})
+    r = _run_with_graph(t, tmp_path, graph)
+    assert r.returncode == 1
+    assert "graph.json" in (r.stdout + r.stderr)
+    assert "Traceback" not in r.stderr
+
+
+def test_build_fails_when_graph_json_node_type_is_a_dict(tmp_path):
+    t = _target(tmp_path)
+    graph = json.dumps({"version": 1, "generated_at": "2026-07-22T00:00:00Z",
+                        "nodes": [{"id": "table:users", "type": {"x": 1}, "label": "users"}],
+                        "edges": []})
+    r = _run_with_graph(t, tmp_path, graph)
+    assert r.returncode == 1
+    assert "graph.json" in (r.stdout + r.stderr)
+    assert "Traceback" not in r.stderr
+
+
+def test_build_fails_when_graph_json_edge_source_is_a_list(tmp_path):
+    t = _target(tmp_path)
+    graph = json.dumps({"version": 1, "generated_at": "2026-07-22T00:00:00Z",
+                        "nodes": [{"id": "table:users", "type": "table", "label": "users"}],
+                        "edges": [{"source": ["a"], "target": "table:users", "type": "relates"}]})
+    r = _run_with_graph(t, tmp_path, graph)
+    assert r.returncode == 1
+    assert "graph.json" in (r.stdout + r.stderr)
+    assert "Traceback" not in r.stderr
+
+
+def test_build_fails_when_graph_json_edge_target_is_a_dict(tmp_path):
+    t = _target(tmp_path)
+    graph = json.dumps({"version": 1, "generated_at": "2026-07-22T00:00:00Z",
+                        "nodes": [{"id": "table:users", "type": "table", "label": "users"}],
+                        "edges": [{"source": "table:users", "target": {"x": 1}, "type": "relates"}]})
+    r = _run_with_graph(t, tmp_path, graph)
+    assert r.returncode == 1
+    assert "graph.json" in (r.stdout + r.stderr)
+    assert "Traceback" not in r.stderr
+
+
+def test_build_fails_when_graph_json_edge_type_is_a_list(tmp_path):
+    t = _target(tmp_path)
+    graph = json.dumps({"version": 1, "generated_at": "2026-07-22T00:00:00Z",
+                        "nodes": [{"id": "table:a", "type": "table", "label": "a"},
+                                  {"id": "table:b", "type": "table", "label": "b"}],
+                        "edges": [{"source": "table:a", "target": "table:b", "type": ["bogus"]}]})
+    r = _run_with_graph(t, tmp_path, graph)
+    assert r.returncode == 1
+    assert "graph.json" in (r.stdout + r.stderr)
+    assert "Traceback" not in r.stderr
+
+
+def test_build_fails_when_step_edge_order_is_a_string(tmp_path):
+    # A stringified order passes the OLD build unvalidated but the UI nulls
+    # it (typeof e.order==='number' check), silently losing flow ordering.
+    t = _target(tmp_path)
+    graph = json.dumps({"version": 1, "generated_at": "2026-07-22T00:00:00Z",
+                        "nodes": [{"id": "flow:checkout", "type": "flow", "label": "checkout"},
+                                  {"id": "GET /health", "type": "endpoint", "label": "GET /health"}],
+                        "edges": [{"source": "flow:checkout", "target": "GET /health",
+                                   "type": "step", "order": "1"}]})
+    r = _run_with_graph(t, tmp_path, graph)
+    assert r.returncode == 1
+    assert "graph.json" in (r.stdout + r.stderr)
+    assert "order" in (r.stdout + r.stderr)
+    assert "Traceback" not in r.stderr
+
+
 def test_build_stamps_missing_base_sha(tmp_path):
     t = _target(tmp_path)
     spec = _spec(tmp_path, "spec.json", _full_files(), _full_manifest(base_sha=None))
@@ -362,6 +615,145 @@ def test_no_gates_config_still_resolves_repo_for_base_sha(tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     manifest = json.loads((t / ".autopilot" / "knowledge" / "manifest.json").read_text())
     assert manifest["base_sha"] == _head_sha(t)
+
+
+# === Fix A: sync the /orbit-knowledge command into the target on every build ===
+# A target onboarded before the graph.json feature landed in skills/orbit-
+# knowledge.md has a STALE .claude/commands/orbit-knowledge.md — its builds
+# silently never produce graph.json. run_survey_agent() now (re)copies
+# $ORBIT_HOME/skills/orbit-knowledge.md over that file before every survey
+# call (build AND refresh). In these tests ORBIT_HOME is not overridden, so
+# it resolves to this repo's own root (engine/knowledge.py's ENGINE.parent) —
+# the real skills/orbit-knowledge.md is the thing being synced.
+
+REAL_ORBIT_KNOWLEDGE_MD = (ROOT / "skills" / "orbit-knowledge.md").read_text()
+
+
+def test_build_syncs_orbit_knowledge_command_into_target(tmp_path):
+    t = _target(tmp_path)
+    assert not (t / ".claude").exists()          # no .claude/ at all before the build
+    spec = _spec(tmp_path, "spec.json", _full_files(), _full_manifest())
+    r = run(t, _agent_script(tmp_path), spec)
+    assert r.returncode == 0, r.stdout + r.stderr
+    synced = t / ".claude" / "commands" / "orbit-knowledge.md"
+    assert synced.exists()
+    assert synced.read_text() == REAL_ORBIT_KNOWLEDGE_MD
+    assert "synced the /orbit-knowledge command" in r.stdout
+
+
+def test_build_overwrites_a_stale_orbit_knowledge_command(tmp_path):
+    t = _target(tmp_path)
+    cmd_dir = t / ".claude" / "commands"
+    cmd_dir.mkdir(parents=True)
+    (cmd_dir / "orbit-knowledge.md").write_text("stale copy — predates graph.json\n")
+    spec = _spec(tmp_path, "spec.json", _full_files(), _full_manifest())
+    r = run(t, _agent_script(tmp_path), spec)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (cmd_dir / "orbit-knowledge.md").read_text() == REAL_ORBIT_KNOWLEDGE_MD
+
+
+def test_refresh_also_syncs_orbit_knowledge_command(tmp_path):
+    t = _target(tmp_path)
+    _build_kb(tmp_path, t, "2026-07-10T00:00:00Z", {"routes.py": ["endpoints.md"]})
+    synced = t / ".claude" / "commands" / "orbit-knowledge.md"
+    assert synced.read_text() == REAL_ORBIT_KNOWLEDGE_MD    # the build above already synced it
+    synced.write_text("stale again\n")                      # simulate drift since that build
+
+    sha = _commit_file(t, "routes.py", "print('changed')\n")
+    _write_markers(t, [_marker("task-sync", "2026-07-15T00:00:00Z", sha=sha)])
+    refresh_spec = _spec(tmp_path, "refresh-spec.json", _full_files(), _full_manifest())
+    r = run_sub(t, "refresh", env_extra={
+        "ORBIT_KNOWLEDGE_CMD": _agent_script(tmp_path),
+        "FAKE_SPEC": str(refresh_spec),
+    })
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert synced.read_text() == REAL_ORBIT_KNOWLEDGE_MD
+
+
+def test_build_sync_failure_warns_and_does_not_abort(tmp_path):
+    # a file sitting where the .claude/commands/ directory needs to go makes
+    # the mkdir(parents=True) fail — the build must WARN, not abort
+    t = _target(tmp_path)
+    (t / ".claude").mkdir()
+    (t / ".claude" / "commands").write_text("not a directory")
+    spec = _spec(tmp_path, "spec.json", _full_files(), _full_manifest())
+    r = run(t, _agent_script(tmp_path), spec)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "WARN" in (r.stdout + r.stderr)
+
+
+# === Fix B: elapsed heartbeat while the real survey call is in flight ========
+# The heartbeat only wraps the REAL `claude` path (no ORBIT_KNOWLEDGE_CMD
+# override) — a test fake invoked via the override returns effectively
+# instantly and would never emit a tick regardless. To exercise the real
+# path without a real `claude` binary, `_fake_claude_dir` drops an executable
+# named `claude` on PATH instead of using ORBIT_KNOWLEDGE_CMD, so
+# run_survey_agent takes its `shutil.which("claude")` branch — which is
+# exactly the branch the heartbeat thread wraps.
+
+def _fake_claude_dir(tmp_path, sleep_secs=0.0):
+    """A directory containing an executable `claude` that behaves like
+    _agent_script (reads $FAKE_SPEC, writes knowledge/ + manifest.json),
+    after first sleeping `sleep_secs` — stands in for the real `claude`
+    binary on PATH so the non-override code path (the one the heartbeat
+    wraps) can be exercised in a test."""
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir(exist_ok=True)
+    script = bin_dir / "claude"
+    script.write_text(textwrap.dedent(f"""\
+        #!{sys.executable}
+        import base64, json, os, sys, time
+        from pathlib import Path
+        time.sleep({sleep_secs})
+        spec = json.loads(Path(os.environ["FAKE_SPEC"]).read_text())
+        kdir = Path(os.environ["AP_HOME"]) / "knowledge"
+        kdir.mkdir(parents=True, exist_ok=True)
+        for rel, content in spec.get("files", {{}}).items():
+            p = kdir / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content)
+        for rel, b64 in spec.get("binary_files", {{}}).items():
+            p = kdir / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(base64.b64decode(b64))
+        if "manifest" in spec:
+            (kdir / "manifest.json").write_text(json.dumps(spec["manifest"]))
+        log = os.environ.get("FAKE_CALL_LOG")
+        if log:
+            with open(log, "a") as f:
+                f.write(json.dumps({{"argv": sys.argv[1:],
+                                     "skill": os.environ.get("ORBIT_KNOWLEDGE_SKILL")}}) + "\\n")
+        """))
+    script.chmod(0o755)
+    return bin_dir
+
+
+def test_build_fast_fake_produces_no_heartbeat(tmp_path):
+    # normal fast build via the ORBIT_KNOWLEDGE_CMD override: no regression —
+    # still exits 0 + validates, and (returning effectively instantly) never
+    # ticks a heartbeat line
+    t = _target(tmp_path)
+    spec = _spec(tmp_path, "spec.json", _full_files(), _full_manifest())
+    r = run(t, _agent_script(tmp_path), spec)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "elapsed" not in r.stdout
+
+
+def test_build_heartbeat_ticks_on_slow_real_path(tmp_path):
+    t = _target(tmp_path)
+    bin_dir = _fake_claude_dir(tmp_path, sleep_secs=0.5)
+    spec = _spec(tmp_path, "spec.json", _full_files(), _full_manifest())
+    env = dict(os.environ)
+    env.pop("ORBIT_KNOWLEDGE_CMD", None)
+    env.update(
+        FAKE_SPEC=str(spec),
+        ORBIT_KNOWLEDGE_HEARTBEAT_SECS="0.05",
+        PATH=f"{bin_dir}{os.pathsep}{env.get('PATH', '')}",
+    )
+    r = subprocess.run([sys.executable, str(KNOWLEDGE), str(t), "build"],
+                      capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "elapsed" in r.stdout
 
 
 # === Task 4: status ==========================================================

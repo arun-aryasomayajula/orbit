@@ -77,6 +77,41 @@ API shape. Each observation tagged **STANDARD** (framework-normal) or
 **NON-STANDARD** (repo-specific), with file:line evidence. Downstream, the
 planner follows your NON-STANDARD tags as repo style — get them right.
 
+### `graph.json`
+The SAME facts as `endpoints.md`/`er.mmd`/`flows/` above, machine-readable, as
+typed nodes + edges — no new survey, just re-emit what you already gathered:
+```json
+{"version": 1, "generated_at": "<ISO-8601 UTC>", "base_sha": "<git rev-parse HEAD>",
+ "nodes": [{"id": "<unique string>", "type": "endpoint|function|table|flow",
+            "label": "<short display>", "file": "<path:line or null>",
+            "meta": {"...optional (method, auth, http, domain)..."}}],
+ "edges": [{"source": "<node id>", "target": "<node id>",
+            "type": "handles|calls|reads|writes|relates|step",
+            "label": "<optional>", "order": "<optional int, for step>"}]}
+```
+Node ids: endpoint `"GET /path"`; function `"<file>:<symbol>"`; table
+`"table:<name>"`; flow `"flow:<slug>"`. A node exists for every endpoint,
+every function that appears in a call chain, every table, and every flow —
+nothing else.
+
+Edges:
+- `handles` — endpoint → its handler function (one per `endpoints.md` row).
+- `calls` — function → function, **traced recursively to the leaves**: for
+  each handler, follow every function it calls, then follow THAT function's
+  calls, and so on until a function calls nothing further you can see. The
+  full start-to-end chain, not one hop.
+- `reads`/`writes` — function → `table:<name>`, from queries you actually saw
+  that function touch.
+- `relates` — table → table, one per `er.mmd` relation; `label` = its
+  cardinality/relationship text.
+- `step` — flow → node (the endpoint/function/table it names), `order` =
+  1-based position in that flow's sequence.
+
+Same evidence-or-omission rule as everywhere else: a `calls`/`reads`/`writes`
+edge ships only when you saw it in code (cite via the node's `file`) — mark
+uncertainty by omission, never invent an edge to complete a chain. Every
+edge's `source`/`target` must be an id already in `nodes`.
+
 ## 3. Write `manifest.json` LAST
 The completion signal the engine checks — write it only after every other doc
 above is on disk.
@@ -87,16 +122,23 @@ above is on disk.
 ```
 `files` maps the source paths knowledge was derived from → the docs they feed;
 the engine uses it for staleness (a merged diff touching a mapped path marks
-those docs stale). Directory prefixes end with `/`.
+those docs stale). Directory prefixes end with `/`. List `graph.json` in
+`docs`, and add it alongside whichever of `endpoints.md`/`er.mmd`/`flows/*` a
+given source path already maps to — it's derived from the same evidence, so
+it goes stale on the same changes.
 
 ## 4. Exit
 Print one paragraph: endpoint count, entity count, flow count, docs written.
 
 ## Hard rules
-- **Evidence or omission.** Every endpoint row, ER entity, and flow step cites
-  file:line — or is left out. A wrong "fact" poisons every future maker brief.
-  Mark genuine uncertainty with `?` — never guess.
+- **Evidence or omission.** Every endpoint row, ER entity, flow step, and
+  `graph.json` edge cites file:line — or is left out. A wrong "fact" poisons
+  every future maker brief. Mark genuine uncertainty with `?` (or, in
+  `graph.json`, by simply not writing the edge) — never guess.
 - `INDEX.md` is ≤ 80 lines, no exceptions.
+- `graph.json`, if written, must be valid JSON with every edge's
+  `source`/`target` referencing a node id that exists in `nodes` — the engine
+  hard-checks this.
 - `er.mmd`'s first line must be exactly `erDiagram`; `mindmap.mmd`'s first line
   must be exactly `mindmap` — the engine hard-checks both, verbatim.
 - Write only under `$AP_HOME/knowledge/`. Never git add/commit, never touch a
