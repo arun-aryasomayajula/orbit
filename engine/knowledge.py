@@ -189,18 +189,45 @@ def run_survey_agent(target: Path, cfg: dict, timeout: int, quiet: bool,
     if not override:
         hb_interval = float(os.environ.get("ORBIT_KNOWLEDGE_HEARTBEAT_SECS", DEFAULT_HEARTBEAT_SECS))
         heartbeat_thread, heartbeat_stop = _start_heartbeat(hb_interval)
+    # Keep the agent's own output. Discarding it (the original DEVNULL) made
+    # every failure indistinguishable: a 30-minute timeout printed two lines
+    # and left nothing to read, so an operator couldn't tell a stuck agent from
+    # one that was steadily working and simply needed a bigger budget. Observed
+    # on a 1768-file target, where the agent fans the survey out across ~8
+    # Explore subagents and cannot write its first doc until they all return.
+    # A log we can't open is worse than a slow build. Failing to open the log
+    # is never fatal to the survey - fall back to discarding, as before.
+    log_path = ap / "state" / "logs" / f"knowledge-{skill or 'build'}.log"
+    log_handle = None
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_handle = log_path.open("w")
+    except OSError as e:
+        if not quiet:
+            print(f"  · could not open {log_path} ({e}) — agent output will be discarded")
+    sink = log_handle or subprocess.DEVNULL
+    if not quiet and log_handle is not None:
+        print(f"  · agent output → {log_path}")
     try:
         p = subprocess.run(cmd, cwd=target, env=env, timeout=timeout,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           stdout=sink, stderr=subprocess.STDOUT,
                            stdin=subprocess.DEVNULL)
+        if p.returncode != 0 and log_handle is not None:
+            print(f"  · agent exited {p.returncode} — see {log_path}")
         return p.returncode == 0
     except subprocess.TimeoutExpired:
         print(f"  ✗ survey agent timed out after {timeout}s")
+        print(f"    a large repo can legitimately need longer than this — re-run with")
+        print(f"    `--timeout {timeout * 3}` (or set knowledge.timeout_seconds).")
+        if log_handle is not None:
+            print(f"    what it was doing when the clock ran out: {log_path}")
         return False
     except OSError as e:
         print(f"  ✗ survey agent failed to start: {e}")
         return False
     finally:
+        if log_handle is not None:
+            log_handle.close()
         if heartbeat_thread is not None:
             heartbeat_stop.set()
             heartbeat_thread.join()

@@ -1348,3 +1348,34 @@ def test_endpoints_header_constant_matches_the_skill_doc():
 
     skill_text = (ROOT / "skills" / "orbit-knowledge.md").read_text()
     assert knowledge.ENDPOINTS_HEADER in skill_text
+
+
+# --- agent output is kept, not discarded ------------------------------------
+# run_survey_agent used to pipe the agent to DEVNULL, so any failure was a
+# black box: a 30-minute timeout printed two lines and left nothing to read.
+# Observed for real on a 1768-file target, where the agent fans the survey out
+# across ~8 Explore subagents and can't write its first doc until they return —
+# indistinguishable, from the operator's seat, from a wedged agent.
+
+def test_build_keeps_the_agent_output_in_a_log(tmp_path):
+    t = _target(tmp_path)
+    spec = _spec(tmp_path, "spec.json", _full_files(), _full_manifest())
+    r = run(t, _agent_script(tmp_path), spec)
+    assert r.returncode == 0
+    log = t / ".autopilot" / "state" / "logs" / "knowledge-build.log"
+    assert log.exists(), "the survey agent's output must survive the run"
+    assert str(log) in r.stdout, "the operator must be told where the log is"
+
+
+def test_timeout_names_the_log_and_suggests_a_bigger_budget(tmp_path):
+    # A legitimately slow survey on a big repo is the COMMON timeout cause, so
+    # the message has to point at both the evidence and the remedy.
+    t = _target(tmp_path)
+    hang = tmp_path / "hang.py"
+    hang.write_text("import time\ntime.sleep(30)\n")
+    spec = _spec(tmp_path, "spec.json", _full_files(), _full_manifest())
+    r = run(t, f"{sys.executable} {hang}", spec, extra_args=("--timeout", "1"))
+    assert r.returncode != 0
+    assert "timed out after 1s" in r.stdout
+    assert "--timeout 3" in r.stdout, "should suggest 3x the budget that failed"
+    assert "knowledge-build.log" in r.stdout
