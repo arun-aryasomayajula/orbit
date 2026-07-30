@@ -886,6 +886,7 @@ let S=null,fetchedAt=0,serverNow=0,lastSig='';
 // behind a try/catch — see below).
 let kbMode=null, cy=null, cyLoadState='idle',
     kgTypeOn={endpoint:true,function:true,table:true,flow:true}, _cytoscapePromise=null,
+    _chainIndex=null,   // adjacency index for chainNeighborhood; rebuilt per graph
     qaTeachTimer=null;
 const srvClock=()=>serverNow+(Date.now()-fetchedAt)/1000;
 function post(path,params){const b=new URLSearchParams(params).toString();
@@ -1947,6 +1948,7 @@ function kgStyle(){
       'width':1.4,'line-color':KG_FAINT,'target-arrow-color':KG_FAINT,'target-arrow-shape':'triangle',
       'curve-style':'bezier','arrow-scale':0.8,'opacity':0.85}},
     {selector:'.kg-dim',style:{'opacity':0.1}},
+    {selector:'.kg-off',style:{'display':'none'}},   // type filter — see applyTypeFilter
     {selector:'node.kg-hl',style:{'border-width':3,'border-color':KG_INK,'opacity':1,'z-index':10}},
     {selector:'edge.kg-hl',style:{'width':2.6,'opacity':1,'z-index':9}},
   ];
@@ -1981,17 +1983,51 @@ function renderGraph(data){
       label:String(e.label||''),order:(typeof e.order==='number')?e.order:null}});
   }
   if(cy){cy.destroy();cy=null;}
+  _chainIndex=null;   // adjacency belongs to the graph we're replacing
   cy=cytoscape({
     container:document.getElementById('kgCanvas'),
     elements:els,
     style:kgStyle(),
-    layout:{name:'cose',animate:false,nodeRepulsion:9000,idealEdgeLength:90,padding:20},
     wheelSensitivity:0.25,
   });
   cy.on('tap','node',evt=>{highlightChain(evt.target);showNodeDetail(evt.target);});
   cy.on('tap',evt=>{if(evt.target===cy)clearHighlight();});
   applyTypeFilter();
   renderGraphLegend();
+  /* Layout runs LAST and off this frame, not as a cytoscape({layout}) option.
+     cose is force-directed, and with animate:false it runs to completion
+     synchronously — on a repo-sized graph that blocks the main thread for
+     seconds. Passing it as an init option meant the overlay had already been
+     hidden, so the user watched a frozen blank canvas with no explanation.
+     Keep a message up, yield once so it actually paints, then lay out. */
+  const n=cy.nodes().length;
+  kgShowOverlay(`Laying out <b>${n}</b> nodes…`);
+  setTimeout(()=>{
+    try{ cy.layout(kgLayout(n)).run(); }
+    finally{ kgHideOverlay(); }   // animate:false ⇒ run() is synchronous
+  },0);
+}
+
+/* cose is force-directed: O(n^2) node repulsion per iteration, and its
+   2500-iteration default is tuned for small graphs. Measured on this repo's own
+   knowledge graph (1247 nodes / 2411 edges), headless:
+     numIter=2500  32.6 s   <- the old default
+     numIter=1000  32.9 s   (cose self-terminates near here; capping does nothing)
+     numIter= 300  15.4 s
+     numIter= 150   7.0 s
+     numIter=  60   2.6 s   (stable across 3 runs: 2595/2637/2626 ms)
+   Only cuts well below 300 actually bite. A cheap layout (concentric/circle/
+   grid) finishes in ~65 ms but arranges nodes arbitrarily, throwing away the
+   cluster structure that makes the graph worth looking at — so keep cose and
+   buy the time back with iterations instead of abandoning the algorithm.
+   Fewer iterations means a less-converged, more scattered result, which at this
+   node count is no loss: cytoscape fits to the viewport either way. */
+function kgLayout(nodeCount){
+  const big=nodeCount>400;
+  return {name:'cose',animate:false,padding:20,
+          nodeRepulsion:9000,idealEdgeLength:90,
+          nodeDimensionsIncludeLabels:false,
+          numIter:big?60:2500};
 }
 
 // The user's intent for a clicked function/endpoint/table node is the
@@ -2005,37 +2041,62 @@ function renderGraph(data){
 // so this walks the allowed edge set by hand instead (BFS in both
 // directions, one hop at a time, only ever following a chain-type edge).
 const CHAIN_EDGE_TYPES=new Set(['handles','calls','reads','writes']);
+
+/* The BFS below used to re-scan every chain edge for each node it visited
+   (`edges.filter(e=>e.source().id()===cur.id())`, twice per node) and grow its
+   result with `related.union(...)` inside the loop, which allocates a fresh
+   collection every hop. That is O(K*E) comparisons plus O(K^2) collection
+   copying for a chain of K nodes — invisible on a 10-node demo graph, but this
+   repo's own graph is 1247 nodes / 2411 edges and clicking a hub endpoint
+   stalled the tab. Index the adjacency once per graph instead, then walk it. */
+function buildChainIndex(){
+  const out=new Map(), inc=new Map();
+  const add=(m,k,v)=>{const a=m.get(k);if(a)a.push(v);else m.set(k,[v]);};
+  cy.edges().forEach(e=>{
+    if(!CHAIN_EDGE_TYPES.has(e.data('type')))return;
+    add(out,e.source().id(),e);
+    add(inc,e.target().id(),e);
+  });
+  return {out,inc};
+}
 function chainNeighborhood(n){
-  const edges=cy.edges().filter(e=>CHAIN_EDGE_TYPES.has(e.data('type')));
-  let related=n;
-  const seen=new Set([n.id()]);
+  if(!_chainIndex)_chainIndex=buildChainIndex();
+  const {out,inc}=_chainIndex;
+  const seenNodes=new Set([n.id()]), seenEdges=new Set();
+  const els=[n];
   let frontier=[n];
   while(frontier.length){
     const next=[];
-    frontier.forEach(cur=>{
-      edges.filter(e=>e.source().id()===cur.id()).forEach(e=>{
-        related=related.union(e).union(e.target());
-        if(!seen.has(e.target().id())){seen.add(e.target().id());next.push(e.target());}
-      });
-      edges.filter(e=>e.target().id()===cur.id()).forEach(e=>{
-        related=related.union(e).union(e.source());
-        if(!seen.has(e.source().id())){seen.add(e.source().id());next.push(e.source());}
-      });
-    });
+    for(const cur of frontier){
+      const id=cur.id();
+      // Each direction walks only chain-type edges, so a 'relates' or 'step'
+      // edge still terminates the traversal exactly as before.
+      for(const e of out.get(id)||[]){
+        if(!seenEdges.has(e.id())){seenEdges.add(e.id());els.push(e);}
+        const t=e.target();
+        if(!seenNodes.has(t.id())){seenNodes.add(t.id());els.push(t);next.push(t);}
+      }
+      for(const e of inc.get(id)||[]){
+        if(!seenEdges.has(e.id())){seenEdges.add(e.id());els.push(e);}
+        const s=e.source();
+        if(!seenNodes.has(s.id())){seenNodes.add(s.id());els.push(s);next.push(s);}
+      }
+    }
     frontier=next;
   }
-  return related;
+  return cy.collection(els);   // one allocation, not one per hop
 }
 function highlightChain(n){
   if(!cy)return;
   let related;
   if(n.data('type')==='flow'){
-    // A flow's own outgoing 'step' edges, in order — its path, not whatever
-    // those step targets themselves call/read further downstream.
-    const steps=cy.edges().filter(e=>e.data('type')==='step'&&e.source().id()===n.id())
-      .sort((a,b)=>(a.data('order')||0)-(b.data('order')||0));
-    related=n;
-    steps.forEach(e=>{related=related.union(e).union(e.target());});
+    // A flow's own outgoing 'step' edges — its path, not whatever those step
+    // targets themselves call/read further downstream. Collect into one array
+    // and build the collection once (union-per-step was the same quadratic
+    // allocation pattern chainNeighborhood had).
+    const els=[n];
+    n.outgoers('edge[type = "step"]').forEach(e=>{els.push(e,e.target());});
+    related=cy.collection(els);
   }else{
     // Call/data chain only — see chainNeighborhood's comment above.
     related=chainNeighborhood(n);
@@ -2083,10 +2144,19 @@ function kgToggleType(t){
 }
 function applyTypeFilter(){
   if(!cy)return;
-  cy.nodes().forEach(n=>{n.style('display',kgTypeOn[n.data('type')]!==false?'element':'none');});
-  cy.edges().forEach(e=>{
-    const show=e.source().style('display')!=='none'&&e.target().style('display')!=='none';
-    e.style('display',show?'element':'none');
+  /* Was a per-element .style() write for every node AND edge (3658 of them on
+     this repo's graph), plus a .style() READ per edge endpoint to decide edge
+     visibility - and a style read forces a recalculation, so toggling one chip
+     re-styled the whole graph several times over. Derive edge visibility from
+     kgTypeOn directly (a data read, no recalc), drive it with a class the
+     stylesheet already knows, and batch so cytoscape redraws once. */
+  const off=t=>kgTypeOn[t]===false;
+  cy.batch(()=>{
+    cy.nodes().forEach(n=>{n[off(n.data('type'))?'addClass':'removeClass']('kg-off');});
+    cy.edges().forEach(e=>{
+      const hide=off(e.source().data('type'))||off(e.target().data('type'));
+      e[hide?'addClass':'removeClass']('kg-off');
+    });
   });
 }
 
