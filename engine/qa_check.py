@@ -129,6 +129,29 @@ ENGINE_DIR = Path(__file__).resolve().parent
 
 SHIP, ESCALATE, BOUNCE = 0, 3, 4
 
+
+def open_agent_log(kind: str, tid: str):
+    """Open $AP_STATE/logs/<kind>-task-<tid>.log for an agent's combined output.
+
+    Both agent calls in this module used to pipe stdout AND stderr to DEVNULL,
+    which made every QA failure unexplainable after the fact: a timeout or a
+    crashed agent produced one WARN line and nothing to read, and the gate can
+    ship, bounce, or escalate a task off that invisible run. Same defect (and
+    same fix) as knowledge.py's survey agent.
+
+    Returns an open handle, or None if it can't be created — never fatal, since
+    a read-only state dir must not stop the gate from running. Overwrites per
+    invocation, so on a dev<->QA bounce this holds the LATEST attempt for that
+    task; the per-attempt verdicts live in the ledger.
+    """
+    path = AP_STATE / "logs" / f"{kind}-task-{tid}.log"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path.open("w")
+    except OSError as e:
+        print(f"WARN: could not open {path} ({e}) — agent output will be discarded")
+        return None
+
 # Same "lowercase slug" shape plan_gate.py/command_center.py enforce — a task
 # id is an engine-internal identifier, not free text, and every path below is
 # derived from it. Validated before any path/file use. Unlike plan_gate's
@@ -178,12 +201,18 @@ def run_legacy_agent(cfg_all: dict, tid: str, worktree: str, timeout: int) -> No
                "--add-dir", str(ORBIT_HOME)]
     env = dict(os.environ, AP_HOME=str(AP_HOME), AP_STATE=str(AP_STATE),
                ORBIT_HOME=str(ORBIT_HOME), TASK_ID=tid)
+    log = open_agent_log("runtime-check", tid)
     try:
         subprocess.run(cmd, cwd=worktree, env=env, timeout=timeout,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       stdout=log or subprocess.DEVNULL, stderr=subprocess.STDOUT,
                        stdin=subprocess.DEVNULL)
     except (subprocess.TimeoutExpired, OSError) as e:
         print(f"WARN: runtime agent for {tid} failed: {e}")
+        if log is not None:
+            print(f"      what it did before failing: {log.name}")
+    finally:
+        if log is not None:
+            log.close()
 
 
 def legacy_check(cfg_all: dict, tid: str, worktree: str) -> int:
@@ -302,12 +331,18 @@ def run_qa_agent(cfg_all: dict, qa_cfg: dict, tid: str, worktree: str,
     # a stable, argv-independent way to see what was resolved.
     env = dict(os.environ, AP_HOME=str(AP_HOME), AP_STATE=str(AP_STATE),
                ORBIT_HOME=str(ORBIT_HOME), TASK_ID=tid, QA_MCP_CONFIG=str(mcp_path))
+    log = open_agent_log("qa-check", tid)
     try:
         subprocess.run(cmd, cwd=worktree, env=env, timeout=timeout,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       stdout=log or subprocess.DEVNULL, stderr=subprocess.STDOUT,
                        stdin=subprocess.DEVNULL)
     except (subprocess.TimeoutExpired, OSError) as e:
         print(f"WARN: QA agent for {tid} failed: {e}")
+        if log is not None:
+            print(f"      what it did before failing: {log.name}")
+    finally:
+        if log is not None:
+            log.close()
 
 
 def _engine_env() -> dict:

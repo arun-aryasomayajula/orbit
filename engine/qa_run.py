@@ -350,6 +350,26 @@ def _err(msg: str) -> None:
     print(f"qa_run: {msg}", file=sys.stderr)
 
 
+def _open_agent_log(ap_state: Path, name: str):
+    """Open <ap_state>/logs/<name>.log for an agent's combined output.
+
+    These agent calls used to send stdout AND stderr to DEVNULL, so a flow
+    replay or exploratory crawl that timed out or crashed left one stderr line
+    and no way to see what the browser agent actually did — the same defect
+    fixed in knowledge.py and qa_check.py. ap_state is a parameter here (not a
+    module global as in qa_check.py), so the caller supplies it.
+
+    None on failure rather than raising: losing the log must not fail the run.
+    """
+    path = ap_state / "logs" / f"{name}.log"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path.open("w")
+    except OSError as e:
+        _err(f"could not open {path} ({e}) — agent output will be discarded")
+        return None
+
+
 def _sync_qa_command(target: Path, command_file: str) -> None:
     """Copy $ORBIT_HOME/skills/<command_file> into
     <target>/.claude/commands/<command_file> (overwrite) right before the
@@ -545,13 +565,21 @@ def _run_flow_agent(qa_cfg: dict, cfg_all: dict, flow_name: str, target: Path,
                ORBIT_QA_CHAIN=",".join(chain_list))
     if attach:
         env["ORBIT_QA_ATTACH"] = "1"
+    # flow_name is already SLUG_RE-gated by main() (anchored, no slashes), so
+    # it is safe to use directly as a filename component.
+    log = _open_agent_log(ap_state, f"qa-flow-{flow_name}")
     try:
         subprocess.run(cmd, cwd=str(target), env=env, timeout=timeout,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       stdout=log or subprocess.DEVNULL, stderr=subprocess.STDOUT,
                        stdin=subprocess.DEVNULL)
     except (subprocess.TimeoutExpired, OSError) as e:
         _err(f"QA flow agent for {flow_name!r} failed: {e}")
+        if log is not None:
+            _err(f"  what it did before failing: {log.name}")
         return ERR
+    finally:
+        if log is not None:
+            log.close()
     return None
 
 
@@ -1314,13 +1342,19 @@ def _run_explore_agent(qa_cfg: dict, cfg_all: dict, target: Path, mcp_path: Path
                "--add-dir", str(ORBIT_HOME)]
     env = dict(os.environ, AP_HOME=str(ap_home), AP_STATE=str(ap_state),
                ORBIT_HOME=str(ORBIT_HOME), QA_MCP_CONFIG=str(mcp_path))
+    log = _open_agent_log(ap_state, "qa-explore")
     try:
         subprocess.run(cmd, cwd=str(target), env=env, timeout=timeout,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       stdout=log or subprocess.DEVNULL, stderr=subprocess.STDOUT,
                        stdin=subprocess.DEVNULL)
     except (subprocess.TimeoutExpired, OSError) as e:
         _err(f"QA explore agent failed: {e}")
+        if log is not None:
+            _err(f"  what it did before failing: {log.name}")
         return ERR
+    finally:
+        if log is not None:
+            log.close()
     return None
 
 
