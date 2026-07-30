@@ -5,3 +5,4 @@ engine/logs/
 *.local
 .DS_Store
 implementation-notes.md
+.gstack/
