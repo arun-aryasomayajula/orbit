@@ -1833,9 +1833,26 @@ function kbMaybeLoadGraph(){
 }
 
 /* ── knowledge graph: load cytoscape + graph.json, build the node graph ───── */
-const KG_NODE_COLORS={endpoint:'var(--blue)',function:'var(--green)',table:'var(--amber)',flow:'var(--violet)'};
+/* Cytoscape parses its own style values and does NOT resolve CSS var() - it
+   drops `var(--blue)` as an invalid property, so every node fell back to the
+   same grey while the HTML legend (real CSS, where var() works) advertised four
+   distinct colors. Read the palette off :root once here so the cytoscape styles
+   and the legend are fed from the same values and can't drift apart again. The
+   hex fallback is only for the case where the var is missing entirely. */
+function kgCssVar(name,fallback){
+  try{
+    const v=getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return v||fallback;
+  }catch(e){return fallback}
+}
+const KG_INK=kgCssVar('--ink','#E8EDF7'), KG_FAINT=kgCssVar('--faint','#5A6478'),
+      KG_LINE2=kgCssVar('--line2','#2B3A5C');
+const KG_NODE_COLORS={endpoint:kgCssVar('--blue','#7C9CFF'),function:kgCssVar('--green','#4ADE9C'),
+                      table:kgCssVar('--amber','#FFB35C'),flow:kgCssVar('--violet','#A78BFA')};
 const KG_NODE_SHAPES={endpoint:'round-rectangle',function:'ellipse',table:'rectangle',flow:'diamond'};
-const KG_EDGE_COLORS={calls:'#7C9CFF',handles:'#4ADE9C',reads:'#FFB35C',writes:'#FFB35C',relates:'#8B96AC',step:'#A78BFA'};
+const KG_EDGE_COLORS={calls:kgCssVar('--blue','#7C9CFF'),handles:kgCssVar('--green','#4ADE9C'),
+                      reads:kgCssVar('--amber','#FFB35C'),writes:kgCssVar('--amber','#FFB35C'),
+                      relates:kgCssVar('--dim','#8B96AC'),step:kgCssVar('--violet','#A78BFA')};
 /* cy/cyLoadState/kgTypeOn/_cytoscapePromise declared up by `let S=null` (see comment there). */
 
 function loadCytoscapeScript(){
@@ -1905,14 +1922,20 @@ function ensureGraphLoaded(){
 function kgStyle(){
   const styles=[
     {selector:'node',style:{
-      'background-color':'var(--faint)','label':'data(label)','color':'var(--ink)',
+      'background-color':KG_FAINT,'label':'data(label)','color':KG_INK,
       'font-size':9,'font-family':'IBM Plex Mono, monospace','text-wrap':'ellipsis','text-max-width':90,
-      'width':26,'height':26,'text-valign':'bottom','text-margin-y':4,'border-width':1.5,'border-color':'var(--line2)'}},
+      'width':26,'height':26,'text-valign':'bottom','text-margin-y':4,'border-width':1.5,'border-color':KG_LINE2,
+      /* cose packs neighbours tight enough that bottom-anchored labels overlap
+         adjacent nodes and each other. A panel-colored plate behind the text
+         keeps every label readable without moving nodes apart (which would
+         cost the layout its cluster structure on a real repo-sized graph). */
+      'text-background-color':kgCssVar('--panel','#0D1424'),'text-background-opacity':0.82,
+      'text-background-padding':1.5,'text-background-shape':'roundrectangle'}},
     {selector:'edge',style:{
-      'width':1.4,'line-color':'var(--faint)','target-arrow-color':'var(--faint)','target-arrow-shape':'triangle',
+      'width':1.4,'line-color':KG_FAINT,'target-arrow-color':KG_FAINT,'target-arrow-shape':'triangle',
       'curve-style':'bezier','arrow-scale':0.8,'opacity':0.85}},
     {selector:'.kg-dim',style:{'opacity':0.1}},
-    {selector:'node.kg-hl',style:{'border-width':3,'border-color':'var(--ink)','opacity':1,'z-index':10}},
+    {selector:'node.kg-hl',style:{'border-width':3,'border-color':KG_INK,'opacity':1,'z-index':10}},
     {selector:'edge.kg-hl',style:{'width':2.6,'opacity':1,'z-index':9}},
   ];
   for(const t in KG_NODE_COLORS)styles.push({selector:`node[type = "${t}"]`,
