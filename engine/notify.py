@@ -55,6 +55,12 @@ def notify_slack(title: str, message: str, url: str = ""):
 
 def send(title: str, message: str, url: str = ""):
     # Fan out to every configured channel; failures are silent by design.
+    # ORBIT_NO_NOTIFY (any non-empty value) short-circuits entirely, before
+    # either channel runs — the one choke point for test suites (or any
+    # harness) that want to opt out of real desktop/Slack notifications
+    # without touching call sites.
+    if os.environ.get("ORBIT_NO_NOTIFY"):
+        return
     notify_macos(title, message)
     notify_slack(title, message, url)
 

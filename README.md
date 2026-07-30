@@ -7,13 +7,14 @@ surveys the repo into an evidence-backed backlog, **epics** plan big work into
 human-approved specs and loop-sized slices, the **build loop** works one task at a
 time around the clock, each ship lands as **one atomic commit on its own review
 branch** (optionally as a ready-made PR), and **signal adapters** feed production
-evidence back into the backlog. Two things never happen without a human click:
-work entering the queue, and work merging.
+evidence back into the backlog — a browser-driving QA gate adds its own regression
+sweeps and self-healing flow replays to that same evidence stream. Two things never
+happen without a human click: work entering the queue, and work merging.
 
 ```
 intake ─▶ backlog ─▶ (epic? plan ─▶ you approve ─▶ decompose) ─▶ you queue
-one cycle:  pick task ─▶ route (maker · model · skill · tracks) ─▶ build ⇄ check ─▶ verify-spec ─▶ commit ─▶ push review branch (+PR) ─▶ you merge
-signals (logs · QA · scorecards) ─▶ proposed tasks ─▶ back to triage
+one cycle:  pick task ─▶ route (maker · model · skill · tracks) ─▶ plan ─▶ build ⇄ check ─▶ verify-spec ─▶ commit ─▶ push review branch (+PR) ─▶ you merge
+signals (logs · QA · regression sweeps · scorecards) ─▶ proposed tasks ─▶ back to triage
 ```
 
 One notch forward per cycle, never backward, every change independently reviewable.
@@ -53,8 +54,8 @@ orbit/  (engine — install once)        <your-repo>/.autopilot/  (profile — p
 ├── agents/    builder/checker/verifier  ├── router.yaml   optional routing override
 ├── skills/    the /orbit-cycle command  ├── tracks/       your repo's playbooks
 ├── router/    default routing           ├── backlog.yaml  the task queue
-├── tracks/    generic templates         └── state/        ledger, queue, reviews (gitignored)
-├── goldens/   graded output exemplars
+├── tracks/    generic templates         ├── state/        ledger, queue, reviews (gitignored)
+├── goldens/   graded output exemplars   └── knowledge/    endpoint maps · ER diagram · flows (committed)
 ├── adapters/  opt-in task sources
 └── install/   launchd + systemd service
 ```
@@ -90,7 +91,7 @@ flowchart TD
         build["build ⇄ check<br/>(your gates = definition of done)"]
         verify["verifier judges diff<br/>vs acceptance criteria"]
         commit["one atomic commit<br/>+ review packet"]
-        rt["runtime check (opt-in)<br/>observe the running product"]
+        rt["QA gate (opt-in)<br/>observe the running product"]
     end
     push["wrapper (never the agent) pushes<br/>origin/autopilot/task-id (+ PR)"]
     gate{{"HUMAN GATE 2<br/>merge · reject · revert (dashboard)"}}
@@ -118,7 +119,12 @@ flowchart TD
 
 Two human gates bound the loop: **nothing enters the queue and nothing merges
 without a click**. Every other arrow is machine-driven and leaves evidence
-(review packet, backup patch, ledger entry, log line).
+(review packet, backup patch, ledger entry, log line). A QA-gate fail on a
+`required` category takes one extra lap first: it re-queues the same task with
+the findings folded in (up to `qa.max_bounces`, default 2 bounces), then
+escalates to you like any other contradiction. Separately, a human-taught
+**flow library** (`orbit teach` / `orbit qa --flow`) lets that same QA agent
+replay committed flows on demand, outside any one task's cycle.
 
 ### The task lifecycle (the ledger state machine)
 
@@ -133,7 +139,7 @@ stateDiagram-v2
     in_progress --> committed: committed (agent)
     committed --> pushed: pushed (wrapper)
     in_progress --> escalated: escalate
-    committed --> escalated: runtime check contradiction
+    committed --> escalated: QA gate contradiction/fail
     pushed --> escalated: escalate
     pushed --> merged: mark merged (human)
     committed --> merged: mark / autoclose
@@ -182,7 +188,7 @@ Two subtleties the machine encodes deliberately:
   `reverted` is legal from `committed`/`pushed`/`merged`, and why the dashboard
   categorizes by ancestry first.
 - **`escalated → merged` is legal only with ship evidence** — the autoclose
-  reconciler flips a task that committed, escalated at the runtime check, and
+  reconciler flips a task that committed, escalated at the QA gate, and
   whose branch you merged anyway.
 
 The backlog layer has its own, simpler ladder in the task's `status` field —
@@ -233,9 +239,12 @@ Full walkthrough with prerequisites, first-cycle verification, and troubleshooti
 | `init` | scaffold `.autopilot/` (same as `install.sh`) |
 | `intake` | survey the repo: verify gates, fill tracks, propose an evidence-backed backlog |
 | `epic` | planning tier: `plan\|approve\|decompose\|status <id>` — spec first, humans approve |
+| `teach` | record a browser flow by demonstration (Playwright `codegen`) into the committed flow library — `<flow-name> [--url URL]` |
+| `qa` | replay one taught flow via the browser MCP, grade it against its own intent, and record the verdict — `--flow <name>` |
 | `doctor` | validate config + router + tracks + skills; dry-run routing (read-only) |
 | `run` | run the loop in the foreground |
 | `install` | install the background service |
+| `knowledge` | survey the repo into `.autopilot/knowledge/` (endpoints→tables map, ER diagram, flows, conventions) — briefed into every cycle; `status` reports staleness |
 | `sync` | re-copy the engine's command + agents into the target (after an engine `git pull`) |
 | `pause` / `resume` | kill switch (touch / remove the STOP file) |
 | `status` | queue + ledger + today's spend |

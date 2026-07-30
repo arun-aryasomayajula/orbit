@@ -124,6 +124,10 @@ def build(tid: str, gitdir: str, branch: str, dest: str) -> Path:
     notes = notes_file.read_text().strip() if notes_file.exists() else "(the cycle left no review notes)"
     runtime_file = REVIEWS / f"task-{tid}-runtime.md"
     runtime = runtime_file.read_text().strip() if runtime_file.exists() else ""
+    plan_file = REVIEWS / f"task-{tid}-plan.md"
+    plan = plan_file.read_text().strip() if plan_file.exists() else ""
+    gate_file = REVIEWS / f"task-{tid}-plan-gate.txt"
+    gate = gate_file.read_text().strip() if gate_file.exists() else ""
 
     pr_url = (f"https://bitbucket.org/{BB_REPO}/pull-requests/new"
               f"?source={branch}&dest={dest}") if BB_REPO else ""
@@ -144,6 +148,13 @@ def build(tid: str, gitdir: str, branch: str, dest: str) -> Path:
         contract,
         "```",
         "",
+        *( [
+            "## The plan (scope fence + approach)",
+            "",
+            plan,
+            "",
+            *( ["plan gate:", "", "```", gate, "```", ""] if gate else [] ),
+          ] if plan else [] ),
         "## The commit",
         "",
         f"**{subject}**",
@@ -163,6 +174,7 @@ def build(tid: str, gitdir: str, branch: str, dest: str) -> Path:
         "- [ ] Diff matches the contract (no scope creep, nothing missing)",
         "- [ ] Tests actually assert the new behaviour (not just green)",
         "- [ ] No guardrail violations (async IO, SQL identifiers, secrets)",
+        *( ["- [ ] Diff stayed inside the plan's file scope (see plan section)"] if plan else [] ),
         "- [ ] Merge the PR, or ✗ Reject on the dashboard with a reason",
     ]
     out = REVIEWS / f"task-{tid}.md"

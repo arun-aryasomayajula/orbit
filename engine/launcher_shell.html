@@ -1,0 +1,171 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Orbit — Launcher</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🪐</text></svg>">
+<style>
+/* Same visual language as cc_shell.html (deep-space palette), kept fully
+   self-contained here — no external fonts/assets, this page must render
+   standalone before any project (or its own network) exists. */
+:root{
+  --void:#060913; --panel:#0D1424; --card:#131C32; --card2:#1A2542; --line:#1F2A44; --line2:#2B3A5C;
+  --ink:#E8EDF7; --dim:#8B96AC; --faint:#5A6478;
+  --amber:#FFB35C; --amber-dim:#4a3416; --green:#4ADE9C; --green-dim:#0d3526;
+  --blue:#7C9CFF; --blue-dim:#182a52; --red:#FF6B7A; --red-dim:#43181d;
+  --disp:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --body:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+}
+@media (prefers-color-scheme: light){
+  :root{
+    --void:#F4F6FB; --panel:#FFFFFF; --card:#F7F9FD; --card2:#EEF1F9; --line:#E1E6F0; --line2:#CDD5E6;
+    --ink:#161B26; --dim:#5C6577; --faint:#8991A3;
+    --amber-dim:#FFEBCF; --green-dim:#DCF9EC; --blue-dim:#E4EAFF; --red-dim:#FFE3E5;
+  }
+}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%}
+body{background:var(--void);color:var(--ink);font:14px/1.55 var(--body);
+  background-image:radial-gradient(1100px 500px at 85% -10%,rgba(124,156,255,.07),transparent 60%),
+                   radial-gradient(900px 420px at -10% 110%,rgba(255,179,92,.04),transparent 55%);
+  display:flex;justify-content:center;padding:56px 20px 80px}
+::selection{background:var(--blue-dim);color:var(--ink)}
+:focus-visible{outline:2px solid var(--blue);outline-offset:2px;border-radius:4px}
+
+#shell{width:100%;max-width:640px}
+header{display:flex;flex-direction:column;align-items:center;text-align:center;margin-bottom:28px}
+.orbmark{font-size:40px;line-height:1}
+header h1{font:700 20px var(--disp);letter-spacing:.14em;text-transform:uppercase;margin:10px 0 4px}
+header .sub{font:500 12.5px var(--mono);color:var(--dim);margin:0}
+
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px;margin-bottom:16px}
+.panel h2{font:600 10.5px var(--disp);letter-spacing:.18em;text-transform:uppercase;color:var(--faint);margin:0 0 12px}
+
+#importForm{display:flex;gap:8px}
+#importPath{flex:1;background:var(--card);border:1px solid var(--line2);color:var(--ink);border-radius:8px;
+  padding:9px 11px;font:500 12.5px var(--mono);min-width:0}
+#importPath:focus{outline:2px solid var(--blue);outline-offset:1px}
+#importPath::placeholder{color:var(--faint)}
+
+.btn{border:1px solid var(--line2);border-radius:7px;padding:8px 14px;font:600 12px var(--disp);
+  letter-spacing:.02em;cursor:pointer;background:var(--card);color:var(--ink);transition:filter .12s;white-space:nowrap}
+.btn:hover{filter:brightness(1.15)} .btn:active{transform:translateY(1px)} .btn:disabled{opacity:.45;cursor:not-allowed}
+.btn-go{background:var(--green-dim);border-color:#1d5c40;color:var(--green)}
+.btn-amber{background:var(--amber-dim);border-color:#7a5620;color:var(--amber)}
+.btn-blue{background:var(--blue-dim);border-color:#2b4f86;color:var(--blue)}
+.btn-ghost{background:transparent;color:var(--dim)}
+
+#msg{min-height:18px;font:500 11.5px var(--mono);color:var(--amber);margin:0 2px 14px;text-align:center}
+
+#projects{display:flex;flex-direction:column;gap:10px}
+.empty{font:500 12.5px var(--mono);color:var(--faint);text-align:center;padding:24px 0}
+.card{background:var(--card);border:1px solid var(--line2);border-radius:10px;padding:12px 14px}
+.card-h{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:2px}
+.card .name{font:600 13.5px var(--disp)}
+.b{font:600 9.5px var(--disp);letter-spacing:.06em;padding:2px 7px;border-radius:4px;text-transform:uppercase}
+.b-ok{background:var(--green-dim);color:var(--green)}
+.b-muted{background:var(--card2);color:var(--dim)}
+.card .path{font:500 11px var(--mono);color:var(--faint);word-break:break-all;margin-top:2px}
+.card .btns{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+<div id="shell">
+  <header>
+    <div class="orbmark">🪐</div>
+    <h1>Orbit</h1>
+    <p class="sub">pick a project</p>
+  </header>
+
+  <section class="panel">
+    <h2>Import a repo</h2>
+    <form id="importForm">
+      <input id="importPath" type="text" placeholder="/absolute/path/to/repo" autocomplete="off" spellcheck="false">
+      <button class="btn btn-blue" type="submit">Import</button>
+    </form>
+  </section>
+
+  <div id="msg"></div>
+
+  <section id="projects"></section>
+</div>
+
+<script>
+const TOKEN = "__TOKEN__";
+const POST_HDRS = {'Content-Type': 'application/json', 'X-CC-Token': TOKEN};
+
+function post(path, obj) {
+  return fetch(path, {method: 'POST', headers: POST_HDRS, body: JSON.stringify(obj || {})})
+    .then(r => r.json());
+}
+
+function esc(s) {
+  return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function setMsg(text) {
+  document.getElementById('msg').textContent = text || '';
+}
+
+function render(state) {
+  const list = document.getElementById('projects');
+  list.innerHTML = '';
+  if (!state.projects.length) {
+    list.innerHTML = '<div class="empty">No projects yet — import one above.</div>';
+    return;
+  }
+  state.projects.forEach(p => {
+    const card = document.createElement('div');
+    card.className = 'card';
+    const badges = [
+      p.loop_running ? '<span class="b b-ok">running</span>' : '',
+      !p.has_autopilot ? '<span class="b b-muted">not initialized</span>' : '',
+    ].join('');
+    const actionBtn = p.has_autopilot
+      ? `<button class="btn btn-go" data-act="open" data-path="${esc(p.path)}">Open</button>`
+      : `<button class="btn btn-amber" data-act="init" data-path="${esc(p.path)}">Initialize</button>`;
+    card.innerHTML = `
+      <div class="card-h"><span class="name">${esc(p.name)}</span>${badges}</div>
+      <div class="path">${esc(p.path)}</div>
+      <div class="btns">
+        ${actionBtn}
+        <button class="btn btn-ghost" data-act="remove" data-path="${esc(p.path)}">Remove</button>
+      </div>`;
+    list.appendChild(card);
+  });
+}
+
+function refresh() {
+  fetch('/_launcher/state').then(r => r.json()).then(render).catch(() => {});
+}
+
+document.addEventListener('click', e => {
+  const btn = e.target.closest('button[data-act]');
+  if (!btn) return;
+  const act = btn.dataset.act, path = btn.dataset.path;
+  if (act === 'remove' && !confirm(`Remove ${path} from the launcher?`)) return;
+  btn.disabled = true;
+  const route = {open: '/_launcher/open', init: '/_launcher/init', remove: '/_launcher/remove'}[act];
+  post(route, {path}).then(j => {
+    setMsg(j.msg || (j.ok ? 'done' : 'failed'));
+    if (act === 'open' && j.ok) { location.reload(); return; }
+    btn.disabled = false;
+    refresh();
+  }).catch(() => { setMsg('request failed'); btn.disabled = false; });
+});
+
+document.getElementById('importForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const input = document.getElementById('importPath');
+  const path = input.value.trim();
+  if (!path) return;
+  post('/_launcher/import', {path}).then(j => {
+    setMsg(j.msg || (j.ok ? 'imported' : 'failed'));
+    if (j.ok) input.value = '';
+    refresh();
+  }).catch(() => setMsg('request failed'));
+});
+
+refresh();
+setInterval(refresh, 4000);
+</script>
+</body></html>

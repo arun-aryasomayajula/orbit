@@ -115,6 +115,120 @@ gfile = g.get("file", "goldens/CALIBRATION.md")
 gpath = find(gfile) or (os.path.join(ORBIT_HOME, gfile) if os.path.exists(os.path.join(ORBIT_HOME, gfile)) else None)
 check("golden calibration resolves", bool(gpath), gpath or f"missing ({gfile})")
 
+# 5c. project knowledge base (optional — presence of knowledge/ is the switch).
+# Read-only: doctor never runs the survey. knowledge.py already does the real
+# (containment-checked) validation on build/refresh — this just re-confirms
+# the manifest still parses and its docs still exist, in doctor's own style.
+kdir = os.path.join(AP, "knowledge")
+kb_cfg = cfg.get("knowledge") if isinstance(cfg.get("knowledge"), dict) else {}
+if not os.path.isdir(kdir):
+    if kb_cfg.get("refresh") == "auto":
+        check("knowledge.refresh: auto but no knowledge base — run `orbit knowledge <target> build`", False)
+    # else: feature unused — print nothing (zero behavior change)
+else:
+    manifest_path = os.path.join(kdir, "manifest.json")
+    problem = None
+    docs = []
+    if not os.path.exists(manifest_path):
+        problem = f"manifest.json missing under {kdir}/"
+    else:
+        try:
+            manifest = json.load(open(manifest_path))
+        except (OSError, ValueError) as e:
+            manifest = None
+            problem = f"manifest.json is not valid JSON ({e})"
+        if manifest is not None:
+            if not isinstance(manifest, dict):
+                problem = "manifest.json must be a JSON object"
+            else:
+                docs = manifest.get("docs")
+                if not isinstance(docs, list) or not docs:
+                    problem = "manifest.json 'docs' must be a non-empty list"
+                    docs = []
+                else:
+                    missing = [d for d in docs if not isinstance(d, str) or not os.path.exists(os.path.join(kdir, d))]
+                    if missing:
+                        problem = "docs missing on disk: " + ", ".join(missing)
+    check("knowledge base", problem is None, problem or f"{len(docs)} doc(s)")
+
+    staleness_path = os.path.join(AP, "state", "knowledge-staleness.json")
+    if os.path.exists(staleness_path):
+        try:
+            staleness = json.load(open(staleness_path))
+            stale = staleness.get("stale_docs") if isinstance(staleness, dict) else None
+        except (OSError, ValueError):
+            stale = None
+        if isinstance(stale, list) and stale:
+            print(f"  · knowledge: {len(stale)} doc(s) stale — orbit knowledge <target> refresh")
+
+# 5d. task-level planning (optional — presence of a `plan:` config block is the
+# switch). Read-only surfacing: engine/config.py's `validate` subcommand already
+# checks enforce/categories/model *shapes* (run in section 1 above); this section
+# additionally (a) confirms the planner agent file actually resolves somewhere
+# Claude Code will load it from, and (b) checks every plan.categories entry names
+# a category the router actually knows about — a membership check config.py has
+# no way to make (it never reads router.yaml). Category source: `cats` (the
+# router.yaml `categories:` keys loaded in section 3 above) — the same source
+# section 6 below already uses to validate queue task categories against, so
+# plan.categories is held to the identical bar doctor already applies elsewhere.
+plan_cfg = cfg.get("plan") if isinstance(cfg.get("plan"), dict) else None
+if plan_cfg:
+    engine_planner = os.path.join(ORBIT_HOME, "agents", "planner.md")
+    target_agents_dir = os.path.join(TARGET, ".claude", "agents")
+    target_planner = os.path.join(target_agents_dir, "planner.md")
+    if os.path.exists(target_planner):
+        check("plan: agents/planner.md resolves", True, f"target: {target_planner}")
+    elif os.path.exists(engine_planner):
+        detail = f"engine: {engine_planner}"
+        if os.path.isdir(target_agents_dir):
+            detail += " (not yet synced into target .claude/agents/ — run `orbit sync`)"
+        check("plan: agents/planner.md resolves", True, detail)
+    else:
+        check("plan: agents/planner.md resolves", False,
+              f"missing — checked target ({target_planner}) and engine ({engine_planner})")
+
+    enforce = plan_cfg.get("enforce", "verifier")
+    check('plan.enforce is "verifier" or "block"', enforce in ("verifier", "block"),
+          "" if enforce in ("verifier", "block")
+          else f"got {enforce!r} (config validate also flags this)")
+
+    plan_cats = plan_cfg.get("categories")
+    if isinstance(plan_cats, list) and all(isinstance(c, str) for c in plan_cats):
+        unknown = sorted({c for c in plan_cats if c not in cats})
+        check("plan.categories are known router categories", not unknown,
+              "" if not unknown else "UNKNOWN: " + ", ".join(unknown))
+
+# 5e. QA runtime environment (optional — presence of a `qa:` config block is
+# the switch; feature unused → zero behavior change, same convention as 5c/5d).
+# Read-only: doctor never launches Playwright MCP or the target app — it only
+# confirms the environment CAN run qa_check.py once Task 14 lands. Playwright
+# MCP itself is fetched by `npx` at QA-run time (never an engine dependency),
+# so node+npx resolving on PATH is the actual precondition; whether Playwright
+# is already cached is advisory only (`npx playwright install` is an operator
+# act, not something doctor can or should do).
+qa_cfg = cfg.get("qa") if isinstance(cfg.get("qa"), dict) else None
+if qa_cfg is not None:
+    node = shutil.which("node")
+    npx = shutil.which("npx")
+    check("qa: node on PATH", bool(node), node or "NOT FOUND — install Node.js (qa: requires it)")
+    check("qa: npx on PATH", bool(npx), npx or "NOT FOUND — install Node.js (bundles npx; qa: requires it)")
+    if npx:
+        # Bounded + non-interactive: doctor must stay fast and read-only. An
+        # uncached Playwright can make npx try to resolve/download it from the
+        # registry (slow, or a hang on a flaky/offline network) — a short
+        # timeout turns that into the same advisory line as any other miss,
+        # never a doctor hang.
+        try:
+            pw_ok = subprocess.run([npx, "playwright", "--version"], capture_output=True,
+                                    stdin=subprocess.DEVNULL, timeout=10).returncode == 0
+        except (subprocess.TimeoutExpired, OSError):
+            pw_ok = False
+        if not pw_ok:
+            print("  · qa: `npx playwright --version` failed — it will be fetched on first QA run "
+                  "(or install ahead of time: npx playwright install)")
+    if cfg.get("runtime_check"):
+        print("  · qa: supersedes runtime_check: as the post-commit gate")
+
 # 6. dry-run routing over the queue (if present)
 qf = os.path.join(AP, "state", "queue.json")
 if os.path.exists(qf):

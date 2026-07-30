@@ -67,6 +67,55 @@ awaiting/orphan. Deleting an unmerged branch (awaiting or orphan) always
 requires a per-branch confirm with an extra warning that its work may be
 unreviewed.
 
+## QA evidence on cards
+
+When the target repo has a `qa:` config block, a browser-driving QA agent
+proves each ship in the running product (screenshots, logs, a written
+verdict) before it's pushed:
+
+- **Escalations** that hit the QA bounce cap show the evidence right on the
+  card: a screenshot thumbnail (click to open full-size) and a 📄 findings
+  report link, served straight from `.autopilot/state/qa/task-<id>/` on your
+  own dashboard — nothing external.
+- **Ships** cards carry a **QA: fail** badge (red) when that task's history
+  includes a QA failure that reached the bounce cap — most often an
+  escalation you later merged or rejected anyway. No badge means the QA gate
+  never recorded a failing verdict against it (it passed, ran unable, or
+  wasn't checked).
+
+## QA view (flow library)
+
+A **QA** tab appears in the nav only when the target repo has at least one
+taught flow (`orbit teach`) — invisible otherwise.
+
+- **🧹 Sweep flows now** — replays every APPROVED flow (has a `steps.json` —
+  replay-proven at least once, not merely taught), right now, capped by
+  `qa.regression.max_flows_per_run`. This is the human "do it now" button;
+  it ignores the cursor/cadence that gates the loop's own automatic sweep
+  (`--regression --if-changed`, run after every cycle).
+- **🔭 Explore now** — appears only when `qa.exploratory.enabled: true`;
+  kicks off a bounded, same-origin crawl from `qa.base_url` looking for real
+  defects (console errors, broken navigation, dead links). It never writes a
+  verdict — new findings land as fresh `ops/qa/SEEN.md` rows, the same
+  triage pipeline any other signal flows through.
+- **Flow library** — one row per taught flow: its name, its one-line intent,
+  a verdict badge for the last replay (green = pass, red = fail, amber =
+  healed or unable, grey = never run), how long ago it last ran and how many
+  times, and a **▶ Run** button that kicks off `orbit qa --flow <name>`
+  right from the dashboard (detached — the page doesn't wait on it).
+- **Recent runs** — the 10 newest run verdicts across all flows: badge, flow
+  name, one-line summary, and a screenshot link when the run captured one.
+- **Pending heals** — each waiting heal candidate (the flow's intent still
+  held, but the UI drifted enough that the replay needed a clearly-equivalent
+  path) gets its own card: the flow name, the mined reason, a step diff, and
+  a screenshot when the replay captured one. **Approve heal** overwrites that
+  flow's own committed `steps.json` with the corrected steps (confirm first —
+  this is the one machine write the dashboard makes into a committed dir) and
+  archives the candidate; **Reject** requires a one-line reason, archives the
+  candidate, and leaves the flow's steps untouched. Either action clears the
+  candidate off the pending strip; you still review and commit the flow
+  dir's resulting git diff like any other change.
+
 ## Safety facts
 
 - Every task ships on its own branch; nothing merges without a human click.

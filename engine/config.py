@@ -88,6 +88,99 @@ def validate(target):
             errs.append(f"gate '{name}' has no cmd")
     if cfg.get("pull_requests") not in ("off", "github"):
         errs.append(f"pull_requests must be \"off\" or \"github\", got {cfg.get('pull_requests')!r}")
+    if "knowledge" in raw and raw["knowledge"] is not None:
+        kb = raw["knowledge"]
+        if not isinstance(kb, dict):
+            errs.append(f"knowledge must be a mapping, got {kb!r}")
+        else:
+            if "refresh" in kb and kb["refresh"] not in ("manual", "auto"):
+                errs.append(f"knowledge.refresh must be \"manual\" or \"auto\", got {kb.get('refresh')!r}")
+            for field in ("stale_after_merges", "timeout_seconds"):
+                if field in kb and (not isinstance(kb[field], int) or isinstance(kb[field], bool) or kb[field] <= 0):
+                    errs.append(f"knowledge.{field} must be a positive integer, got {kb.get(field)!r}")
+    if "plan" in raw and raw["plan"] is not None:
+        pl = raw["plan"]
+        if not isinstance(pl, dict):
+            errs.append(f"plan must be a mapping, got {pl!r}")
+        else:
+            if "enforce" in pl and pl["enforce"] not in ("verifier", "block"):
+                errs.append(f"plan.enforce must be \"verifier\" or \"block\", got {pl.get('enforce')!r}")
+            if "categories" in pl:
+                cats = pl["categories"]
+                if not isinstance(cats, list) or not all(isinstance(c, str) and c for c in cats):
+                    errs.append(f"plan.categories must be a list of non-empty strings, got {cats!r}")
+            if "model" in pl and (not isinstance(pl["model"], str) or not pl["model"]):
+                errs.append(f"plan.model must be a non-empty string, got {pl.get('model')!r}")
+    if "qa" in raw and raw["qa"] is not None:
+        qa = raw["qa"]
+        if not isinstance(qa, dict):
+            errs.append(f"qa must be a mapping, got {qa!r}")
+        else:
+            if "services" in qa:
+                svcs = qa["services"]
+                if not isinstance(svcs, list):
+                    errs.append(f"qa.services must be a list, got {svcs!r}")
+                else:
+                    for i, svc in enumerate(svcs):
+                        if not isinstance(svc, dict):
+                            errs.append(f"qa.services[{i}] must be a mapping, got {svc!r}")
+                            continue
+                        if not isinstance(svc.get("launch"), str) or not svc.get("launch"):
+                            errs.append(f"qa.services[{i}].launch must be a non-empty string, got {svc.get('launch')!r}")
+                        for field in ("name", "cwd", "ready"):
+                            if field in svc and not isinstance(svc[field], str):
+                                errs.append(f"qa.services[{i}].{field} must be a string, got {svc[field]!r}")
+            for field in ("base_url", "model", "browser"):
+                if field in qa and (not isinstance(qa[field], str) or not qa[field]):
+                    errs.append(f"qa.{field} must be a non-empty string, got {qa.get(field)!r}")
+            if "flows_dir" in qa:
+                fd = qa["flows_dir"]
+                if (not isinstance(fd, str) or not fd.strip() or fd.startswith("/")
+                        or ".." in fd.split("/")):
+                    errs.append(
+                        f"qa.flows_dir must be a non-empty relative path with no leading "
+                        f"'/' and no '..' segments, got {fd!r}")
+            if "mcp_config" in qa and qa["mcp_config"] is not None and not isinstance(qa["mcp_config"], str):
+                errs.append(f"qa.mcp_config must be a string or null, got {qa.get('mcp_config')!r}")
+            for field in ("ready_timeout_seconds", "timeout_seconds"):
+                if field in qa and (not isinstance(qa[field], int) or isinstance(qa[field], bool) or qa[field] <= 0):
+                    errs.append(f"qa.{field} must be a positive integer, got {qa.get(field)!r}")
+            if "headless" in qa and not isinstance(qa["headless"], bool):
+                errs.append(f"qa.headless must be a boolean, got {qa.get('headless')!r}")
+            if "max_bounces" in qa and (not isinstance(qa["max_bounces"], int) or isinstance(qa["max_bounces"], bool) or qa["max_bounces"] < 0):
+                errs.append(f"qa.max_bounces must be a non-negative integer, got {qa.get('max_bounces')!r}")
+            if "gate_categories" in qa:
+                gc = qa["gate_categories"]
+                if not isinstance(gc, dict):
+                    errs.append(f"qa.gate_categories must be a mapping, got {gc!r}")
+                else:
+                    for k, v in gc.items():
+                        if not isinstance(k, str) or not k or v not in ("required", "evidence"):
+                            errs.append(f"qa.gate_categories entries must map non-empty strings to \"required\" or \"evidence\", got {k!r}: {v!r}")
+            if "env" in qa:
+                envv = qa["env"]
+                if not isinstance(envv, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in envv.items()):
+                    errs.append(f"qa.env must be a mapping of string to string, got {envv!r}")
+            if "regression" in qa:
+                reg = qa["regression"]
+                if not isinstance(reg, dict):
+                    errs.append(f"qa.regression must be a mapping, got {reg!r}")
+                else:
+                    if "on_merge" in reg and not isinstance(reg["on_merge"], bool):
+                        errs.append(f"qa.regression.on_merge must be a boolean, got {reg.get('on_merge')!r}")
+                    if "schedule_hours" in reg and (not isinstance(reg["schedule_hours"], int) or isinstance(reg["schedule_hours"], bool) or reg["schedule_hours"] < 0):
+                        errs.append(f"qa.regression.schedule_hours must be a non-negative integer, got {reg.get('schedule_hours')!r}")
+                    if "max_flows_per_run" in reg and (not isinstance(reg["max_flows_per_run"], int) or isinstance(reg["max_flows_per_run"], bool) or reg["max_flows_per_run"] <= 0):
+                        errs.append(f"qa.regression.max_flows_per_run must be a positive integer, got {reg.get('max_flows_per_run')!r}")
+            if "exploratory" in qa:
+                exp = qa["exploratory"]
+                if not isinstance(exp, dict):
+                    errs.append(f"qa.exploratory must be a mapping, got {exp!r}")
+                else:
+                    if "enabled" in exp and not isinstance(exp["enabled"], bool):
+                        errs.append(f"qa.exploratory.enabled must be a boolean, got {exp.get('enabled')!r}")
+                    if "max_pages" in exp and (not isinstance(exp["max_pages"], int) or isinstance(exp["max_pages"], bool) or exp["max_pages"] <= 0):
+                        errs.append(f"qa.exploratory.max_pages must be a positive integer, got {exp.get('max_pages')!r}")
     if errs:
         print("\n".join("  ✗ " + e for e in errs)); sys.exit(1)
     print("  ✓ config valid")

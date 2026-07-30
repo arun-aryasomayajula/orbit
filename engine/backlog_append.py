@@ -101,11 +101,81 @@ def set_task_field(backlog: Path, tid: str, field: str, value: str) -> bool:
     block = text[start.end():end]
     pat = re.compile(rf"^(\s*){re.escape(field)}:.*$", re.MULTILINE)
     if pat.search(block):
-        block = pat.sub(rf"\g<1>{field}: {value}", block, count=1)
+        # A callable replacement — never a template string. `value` is
+        # untrusted-shaped (e.g. QA findings folded via json.dumps, which can
+        # contain backslash-escapes like `—` for an em dash): fed through
+        # re.sub's TEMPLATE parser (as `rf"\g<1>{field}: {value}"` used to),
+        # `\u` isn't a recognized replacement escape and raises `re.error: bad
+        # escape \u`. A lambda's return value is spliced in literally, with no
+        # backslash reinterpretation, so `value` is always treated as data.
+        block = pat.sub(lambda m: f"{m.group(1)}{field}: {value}", block, count=1)
     else:
         block = f"\n{start.group(1)}  {field}: {value}" + block
     backlog.write_text(text[:start.end()] + block + text[end:])
     return True
+
+
+def _strip_inline_comment(raw: str) -> str:
+    """Best-effort trailing-`# comment` stripper for one YAML scalar's raw
+    text (no full tokenizer — this repo's fields are simple bare/quoted
+    scalars, never flow collections).
+
+    Unquoted scalar (e.g. `2  # note`): a YAML comment starts at a `#` that
+    is preceded by whitespace (or is the whole value) — strip from there.
+    Quoted scalar (single or double): a `#` inside the quotes is CONTENT,
+    not a comment (`qa_findings: "drove the flow — see #3"` must keep the
+    `#3`) — scan past the matching closing quote (honoring `\"` escapes in
+    double-quoted, `''` escapes in single-quoted) and drop only what follows
+    it.
+    """
+    s = raw.strip()
+    if not s or s[0] not in ('"', "'"):
+        m = re.search(r"(?:^|\s)#.*$", s)
+        return s[:m.start()].rstrip() if m else s
+    quote = s[0]
+    i = 1
+    while i < len(s):
+        c = s[i]
+        if c == quote:
+            if quote == '"':
+                nbackslash = 0
+                j = i - 1
+                while j >= 0 and s[j] == "\\":
+                    nbackslash += 1
+                    j -= 1
+                if nbackslash % 2 == 1:          # escaped quote (\") — not the close
+                    i += 1
+                    continue
+            elif i + 1 < len(s) and s[i + 1] == "'":   # '' inside a single-quoted scalar
+                i += 2
+                continue
+            return s[:i + 1]                      # closing quote — trailing text dropped
+        i += 1
+    return s        # no closing quote found (malformed) — return everything, best-effort
+
+
+def get_task_field(backlog: Path, tid: str, field: str) -> str | None:
+    """Read one scalar field's raw (un-parsed) value off one task's block.
+
+    Sibling reader to `set_task_field` — same block-location discipline
+    (locate `- id:`, bound at the next `- id:`), no YAML round-trip. Strips
+    a trailing inline `# comment` (see `_strip_inline_comment`) so a
+    hand-annotated field (`qa_bounces: 2  # bumped by hand`) still reads
+    cleanly. Returns the raw text after `field:` (still quoted/escaped if it
+    was written quoted — callers that need the Python value should
+    json/yaml-decode it themselves). → None if the task isn't in the
+    backlog, or the field isn't present on its block.
+    """
+    text = backlog.read_text()
+    start = re.search(rf"^(\s*)- id:\s*{re.escape(tid)}\s*(?:#.*)?$", text, re.MULTILINE)
+    if not start:
+        return None
+    nxt = re.search(r"^\s*- id:\s*\S", text[start.end():], re.MULTILINE)
+    end = start.end() + (nxt.start() if nxt else len(text) - start.end())
+    block = text[start.end():end]
+    pat = re.compile(rf"^\s*{re.escape(field)}:(.*)$", re.MULTILINE)
+    m = pat.search(block)
+    return _strip_inline_comment(m.group(1)) if m else None
 
 
 def append_tasks(backlog: Path, proposals: list[dict], source: str,

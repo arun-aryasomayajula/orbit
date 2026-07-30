@@ -39,17 +39,97 @@ the service's KeepAlive + backoff). Each iteration:
    - **atomic commit** on the detached HEAD; write a review packet.
 4. **Push** — the wrapper (not the agent) pushes the commit to `origin/<branch_prefix>/task-<id>`, records it in the ledger, notifies.
 
+**Task-level planning (optional, step 2.8)** — when the target's config carries a
+`plan:` block, a **planner** subagent runs before the maker, for every task whose
+category is in `plan.categories` (absent = every workable category), writing a
+justified per-task plan — approach, a `plan_scope` file-scope fence, applicable
+standards — to `reviews/task-<id>-plan.md`; the maker/checker/verifier are all
+briefed with it, and the maker is told to touch only the fenced `edit`/`create`
+paths. The verify-spec step (3.5) always judges a diff outside that fence as
+NONCONFORMING once a plan exists; `plan.enforce: "block"` additionally has the
+wrapper run `engine/plan_gate.py` — a deterministic scope-fence gate — right
+before push (ahead of the QA gate), refusing to ship (escalating instead) any
+commit touching a file outside the plan's scope.
+
+**The QA gate (optional, between commit and push)** — right after the cycle
+commits, `engine/qa_check.py` decides whether to ship, bounce, or escalate. No
+`qa:` block in the target's config → the LEGACY path, byte-for-byte the retired
+`runtime_check.py`'s behaviour (`runtime_check:` config, `/orbit-runtime-check`
+skill). A `qa:` block → the QA path supersedes it: a browser-driving
+`/orbit-qa-check` agent launches (or attaches to) the product via a per-run
+Playwright MCP server, drives the flow the acceptance criteria name, and judges
+it against `qa.gate_categories`. Exit codes:
+
+| exit | meaning |
+|------|---------|
+| 0 | ship — pass, unable-to-run, the check is off/not-configured for this category, or an agent/wiring error (never blocks) |
+| 3 | escalate — legacy: an observed contradiction on a `required` category; QA: a `fail` verdict on `required` at the bounce cap (or any unexpected error inside the bounce path itself, as a safe fallback) |
+| 4 | QA bounce (QA path only) — `fail` on `required`, still under `qa.max_bounces`: the SAME task is re-queued (`status: queued`) with the QA findings folded into its contract (`qa_findings`) for the next pick |
+
+The dev⇄QA loop still respects machines-propose/humans-dispose: a bounce only
+ever re-files a task ALREADY on the queue — no new task is created and no human
+click is skipped for it. Unrelated bugs the QA agent notices along the way never
+move that task's verdict; they're appended to `ops/qa/SEEN.md` and flow through
+the ordinary discovery pipeline instead (the `qa` signal adapter turns them into
+`status: proposed` tasks for a human to triage), same as any other
+adapter-sourced finding.
+
+**The flow library (teach mode, optional, decoupled from the cycle)** — where the QA
+gate above proves ONE task's acceptance criteria, `orbit teach` builds a standing,
+committed flow map: a human records a browser flow once (Playwright `codegen`), states
+its intent + success criteria, and Orbit writes `intent.md` + `steps.spec.ts` +
+`meta.json` under `.autopilot/<qa.flows_dir>/<name>/` (indexed in one `FLOWMAP.md`) for a
+human to `git add`/commit — human-gated, not human-only: every machine write lands
+only via the recording session, the first-replay `steps.json`, or verdict metadata,
+and all of it is reviewed in the flow dir's own git diff before it's committed.
+`orbit qa <target> --flow <name>` then replays it independently, any time, via the same
+`/orbit-qa-flow` skill and Playwright MCP wiring the QA gate uses, grading the run
+against the flow's own intent rather than a task's criteria. It's the supervised-
+learning loop in miniature: the human demonstrates once, the machine imitates it
+thereafter, and drift never edits the demonstration in place — a UI change that still
+honors the intent mines a **heal candidate** under `$AP_STATE/qa/heal/`, gated on human
+approval (the dashboard's QA view surfaces each candidate with its diff and a
+screenshot; **Approve** overwrites that flow's own `steps.json` with the corrected
+steps, **Reject** requires a reason and leaves it untouched — either way you review
+and commit the resulting flow-dir diff yourself, same as `teach`), while a genuine
+break grades **fail** and feeds `ops/qa/SEEN.md` into the same triage pipeline any
+other signal adapter uses. `steps.json` — the normalized, healable step list — is
+written by the replay agent itself, only on the first fully clean pass (`teach` never
+writes it), and reviewed/committed the same way as any other flow-dir change.
+
+**Closing the loop:** `orbit qa --regression` is what keeps this whole supervised-
+learning cycle honest over time rather than only at the moment a task's own QA gate
+happens to touch a page. A cursor-triggered (loop-driven, on merge/cadence) or
+human "sweep now" run replays every approved flow — teach once, replay on demand,
+heal what drifts with a human's approval, and sweep the library on a schedule so
+regressions on flows NO current task is touching still surface, feed `SEEN.md`, and
+come back around as proposed work. Teach → replay → heal-candidate → human approves
+→ regression sweep is the supervised-learning story in full: the machine imitates
+and mines corrections, but every write that sticks — the taught flow, the healed
+steps, the merge that ships — passes through a human click first.
+
 ## Model tiering (grounded in evidence, not vibes)
 The router assigns opus to hard-judgment categories (bug/feature/refactor/security) and sonnet to
 directed work (docs/deps/testing) where a smaller model is at parity — cheaper without quality loss.
 `verification-before-completion` is mandatory on every task: execute the gate, show real output.
 
-## Skills vs tracks (no duplication)
+## Four reference types (no duplication)
 - **Skills** carry *general method* — invoked by the orchestrator (it holds the Skill tool; the
   restricted-tool makers don't), folded into the maker brief. e.g. bug→systematic-debugging,
   testing→test-driven-development, refactor→simplify, docs→write-docs, security→security-review.
 - **Tracks** carry *repo-specific facts* — gotchas, invariants, pattern-file pointers no general
   skill knows. The engine ships generic templates; a target fills them in under `.autopilot/tracks/`.
+- **Goldens** carry *graded exemplars* of good output — what "good" looks like for a category,
+  mined from this repo's own ledger (`goldens/LEARNED.md`) alongside the engine's calibration.
+- **Knowledge** carries *mapped project structure* — the endpoints→tables map, ER diagram, flows,
+  and conventions `orbit knowledge build` surveys once and keeps fresh (`engine/knowledge.py`),
+  committed under `.autopilot/knowledge/`. Loaded at cycle step 2.7 (only what a task
+  implicates, not the whole base) whenever `knowledge/INDEX.md` exists — zero behaviour change
+  otherwise. Staleness is tracked via merge markers, not file mtimes: `orbit knowledge status`
+  maps merges landed after the manifest's `generated_at` to the files they touched, and those
+  files to the docs the manifest says they feed, so a maker is warned before trusting a doc a
+  later merge invalidated. Human-reviewed like code, but code wins — a contradiction is noted,
+  not silently trusted.
 
 ## State
 The ledger's `state` field moves through an explicit machine — `engine/lifecycle.py`, the single

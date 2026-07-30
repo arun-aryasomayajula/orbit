@@ -22,6 +22,7 @@ All edits are block-level text edits on backlog.yaml (comments preserved) follow
 by re-running backlog_to_tasks.py so the loop queue reflects them immediately.
 """
 from __future__ import annotations
+import atexit
 import hmac
 import json
 import os
@@ -31,6 +32,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 from datetime import datetime, timedelta, timezone
@@ -40,6 +42,10 @@ from pathlib import Path
 import yaml
 
 from backlog_lint import lint_task
+from backlog_append import SLUG_RE
+from qa_teach import _bad_flows_dir_reason
+import qa_env
+import qa_teach
 
 # ── path model ───────────────────────────────────────────────────────────────
 # ENGINE       : this repo's engine dir (ships command_center.py, its converter,
@@ -110,6 +116,12 @@ PORT = int(os.environ.get("PORT", "8787"))
 SHELL_FILE = ENGINE / "cc_shell.html"         # the SPA shell — read per request so design edits go live on refresh
 REVIEWS = AP_STATE / "reviews"                # per-ship review packets (review_packet.py)
 DIFFDIR = AP_STATE / "diffs"                  # wrapper backup patches
+QA_DIR = AP_STATE / "qa"                      # QA gate screenshots/reports (confined /qa-shot, /qa-report)
+DEFAULT_QA_FLOWS_DIR = "qa/flows"             # mirrors qa_teach.py/qa_run.py's own default — the bare
+                                               # string constant is still each script's own tiny copy (see
+                                               # qa_teach.py's _bad_flows_dir_reason comment for why that's
+                                               # fine); the shape/escape check itself IS shared — imported
+                                               # below and used by _qa_flows_root, never re-implemented here.
 # launchd job label (used only to detect whether the daemon is loaded).
 LAUNCHD_LABEL = os.environ.get("ORBIT_LAUNCHD_LABEL", "com.orbit.autopilot")
 # Dollar spend is informational only — displayed, never a cap (the wrapper's
@@ -165,7 +177,7 @@ GUIDE_FILES = [AP_HOME / "GUIDE.md", ORBIT_HOME / "docs" / "OPERATOR-GUIDE.md"]
 #  - cross-origin POSTs are rejected (Origin/Referer must be same-origin).
 #  - POSTs require a per-process token (in-memory, embedded in the SPA), so a
 #    malicious page can't forge a request (it can't read the token cross-origin).
-_TOKEN = secrets.token_urlsafe(18)
+_TOKEN = os.environ.get("CC_TOKEN") or secrets.token_urlsafe(18)  # shared token when spawned by the launcher; else per-process
 _ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}", f"[::1]:{PORT}"}
 _TID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 
@@ -1064,6 +1076,1547 @@ def read_patch(tid: str) -> str | None:
     return p.read_text(errors="ignore")[:400_000]
 
 
+# ── QA evidence routes (/qa-shot, /qa-report) ─────────────────────────────────
+# Unlike read_patch (which trusts a ledger-recorded path), the candidate path
+# here comes straight off the query string — untrusted. `_qa_path_ok` is a
+# cheap shape gate (charset/length, no absolute path, no ".." segment) run
+# BEFORE any filesystem touch; read_qa_shot/read_qa_report then apply the
+# read_patch confinement template (resolve → assert resolved-under-root, which
+# also catches symlink escapes a ".."-free string can still pull off → is_file)
+# plus an extension allowlist and a size cap.
+_QA_PATH_RE = re.compile(r"^[A-Za-z0-9._/\-]{1,200}$")
+_QA_SHOT_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
+_QA_REPORT_EXTS = {".md", ".txt", ".log", ".json"}
+_QA_MAX_BYTES = 5 * 1024 * 1024
+
+
+def _qa_path_ok(p: str) -> bool:
+    return bool(p) and bool(_QA_PATH_RE.match(p)) and not p.startswith("/") and ".." not in p.split("/")
+
+
+def _qa_resolve(p: str) -> Path | None:
+    # Same confinement template as read_patch: resolve → assert the RESOLVED
+    # path is under the RESOLVED root → is_file(). Resolving (not just string
+    # concatenation) is what catches a symlink inside qa/ pointing outside it.
+    root = QA_DIR.resolve()
+    resolved = (QA_DIR / p).resolve()
+    if not str(resolved).startswith(str(root) + os.sep) or not resolved.is_file():
+        return None
+    return resolved
+
+
+def read_qa_shot(p: str) -> tuple[bytes, str] | None:
+    # Serve a QA screenshot — $AP_STATE/qa/<p>. `p`'s shape is pre-validated by
+    # the caller (do_GET's _qa_path_ok); confinement + extension + size here.
+    resolved = _qa_resolve(p)
+    if resolved is None:
+        return None
+    ctype = _QA_SHOT_TYPES.get(resolved.suffix.lower())
+    if ctype is None or resolved.stat().st_size > _QA_MAX_BYTES:
+        return None
+    return resolved.read_bytes(), ctype
+
+
+def read_qa_report(p: str) -> str | None:
+    # Serve a QA report/log — $AP_STATE/qa/<p>. Same confinement as
+    # read_qa_shot, text-extension allowlist instead of image types.
+    resolved = _qa_resolve(p)
+    if resolved is None:
+        return None
+    if resolved.suffix.lower() not in _QA_REPORT_EXTS or resolved.stat().st_size > _QA_MAX_BYTES:
+        return None
+    return resolved.read_text(errors="ignore")[:400_000]
+
+
+# ── onboarding: knowledge-base doc browser (confined GET /api/knowledge-doc) ──
+# Same confinement template as _qa_resolve/read_qa_report, plus one extra gate:
+# the name must be an exact match against a LIVE directory listing (not merely
+# shape-valid) — the allowlist here is "whatever knowledge.py actually wrote",
+# not "anything that looks like a filename". A shape-valid name for a file
+# that doesn't exist (or was deleted) must never fall through to a read.
+_KDOC_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,120}$")
+_KDOC_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _knowledge_dir() -> Path:
+    return AP_HOME / "knowledge"
+
+
+def _knowledge_docs() -> list[str]:
+    """Names of files directly under $AP_HOME/knowledge/ — the allowlist for
+    both build_state's onboarding.knowledge_docs and read_knowledge_doc.
+    Never raises: an absent/unreadable dir just yields no docs."""
+    d = _knowledge_dir()
+    if not d.is_dir():
+        return []
+    try:
+        return sorted(p.name for p in d.iterdir() if p.is_file() and _KDOC_NAME_RE.match(p.name))
+    except OSError:
+        return []
+
+
+def read_knowledge_doc(name: str) -> str | None:
+    """Serve one knowledge doc — $AP_HOME/knowledge/<name>. `name` must both
+    be shape-valid AND currently listed by _knowledge_docs() (the real
+    allowlist), then resolve → assert the RESOLVED path is under the
+    RESOLVED root → is_file() (catches a symlink escape the same way
+    _qa_resolve does)."""
+    if not isinstance(name, str) or name not in _knowledge_docs():
+        return None
+    root = _knowledge_dir().resolve()
+    resolved = (_knowledge_dir() / name).resolve()
+    if not str(resolved).startswith(str(root) + os.sep) or not resolved.is_file():
+        return None
+    if resolved.stat().st_size > _KDOC_MAX_BYTES:
+        return None
+    try:
+        # No further truncation below the size gate above: a 400_000-char
+        # slice on a file already confirmed <= _KDOC_MAX_BYTES (2 MB) bytes
+        # used to cut a ~400 KB-2 MB graph.json off mid-object, serving
+        # invalid JSON the client's JSON.parse then correctly (but
+        # misleadingly) reported as "malformed — rebuild" for a file that
+        # was actually fine on disk. Serve the whole allowed size.
+        return resolved.read_text(errors="ignore")
+    except OSError:
+        return None
+
+
+# ── vendored client-side libs (confined GET /vendor/<file>) ──────────────────
+# The Knowledge view's graph mode loads cytoscape.js from here. Unlike
+# read_knowledge_doc (allowlist = a live directory listing), the vendor
+# allowlist is a FIXED small dict — there is never a reason to add a file to
+# this route without a code change, so "in the dict" is the whole gate; no
+# shape regex needed, an exact-match dict lookup already rejects every
+# traversal/encoding trick (a name like "../command_center.py" or
+# "%2e%2e%2fcommand_center.py" simply isn't a key). Same resolve → assert
+# resolved-under-root → is_file confinement as _qa_resolve/read_knowledge_doc
+# underneath, belt-and-suspenders against a symlink inside vendor/.
+_VENDOR_DIR = ENGINE / "vendor"
+_VENDOR_ALLOW = {"cytoscape.min.js": "application/javascript"}
+
+
+def read_vendor(name: str) -> tuple[bytes, str] | None:
+    """Serve one vendored lib — engine/vendor/<name>. `name` must be an exact
+    key in _VENDOR_ALLOW (the whole allowlist), then resolve → assert the
+    RESOLVED path is under the RESOLVED root → is_file()."""
+    ctype = _VENDOR_ALLOW.get(name)
+    if ctype is None:
+        return None
+    root = _VENDOR_DIR.resolve()
+    resolved = (_VENDOR_DIR / name).resolve()
+    if not str(resolved).startswith(str(root) + os.sep) or not resolved.is_file():
+        return None
+    return resolved.read_bytes(), ctype
+
+
+# ── QA flow library (Task 23) — the dashboard's QA view ──────────────────────
+# Data sources: $AP_HOME/<flows_dir>/<name>/{intent.md, meta.json} (the flow-
+# file format Task 20's `orbit teach` writes — see qa_teach.py), $AP_STATE/
+# qa/runs/*.json (run verdicts Task 21's replay skill writes, read by Task
+# 22's qa_run.py), $AP_STATE/qa/heal/*.json (heal candidates the replay skill
+# mines — Task 26's do_qa_action heal-approve/heal-reject are the human gate
+# that approves/rejects them; this view surfaces each pending one).
+_FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)$", re.DOTALL)
+
+
+def _qa_flows_root() -> Path:
+    # Bad/escaping flows_dir shapes (absolute, '..' segments, empty/non-string
+    # — same _bad_flows_dir_reason `orbit teach`/`orbit qa` enforce with a
+    # loud exit 2) fall back to the default here instead: this feeds a poll
+    # loop (build_state → /api/state every ~3s), which must never error on a
+    # bad config value the way a one-shot CLI is allowed to.
+    cfg = _load_cfg()
+    qa_cfg = cfg.get("qa") if isinstance(cfg.get("qa"), dict) else {}
+    flows_dir = qa_cfg.get("flows_dir")
+    if _bad_flows_dir_reason(flows_dir):
+        flows_dir = DEFAULT_QA_FLOWS_DIR
+    return AP_HOME / flows_dir
+
+
+def _qa_exploratory_enabled() -> bool:
+    """True iff `qa.exploratory.enabled` is exactly `true` in config.yaml —
+    the SAME gate qa_run.py's `--explore` enforces (exit 2 otherwise, see its
+    `_run_explore`). Both the dashboard's Explore button (via qa_flows'
+    `explore_enabled`) and do_qa_action's `run-explore` action read this, so
+    the two can never disagree about whether exploratory crawling is on."""
+    cfg = _load_cfg()
+    qa_cfg = cfg.get("qa") if isinstance(cfg.get("qa"), dict) else {}
+    exploratory_cfg = qa_cfg.get("exploratory") if isinstance(qa_cfg.get("exploratory"), dict) else {}
+    return exploratory_cfg.get("enabled") is True
+
+
+QA_LOCK_NAME = ".qa-running"   # mirrors engine/qa_run.py's own LOCK_NAME — the
+                                # one lock shared by --regression/--explore/--generate.
+
+
+def _qa_browser_busy() -> bool:
+    """True iff qa_run.py's shared `.qa-running` lock file is present — a
+    regression sweep, exploratory crawl, OR generate pass already has the
+    browser (all three drive it against the same qa.base_url and share one
+    lock — see qa_run.py's own module docstring). Existence-only, NOT
+    staleness-checked the way qa_run.py's own `_acquire_lock` is: this only
+    ever feeds a UI hint (disabling the dashboard's "Generate tests" button
+    so a double-click doesn't even bother trying — qa_run.py's own lock,
+    staleness and all, is still the actual correctness guard underneath).
+    A lock left behind by a crashed run keeps this reading True until
+    qa_run.py's own next invocation replaces it — nothing here writes or
+    removes the lock itself."""
+    return (QA_DIR / QA_LOCK_NAME).exists()
+
+
+def _read_flow_intent(flow_dir: Path) -> tuple[str | None, str | None]:
+    """(intent_line, entry_path) from a flow's intent.md: frontmatter
+    (name/created/entry_path/tags) + the user's free-text intent (see
+    qa_teach.py's _render_intent_md — this is that format's reader). Never
+    raises: a missing file, unreadable bytes, no frontmatter, or a bad YAML
+    block all yield (None, None) rather than crash build_state (Task 23
+    requirement — a hand-edited or corrupt flow dir must still list)."""
+    try:
+        text = (flow_dir / "intent.md").read_text()
+    except OSError:
+        return None, None
+    m = _FRONTMATTER_RE.match(text)
+    if not m:
+        return None, None
+    fm_text, body = m.group(1), m.group(2)
+    entry_path = None
+    try:
+        fm = yaml.safe_load(fm_text)
+        if isinstance(fm, dict) and isinstance(fm.get("entry_path"), str):
+            entry_path = fm["entry_path"]
+    except Exception:
+        pass
+    intent_line = None
+    for ln in body.splitlines():
+        if ln.strip():
+            intent_line = ln.strip()
+            break
+    return intent_line, entry_path
+
+
+def _read_flow_meta(flow_dir: Path) -> tuple[str | None, str | None, int | None, list[str], bool]:
+    """(last_verdict, last_run_at, runs, requires, provides_auth) from a
+    flow's meta.json. Defensive, same discipline as _read_flow_intent:
+    missing/unreadable/non-JSON/non-dict meta.json, or fields of the wrong
+    type, all yield None (or, for `requires`/`provides_auth` — test
+    chaining, Task "prerequisites" — their own empty/false defaults) rather
+    than a crash or a lying value. A pre-chaining flow's meta.json simply has
+    no `requires`/`provides_auth` keys at all, which reads the same as an
+    explicit `[]`/`false` — there's no third "unknown" state for these two,
+    unlike last_verdict/last_run_at/runs."""
+    try:
+        meta = json.loads((flow_dir / "meta.json").read_text())
+        if not isinstance(meta, dict):
+            raise ValueError
+    except (OSError, ValueError):
+        return None, None, None, [], False
+    lv, lra, runs = meta.get("last_verdict"), meta.get("last_run_at"), meta.get("runs")
+    req = meta.get("requires")
+    # SLUG_RE-gate each entry, matching qa_run.py's _read_requires: a generated
+    # meta.json is agent-written, untrusted input, so a comma-/garbage-bearing
+    # prerequisite never reaches the "needs:" chip (or any consumer) here either.
+    requires = [r for r in req if isinstance(r, str) and SLUG_RE.match(r)] if isinstance(req, list) else []
+    provides_auth = meta.get("provides_auth") is True
+    return (lv if isinstance(lv, str) else None,
+            lra if isinstance(lra, str) else None,
+            runs if isinstance(runs, int) else None,
+            requires, provides_auth)
+
+
+def _qa_heal_candidate_entry(p: Path) -> dict:
+    """One pending heal candidate for build_state's `heals` list. `new_steps`
+    is deliberately omitted — it can be large, and the approve action
+    (do_qa_action's heal-approve) re-reads the file from disk rather than
+    trusting anything round-tripped through /api/state. JSON that fails to
+    parse, or parses to something other than an object, still needs to reach
+    the operator (there's no other way to clear it) — it's surfaced as
+    `{file, malformed: True}` instead of the full shape; heal-reject
+    deliberately allows rejecting this shape through (heal-approve refuses
+    it)."""
+    try:
+        c = json.loads(p.read_text())
+        if not isinstance(c, dict):
+            raise ValueError
+    except (OSError, ValueError):
+        return {"file": p.name, "malformed": True}
+    return {"file": p.name, "flow": c.get("flow"), "reason": c.get("reason"),
+            "step_diff": c.get("step_diff"), "screenshot": c.get("screenshot"),
+            "mined_at": c.get("mined_at")}
+
+
+# ── AI-generated candidate flows — the dashboard's review strip for
+# engine/qa_run.py's `--generate` (mirrors the heal-candidate strip above:
+# machines propose under $AP_STATE/qa/generated/<slug>/, a human approves or
+# rejects on the dashboard — see do_qa_action's generate-approve/
+# generate-reject below). A candidate dir has the exact same three files a
+# taught flow does (intent.md/steps.json/meta.json — see
+# skills/orbit-qa-generate.md step 3) plus `meta.json.generated: true`.
+def _read_candidate_criteria(cand_dir: Path) -> list[str]:
+    """Every bullet under intent.md's '## Success criteria' heading (same
+    shape qa_teach.py's _render_intent_md writes for a taught flow) — []  on
+    anything short of a clean parse (missing file, unreadable, no
+    frontmatter, no heading, no bullets). A candidate's card shows these
+    (joined into `summary`, see _qa_generated_candidates below) so the
+    operator can review sight-unseen without opening intent.md by hand."""
+    try:
+        text = (cand_dir / "intent.md").read_text()
+    except OSError:
+        return []
+    m = _FRONTMATTER_RE.match(text)
+    if not m:
+        return []
+    body = m.group(2)
+    idx = body.find("## Success criteria")
+    if idx == -1:
+        return []
+    out = []
+    for ln in body[idx:].splitlines()[1:]:
+        s = ln.strip()
+        if s.startswith("- "):
+            out.append(s[2:].strip())
+        elif s and not s.startswith("-"):
+            break   # ran past the bullet list into whatever (if anything) follows
+    return out
+
+
+def _qa_generated_candidates() -> list[dict]:
+    """Pending generate candidates for build_state's `qa_flows.generated` —
+    top-level directories directly under $AP_STATE/qa/generated/ (a
+    `rejected/` subdirectory holds ARCHIVED ones — see do_qa_action's
+    generate-reject — and is deliberately excluded here, mirroring how the
+    heal listing above excludes heal/approved/ and heal/rejected/). Listed
+    names are SLUG_RE-gated, same discipline as qa_flow_library's own flow
+    names and _qa_heal_candidate_entry's heal filenames — a non-slug
+    directory name is unrunnable/unapprovable anyway (generate-approve/
+    generate-reject both refuse it via the same gate), and cc_shell.html's
+    onclick attributes aren't quote-safe on their own (see esc/escJsAttr's
+    own comments) — filtering the LISTING is the primary guard, escaping in
+    the template is defense-in-depth on top of it.
+
+    Each entry is `{name, intent, summary, requires}` — `intent` re-reads
+    intent.md exactly like a taught flow's row does (_read_flow_intent);
+    `summary` is the success-criteria bullets joined with '; ' (falling back
+    to `intent` when there are none, so the card is never blank) — a
+    candidate has no run history yet, so there's no verdict-derived `summary`
+    the way a real run row has; `requires` re-reads meta.json exactly like a
+    taught flow's row does (_read_flow_meta) but is ALWAYS present (possibly
+    `[]`) rather than omitted-when-empty — unlike the flow-row precedent
+    (which omits requires/provides_auth only to stay byte-identical for
+    flows taught before chaining existed), every generated candidate is
+    freshly written by THIS feature, so there's no legacy shape to protect.
+    Defensive throughout: a malformed candidate dir yields nulls/empties, it
+    never crashes build_state (same posture as _read_flow_intent/
+    _read_flow_meta for a hand-edited or partially-written flow dir)."""
+    root = QA_DIR / "generated"
+    if not root.is_dir():
+        return []
+    try:
+        names = sorted(p.name for p in root.iterdir()
+                        if p.is_dir() and p.name != "rejected" and SLUG_RE.match(p.name))
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        cand_dir = root / name
+        intent_line, _entry_path = _read_flow_intent(cand_dir)
+        criteria = _read_candidate_criteria(cand_dir)
+        summary = "; ".join(criteria) if criteria else intent_line
+        _, _, _, requires, _ = _read_flow_meta(cand_dir)
+        out.append({"name": name, "intent": intent_line, "summary": summary, "requires": requires})
+    return out
+
+
+def qa_flow_library() -> dict | None:
+    """The QA view's data: the taught-flow library, the 10 newest run
+    verdicts, and every pending heal candidate. None when the target has no
+    flows dir (or one with zero SLUG_RE-valid flows) AND exploratory QA is
+    disabled — build_state then OMITS the `qa_flows` key entirely, so a
+    target with no QA story yet sees a byte-identical /api/state (existing
+    consumers see no change). Present (with an EMPTY `flows` list) whenever
+    EITHER flows exist OR exploratory is enabled: `explore_enabled` lives
+    INSIDE this dict, so if it stayed None whenever there were zero taught
+    flows, enabling exploratory with no flows taught yet would hide the
+    whole QA view — Explore button included.
+    Listed flow names are filtered to SLUG_RE — a non-slug directory is never
+    runnable anyway, and it's what the dashboard's HTML template trusts to
+    be quote-safe (see the `names = sorted(...)` line below)."""
+    explore_enabled = _qa_exploratory_enabled()
+    flows_root = _qa_flows_root()
+    # SLUG_RE-gated: a non-slug directory name is unrunnable anyway (do_qa_action
+    # and qa_run.py both refuse it), and cc_shell.html's onclick="runFlow('${esc(
+    # f.name)}')" isn't quote-safe — esc() only neuters &/</>, not '/". Filtering
+    # the LISTING here (rather than only escaping in the template) means a
+    # crafted committed flow-dir name can never reach the page at all.
+    names = (sorted(p.name for p in flows_root.iterdir() if p.is_dir() and SLUG_RE.match(p.name))
+             if flows_root.is_dir() else [])
+    cfg = _load_cfg()
+    # Present whenever the project has a qa: block — so the "New test" panel is
+    # reachable to teach the FIRST flow. Otherwise it's chicken-and-egg: teach
+    # lives inside the QA view, which would stay hidden until a flow already
+    # existed. None (QA view omitted, byte-identical /api/state) only when there
+    # is no QA story at all: no qa: block, no flows, no exploratory.
+    qa_configured = isinstance(cfg.get("qa"), dict)
+    if not names and not explore_enabled and not qa_configured:
+        return None
+
+    flows = []
+    for name in names:
+        flow_dir = flows_root / name
+        intent_line, entry_path = _read_flow_intent(flow_dir)
+        last_verdict, last_run_at, runs, requires, provides_auth = _read_flow_meta(flow_dir)
+        entry = {"name": name, "intent_line": intent_line, "entry_path": entry_path,
+                 "last_verdict": last_verdict, "last_run_at": last_run_at, "runs": runs}
+        # Test chaining (Task "prerequisites"): only added when non-default,
+        # so a flow with no requires/provides_auth (every flow taught before
+        # this feature existed, or one that simply doesn't use it) keeps the
+        # exact same row shape the dashboard has always sent.
+        if requires:
+            entry["requires"] = requires
+        if provides_auth:
+            entry["provides_auth"] = True
+        flows.append(entry)
+
+    runs_dir = QA_DIR / "runs"
+    recent_runs = []
+    if runs_dir.is_dir():
+        dated = []
+        for p in runs_dir.glob("*.json"):
+            try:
+                dated.append((p.stat().st_mtime, p))
+            except OSError:
+                continue
+        dated.sort(key=lambda t: t[0], reverse=True)
+        for _, p in dated[:10]:
+            try:
+                v = json.loads(p.read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(v, dict):
+                continue
+            row = dict(v)
+            row["file"] = p.name
+            recent_runs.append(row)
+
+    # Only top-level files under heal/ are pending — heal/approved/ and
+    # heal/rejected/ are subdirectories (never `.is_file()`), so an archived
+    # candidate is excluded from both the listing and the count without a
+    # separate check. Also gated to _HEAL_FILE_RE (same regex that guards
+    # heal-approve/heal-reject via _heal_candidate_path): a name that doesn't
+    # match is either junk (e.g. `.DS_Store`) or, worse, agent-written text
+    # that never went through this module's own naming convention and so
+    # isn't trusted to be quote-safe once it reaches cc_shell.html's onclick
+    # attributes (same reasoning as qa_flow_library's SLUG_RE filter on flow
+    # names above — filter the LISTING, don't rely on escaping alone).
+    # Filtering here also means a non-conforming file can never become an
+    # unclearable card: previously it was listed but heal-approve/reject both
+    # refused it (wrong shape), so Reject always errored and the card stuck
+    # around forever — now it's simply never listed. Sorted by name for a
+    # deterministic strip ordering, same convention as
+    # load_calibration_candidates' `sorted(d.glob(...))`.
+    heal_dir = QA_DIR / "heal"
+    heals = []
+    if heal_dir.is_dir():
+        try:
+            names = sorted(p.name for p in heal_dir.iterdir()
+                            if p.is_file() and _HEAL_FILE_RE.match(p.name))
+        except OSError:
+            names = []
+        heals = [_qa_heal_candidate_entry(heal_dir / name) for name in names]
+
+    # base_url rides along here (rather than a separate /api/config fetch)
+    # purely so the "New test" panel's URL field can placeholder it without
+    # an extra round trip — same qa: block _qa_flows_root/_qa_exploratory_enabled
+    # already re-read independently above.
+    qa_cfg = cfg.get("qa") if isinstance(cfg.get("qa"), dict) else {}
+    base_url = qa_cfg.get("base_url") if isinstance(qa_cfg.get("base_url"), str) else None
+
+    result = {"flows": flows, "recent_runs": recent_runs, "heals": heals,
+              "pending_heals": len(heals), "explore_enabled": explore_enabled,
+              "base_url": base_url, "qa_busy": _qa_browser_busy()}
+    # AI-generated candidates (engine/qa_run.py's --generate): present only
+    # when at least one is pending, so a target that has never run --generate
+    # (i.e. every existing target, and every existing test fixture in
+    # tests/test_command_center_qa_view.py) sees a byte-identical qa_flows
+    # dict — same "added only when non-default" precedent as requires/
+    # provides_auth on a flow row above, just applied to a whole new key
+    # instead of two fields on an existing one.
+    generated = _qa_generated_candidates()
+    if generated:
+        result["generated"] = generated
+    return result
+
+
+# ── heal approve/reject (Task 26) — the human gate that closes the QA
+# self-healing loop. Structure mirrors do_calibration_action exactly: approve
+# mutates a committed $AP_HOME artifact (there: goldens/LEARNED.md; here: the
+# flow's own steps.json) + archives the candidate; reject requires a reason,
+# stamps it, archives. The one asymmetry from calibration: approve here has
+# real shape validation to do first (a candidate's new_steps could be
+# garbage), so it runs every check BEFORE any write — all-or-nothing, never
+# a partial apply.
+_HEAL_FILE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,79}--\d{8}T\d{6}Z\.json$")
+_HEAL_STEP_ACTIONS = {"goto", "click", "fill", "expect"}
+
+
+def _heal_candidate_path(file) -> Path | None:
+    """None unless `file` is a bare `<slug>--<ts>.json` basename (the regex's
+    character class contains no '/', so a '..' segment, an absolute path, or
+    a subdirectory path all fail to match by SHAPE — there's no separate
+    traversal check to forget) naming a file that actually exists directly
+    under $AP_STATE/qa/heal/ (never heal/approved/ or heal/rejected/ — a bare
+    basename can't reach into a subdirectory)."""
+    if not isinstance(file, str) or not _HEAL_FILE_RE.match(file):
+        return None
+    p = QA_DIR / "heal" / file
+    return p if p.is_file() else None
+
+
+def _qa_now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _do_heal_approve(file: str) -> dict:
+    """Approve a mined heal candidate: write its new_steps into the flow's
+    own committed steps.json (pretty JSON — the ONE new machine write this
+    dashboard makes into a committed dir; it's human-clicked, same precedent
+    as calibration approve's LEARNED.md append), append a `heals` entry to
+    the flow's meta.json (runs/last_run_at/last_verdict untouched), then
+    archive the candidate under heal/approved/. Every validation below runs
+    BEFORE any write — a failure at any check leaves steps.json, meta.json,
+    and the candidate file exactly as they were."""
+    p = _heal_candidate_path(file)
+    if p is None:
+        return {"ok": False, "msg": f"'{file}' is not a pending heal candidate"}
+    try:
+        c = json.loads(p.read_text())
+        if not isinstance(c, dict):
+            raise ValueError
+    except (OSError, ValueError):
+        return {"ok": False, "msg": f"candidate '{file}' is malformed JSON — reject it instead"}
+    flow = c.get("flow")
+    if not isinstance(flow, str) or not SLUG_RE.match(flow):
+        return {"ok": False, "msg": f"candidate '{file}' names an invalid flow {flow!r}"}
+    flow_dir = _qa_flows_root() / flow
+    if not flow_dir.is_dir():
+        return {"ok": False, "msg": f"candidate's flow '{flow}' has no flow dir at {flow_dir}"}
+    new_steps = c.get("new_steps")
+    if not isinstance(new_steps, list) or not new_steps:
+        return {"ok": False, "msg": f"candidate '{file}' has no usable new_steps"}
+    for i, step in enumerate(new_steps):
+        if not isinstance(step, dict) or step.get("action") not in _HEAL_STEP_ACTIONS:
+            return {"ok": False, "msg": f"candidate '{file}' new_steps[{i}] has an invalid action"}
+
+    # All-or-nothing point of no return: every check above passed, so the
+    # writes below are safe to make unconditionally.
+    (flow_dir / "steps.json").write_text(json.dumps(new_steps, indent=2) + "\n")
+    meta_path = flow_dir / "meta.json"
+    try:
+        meta = json.loads(meta_path.read_text())
+        if not isinstance(meta, dict):
+            raise ValueError
+    except (OSError, ValueError):
+        # Mirrors qa_run.py's _update_meta fallback — a missing/corrupt
+        # meta.json must never block the approve that's already committed
+        # steps.json.
+        meta = {"created_at": None, "last_run_at": None, "last_verdict": None,
+                 "runs": 0, "heals": []}
+    heals = meta.get("heals")
+    if not isinstance(heals, list):
+        heals = []
+    heals.append({"at": _qa_now_iso(), "reason": c.get("reason"), "candidate": file})
+    meta["heals"] = heals
+    meta_path.write_text(json.dumps(meta, indent=2) + "\n")
+
+    approved_dir = QA_DIR / "heal" / "approved"
+    approved_dir.mkdir(parents=True, exist_ok=True)
+    p.rename(approved_dir / p.name)
+    return {"ok": True,
+            "msg": f"Approved heal for '{flow}' — steps.json updated (archived to heal/approved/)."}
+
+
+def _do_heal_reject(file: str, reason: str) -> dict:
+    """Reject a heal candidate: a reason is required (archived with it, same
+    discipline as do_calibration_action's reject) and is checked before the
+    filename even needs to be valid. Same filename validation as approve.
+    Unlike approve, a malformed candidate IS rejectable — its raw text is
+    archived best-effort under `malformed_raw` since it can't be parsed back
+    into a dict; this is the operator's only way to clear junk out of the
+    pending strip."""
+    if not reason.strip():
+        return {"ok": False, "msg": "A rejection reason is required."}
+    p = _heal_candidate_path(file)
+    if p is None:
+        return {"ok": False, "msg": f"'{file}' is not a pending heal candidate"}
+    try:
+        raw = p.read_text()
+    except OSError as e:
+        return {"ok": False, "msg": f"cannot read candidate '{file}': {e}"}
+    try:
+        c = json.loads(raw)
+        if not isinstance(c, dict):
+            raise ValueError
+    except ValueError:
+        c = {"malformed_raw": raw}
+    c["rejected_reason"] = reason
+    c["rejected_at"] = _qa_now_iso()
+    rejected_dir = QA_DIR / "heal" / "rejected"
+    rejected_dir.mkdir(parents=True, exist_ok=True)
+    (rejected_dir / p.name).write_text(json.dumps(c, indent=2) + "\n")
+    p.unlink()
+    return {"ok": True, "msg": f"Rejected heal candidate '{file}' (archived with reason)."}
+
+
+# ── generate approve/reject — the human gate that closes the AI test-
+# generation loop (mirrors _do_heal_approve/_do_heal_reject exactly, one
+# level up: a heal candidate replaces one FILE inside an existing flow dir;
+# a generate candidate IS a whole flow dir, so "approve" MOVES it wholesale
+# into the committed library instead of rewriting one file in place).
+_GENERATED_ROOT_NAME = "generated"
+
+
+def _generated_candidate_dir(name) -> Path | None:
+    """None unless `name` is SLUG_RE-valid (closes traversal the same way
+    _heal_candidate_path's regex does — SLUG_RE's character class contains
+    no '/', so '..'/absolute/subdirectory shapes all fail by SHAPE, not by a
+    separate check) AND isn't the reserved `rejected` name (that's the
+    archive subdirectory generate-reject moves into, never a candidate
+    itself) AND actually exists as a directory directly under
+    $AP_STATE/qa/generated/."""
+    if not isinstance(name, str) or not SLUG_RE.match(name) or name == "rejected":
+        return None
+    p = QA_DIR / _GENERATED_ROOT_NAME / name
+    return p if p.is_dir() else None
+
+
+def _do_generate_approve(name: str) -> dict:
+    """Approve a generated candidate: validate EVERYTHING first (name shape,
+    candidate dir exists, has all three of intent.md/steps.json/meta.json,
+    steps.json is a non-empty list, intent.md has a readable one-line
+    intent, and — the one check with no heal-approve analogue — a flow of
+    this name doesn't already exist in the committed library) — only once
+    every check passes does the directory actually move, mirroring
+    _do_heal_approve's "every validation runs BEFORE any write" discipline.
+    The move itself preserves the candidate's meta.json BYTE-FOR-BYTE (no
+    read-modify-write the way heal-approve's meta.json update is) — its
+    `requires`/`provides_auth` (and the `generated: true` marker, left in
+    place as harmless provenance — _read_flow_meta only ever reads the keys
+    it knows about) survive untouched simply because nothing rewrites the
+    file. FLOWMAP.md gets a fresh row (qa_teach._update_flowmap, same
+    helper `orbit teach`/the dashboard's teach-save path already use) —
+    a moved-in flow has never had a row before, unlike a heal (which only
+    ever touches an EXISTING flow's last-verdict cell)."""
+    cand_dir = _generated_candidate_dir(name)
+    if cand_dir is None:
+        return {"ok": False, "msg": f"'{name}' is not a pending generated candidate"}
+    for fname in ("intent.md", "steps.json", "meta.json"):
+        if not (cand_dir / fname).is_file():
+            return {"ok": False,
+                    "msg": f"candidate '{name}' is missing {fname} — cannot approve, reject it instead"}
+    try:
+        steps = json.loads((cand_dir / "steps.json").read_text())
+        if not isinstance(steps, list) or not steps:
+            raise ValueError
+    except (OSError, ValueError):
+        return {"ok": False,
+                "msg": f"candidate '{name}' has malformed or empty steps.json — reject it instead"}
+    try:
+        meta_raw = json.loads((cand_dir / "meta.json").read_text())
+        if not isinstance(meta_raw, dict):
+            raise ValueError
+    except (OSError, ValueError):
+        return {"ok": False, "msg": f"candidate '{name}' has malformed meta.json — reject it instead"}
+    intent_line, entry_path = _read_flow_intent(cand_dir)
+    if not intent_line:
+        return {"ok": False,
+                "msg": f"candidate '{name}' has no readable intent in intent.md — reject it instead"}
+
+    flows_root = _qa_flows_root()
+    flow_dir = flows_root / name
+    if flow_dir.exists():
+        return {"ok": False,
+                "msg": f"a flow named '{name}' already exists at {flow_dir} — cannot approve "
+                       f"(reject the candidate, or rename/remove the existing flow first)"}
+
+    # All-or-nothing point of no return: every check above passed.
+    # shutil.move is atomic (os.rename) when $AP_STATE and $AP_HOME share a
+    # filesystem — the normal case (both under the target's .autopilot/). On
+    # the rare cross-device layout it degrades to copy-then-delete, which is
+    # NOT atomic: a mid-copy failure can leave partial debris at flow_dir while
+    # the candidate itself survives intact under generated/<name> (the source
+    # is removed only after a clean copy, so nothing is ever lost) — a retry
+    # then trips the "already exists" refusal above until the debris is cleared
+    # by hand. That's a safe-but-annoying failure, never data loss or a clobber.
+    flows_root.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.move(str(cand_dir), str(flow_dir))
+    except OSError as e:
+        return {"ok": False, "msg": f"could not move candidate '{name}' into the flow library ({e})"}
+
+    flowmap_path = flows_root.parent / "FLOWMAP.md"
+    try:
+        qa_teach._update_flowmap(flowmap_path, name, intent_line, entry_path or "", "never run")
+    except OSError as e:
+        # Mirrors qa_teach.main()/do_qa_teach_save: a FLOWMAP write failure
+        # never masks an already-written flow — the flow itself is done.
+        return {"ok": True,
+                "msg": f"Approved '{name}' — now a real flow; FLOWMAP update failed ({e})."}
+    return {"ok": True, "msg": f"Approved '{name}' — now a real flow in the library."}
+
+
+def _do_generate_reject(name: str) -> dict:
+    """Archive a generated candidate under generated/rejected/<name> — no
+    reason required (unlike heal-reject): a generate candidate is an AI's
+    own first-draft proposal the operator never approved into anything, not
+    a mined correction to an EXISTING flow the operator needs to justify
+    turning down. A same-name re-reject (an already-rejected `name` sitting
+    under rejected/) is disambiguated with a UTC timestamp suffix so a
+    second rejection of a same-slugged regeneration is never silently
+    dropped or clobbered."""
+    cand_dir = _generated_candidate_dir(name)
+    if cand_dir is None:
+        return {"ok": False, "msg": f"'{name}' is not a pending generated candidate"}
+    rejected_root = QA_DIR / _GENERATED_ROOT_NAME / "rejected"
+    rejected_root.mkdir(parents=True, exist_ok=True)
+    dest = rejected_root / name
+    if dest.exists():
+        dest = rejected_root / f"{name}--{_qa_now_iso().replace(':', '')}"
+    try:
+        shutil.move(str(cand_dir), str(dest))
+    except OSError as e:
+        return {"ok": False, "msg": f"could not archive candidate '{name}' ({e})"}
+    return {"ok": True, "msg": f"Rejected candidate '{name}' (archived under generated/rejected/)."}
+
+
+# ── QA persistent "Dev session" — bring qa.services up ONCE and keep them
+# warm, so `orbit qa --flow`/teach stop rebooting the frontend/backend on
+# every run (a React dev server recompiling from scratch is the whole reason
+# this exists). Own lock, deliberately separate from _TEACH_LOCK — the two
+# sessions can each independently start/stop and neither should ever block
+# waiting on the other's lock. States: stopped -> starting -> running |
+# error. `_QA_SERVICES["state"]` doubles as the ownership/cancellation
+# signal a background bring-up thread checks (see _qa_services_bring_up) —
+# there's only ever ONE of these, module-wide (an operator's own dashboard
+# tab, same posture as _teach_session), so unlike teach's session-identity
+# check, "is this thread's own bring-up still wanted" reduces to "is the
+# state still 'starting'".
+_QA_SERVICES_LOCK = threading.Lock()
+_QA_SERVICES = {"state": "stopped", "handles": None, "error": None}
+
+
+def _qa_services_bring_up(qa_cfg: dict, log_dir: Path) -> None:
+    """Runs off a background thread spawned by do_qa_services_start(): brings
+    qa.services up via qa_env.up() and flips state to `running` — or, on
+    ANY failure, `error` (qa_env.up() has ALREADY torn down everything IT
+    started before raising — see its own contract — so there's nothing left
+    to tear down here). If /qa-services-stop ran while this was mid-flight
+    (state is no longer `starting` by the time up() returns), this bring-up
+    is cancelled: don't resurrect a stopped session — tear down what THIS
+    call just started instead of leaking it."""
+    try:
+        handles = qa_env.up(REPO, qa_cfg, log_dir)
+    except Exception as e:
+        with _QA_SERVICES_LOCK:
+            if _QA_SERVICES["state"] == "starting":
+                _QA_SERVICES["state"] = "error"
+                _QA_SERVICES["error"] = f"could not bring qa.services up ({e})"
+                _QA_SERVICES["handles"] = None
+        return
+
+    with _QA_SERVICES_LOCK:
+        cancelled = _QA_SERVICES["state"] != "starting"
+        if not cancelled:
+            _QA_SERVICES["handles"] = handles
+            _QA_SERVICES["state"] = "running"
+            _QA_SERVICES["error"] = None
+    if cancelled:
+        qa_env.down(handles)   # stopped while services were coming up
+
+
+def do_qa_services_start() -> dict:
+    """POST /qa-services-start — brings the target's qa.services up ONCE and
+    keeps them running (unlike a plain `orbit qa --flow`/`orbit teach`,
+    which each bring their own copy up and tear it down every invocation).
+    Requires a qa: block with at least one service configured. Idempotent:
+    already running/starting just reports so — a double-click (or a stale
+    tab re-posting) must never spawn a second overlapping set of services.
+
+    Port-sharing note (contained, not corruption — noted, not solved here):
+    this isn't the only thing that can bind qa.services' ports. The loop's
+    own QA gate (qa_check.py) and a manual --regression/--explore sweep
+    each bring qa.services up/down themselves, independent of
+    _QA_SERVICES, so one of those running against this same target while
+    this session is up races for the same ports. An un-attached `orbit
+    teach` mid-recording holds those same ports too (see
+    _qa_teach_bring_up's non-attached branch, which brings its own
+    qa.services up and only tears them down when recording finishes) — so
+    clicking Start here while a stopped-session teach is still recording
+    can bind-conflict the same way."""
+    with _QA_SERVICES_LOCK:
+        if _QA_SERVICES["state"] in ("running", "starting"):
+            return {"ok": True, "msg": f"already {_QA_SERVICES['state']}"}
+        cfg = _load_cfg()
+        qa_cfg = cfg.get("qa") if isinstance(cfg.get("qa"), dict) else None
+        if not isinstance(qa_cfg, dict) or not qa_cfg.get("services"):
+            return {"ok": False,
+                    "msg": "no 'qa: services' configured in .autopilot/config.yaml — "
+                           "see config/schema.yaml's qa.services block and add one first"}
+        _QA_SERVICES["state"] = "starting"
+        _QA_SERVICES["error"] = None
+        _QA_SERVICES["handles"] = None
+
+    log_dir = AP_HOME / "state" / "qa" / "dev-logs"
+    threading.Thread(target=_qa_services_bring_up, args=(qa_cfg, log_dir), daemon=True).start()
+    return {"ok": True, "msg": "bringing your app up…"}
+
+
+def do_qa_services_stop() -> dict:
+    """POST /qa-services-stop — tears the persistent session down (if any
+    handles ever came up) and resets to `stopped`, from WHATEVER state it
+    was in (running, error, or even starting — flipping state away from
+    `starting` here is what _qa_services_bring_up's own cancellation check
+    sees, so a stop mid-bring-up tears down as soon as that thread notices,
+    not left running forever). qa_env.down on an empty/None list is always
+    safe (see its own contract)."""
+    with _QA_SERVICES_LOCK:
+        handles = _QA_SERVICES.get("handles")
+        _QA_SERVICES["state"] = "stopped"
+        _QA_SERVICES["handles"] = None
+        _QA_SERVICES["error"] = None
+    if handles:
+        qa_env.down(handles)
+    return {"ok": True, "msg": "app stopped"}
+
+
+def do_qa_services_restart(payload: dict) -> dict:
+    """POST /qa-services-restart {service?} — restarts ONE named service (via
+    qa_env.restart_one, updating the stored handles) or, with no `service`,
+    the whole session (down then up again). Requires `running` — restarting
+    a session that never came up (stopped/error/starting) makes no sense;
+    Start it fresh instead. `service`, if given, must be one of the
+    currently configured qa.services names. Never crashes the handler: any
+    qa_env failure is reported as {ok: false, msg}, same as every other QA
+    action here — and on a named-service failure, the OTHER still-alive
+    handles are deliberately kept in `_QA_SERVICES["handles"]` (not
+    discarded to None) so a later Stop/atexit still tears them down instead
+    of orphaning them; a restart-ALL failure has nothing left to keep (the
+    old set was already down()'d before the failed up() attempt)."""
+    service = (payload.get("service") or "").strip()
+    with _QA_SERVICES_LOCK:
+        if _QA_SERVICES["state"] != "running":
+            return {"ok": False,
+                    "msg": f"app is '{_QA_SERVICES['state']}', not running — start it first"}
+        handles = _QA_SERVICES["handles"] or []
+
+    cfg = _load_cfg()
+    qa_cfg = cfg.get("qa") if isinstance(cfg.get("qa"), dict) else {}
+    configured = qa_cfg.get("services") or []
+    names = [str(s.get("name") or f"service{i}") for i, s in enumerate(configured) if isinstance(s, dict)]
+    if service and service not in names:
+        return {"ok": False,
+                "msg": f"no configured service named '{service}' — have {', '.join(names) or '(none)'}"}
+
+    log_dir = AP_HOME / "state" / "qa" / "dev-logs"
+    try:
+        if service:
+            new_handles = qa_env.restart_one(REPO, qa_cfg, service, handles, log_dir)
+        else:
+            qa_env.down(handles)
+            new_handles = qa_env.up(REPO, qa_cfg, log_dir)
+    except Exception as e:
+        with _QA_SERVICES_LOCK:
+            _QA_SERVICES["state"] = "error"
+            _QA_SERVICES["error"] = f"restart failed ({e})"
+            if service:
+                # Named-service restart: qa_env.restart_one's contract is
+                # that on failure ONLY the named service is dead (its old
+                # process was already killed before the fresh spawn attempt
+                # was tried) — every OTHER handle is untouched and still
+                # alive. Keep tracking the pre-call `handles` list (the
+                # local var above, unmutated) so a later /qa-services-stop
+                # or the atexit cleanup still tears the survivors down
+                # instead of orphaning them; a future down() on the now-dead
+                # named entry is a harmless no-op (_kill_one no-ops once
+                # proc.poll() is not None).
+                _QA_SERVICES["handles"] = handles
+            else:
+                # Restart-ALL already down()'d the old set before attempting
+                # up() again, and up() itself tears down anything it
+                # partially started before raising — nothing from the old
+                # set survives to track.
+                _QA_SERVICES["handles"] = None
+        return {"ok": False, "msg": f"restart failed: {e}"}
+
+    with _QA_SERVICES_LOCK:
+        # A concurrent /qa-services-stop could have run while the restart
+        # above was in flight — don't resurrect a session the operator just
+        # stopped; tear down what this restart just brought up instead of
+        # leaking it.
+        stopped_meanwhile = _QA_SERVICES["state"] == "stopped"
+        if not stopped_meanwhile:
+            _QA_SERVICES["handles"] = new_handles
+            _QA_SERVICES["state"] = "running"
+            _QA_SERVICES["error"] = None
+    if stopped_meanwhile:
+        qa_env.down(new_handles)
+        return {"ok": True, "msg": "app was stopped while restarting — nothing to do"}
+    return {"ok": True, "msg": f"restarted {service or 'all services'}"}
+
+
+def qa_services_state() -> dict | None:
+    """build_state's `qa_services` key — present ONLY when the target has a
+    qa: block with `services` configured (else omitted entirely, so a
+    target with no dev-session story sees a byte-identical /api/state —
+    same discipline as qa_flow_library's own None-means-omitted contract).
+    Drives the dashboard's "Dev session" panel: state (stopped/starting/
+    running/error) + the configured service names/ready URLs, read fresh
+    from config.yaml every poll (not from _QA_SERVICES's own possibly-stale
+    handles) so a config edit is reflected even while stopped."""
+    cfg = _load_cfg()
+    qa_cfg = cfg.get("qa") if isinstance(cfg.get("qa"), dict) else {}
+    services = qa_cfg.get("services")
+    if not services or not isinstance(services, list):
+        return None
+    rows = [{"name": str(s.get("name") or f"service{i}"),
+             "ready": s.get("ready") if isinstance(s.get("ready"), str) else None}
+            for i, s in enumerate(services) if isinstance(s, dict)]
+    with _QA_SERVICES_LOCK:
+        state = _QA_SERVICES["state"]
+        error = _QA_SERVICES["error"]
+    return {"state": state, "services": rows, "error": error}
+
+
+def _qa_services_atexit_cleanup() -> None:
+    """Best-effort orphan guard mirroring _teach_atexit_cleanup: if the
+    persistent dev session's services are (or were becoming) up when the
+    dashboard process exits cleanly (Ctrl-C, /restart-dashboard), tear them
+    down instead of leaking them. Can't run past a SIGKILL/crash — which is
+    exactly why qa_env's own services are spawned with their own process
+    group regardless (see qa_env._spawn's start_new_session=True)."""
+    with _QA_SERVICES_LOCK:
+        handles = _QA_SERVICES.get("handles")
+    if handles:
+        qa_env.down(handles)
+
+
+atexit.register(_qa_services_atexit_cleanup)
+
+
+def do_qa_action(payload: dict) -> dict:
+    """POST /qa-action — flow-library actions from the QA view. run-flow
+    validates the flow name (SLUG_RE discipline, same as qa_teach.py/
+    qa_run.py) and that the flow actually exists, then spawns `qa_run.py
+    <target> --flow <name>` DETACHED (do_epic_action's Popen pattern),
+    logging to $AP_STATE/logs/qa-run-<name>.log — plus `--attach` whenever
+    the persistent "Dev session" (_QA_SERVICES) is `running`: the flow then
+    attaches to the already-warm app (see skills/orbit-qa-flow.md step 1)
+    instead of qa_env bringing its own copy of qa.services up and killing it
+    again on exit. heal-approve/heal-reject (Task 26) close the self-healing
+    loop — see _do_heal_approve/_do_heal_reject, which mirror
+    do_calibration_action's precedent.
+    run-regression (Task 27) joins run-flow: a detached spawn of `qa_run.py
+    <target> --regression` — no flow param, and deliberately no
+    --if-changed (a human click means "sweep now", unconditionally; the
+    cursor/cadence gating is the run.sh loop hook's own concern) — logged to
+    $AP_STATE/logs/qa-regression.log. run-explore (Task 29) is the same
+    detached-spawn shape again (`qa_run.py <target> --explore`, logged to
+    $AP_STATE/logs/qa-explore.log) but gated FIRST on `_qa_exploratory_enabled()`
+    — exploratory crawling is opt-in, so a disabled target refuses the
+    action (and never spawns anything) even if a stale client somehow still
+    posts it; qa_run.py's own --explore enforces the identical gate
+    independently, so the two can never disagree.
+    run-generate (AI test generation) is the same detached-spawn shape once
+    more (`qa_run.py <target> --generate`, logged to
+    $AP_STATE/logs/qa-generate.log) — no extra opt-in gate to check here
+    (unlike run-explore's _qa_exploratory_enabled()): generating CANDIDATE
+    tests never touches the committed flow library by itself, so it needs no
+    config flag beyond a `qa:` block existing at all (qa_run.py's own
+    --generate enforces that, independently). Like run-flow, it passes
+    --attach whenever the persistent "Dev session" is `running`.
+    generate-approve/generate-reject close the AI-generation loop exactly
+    the way heal-approve/heal-reject close the self-healing one — see
+    _do_generate_approve/_do_generate_reject."""
+    action = (payload.get("action") or "").strip()
+    if action == "heal-approve":
+        return _do_heal_approve((payload.get("file") or "").strip())
+    if action == "heal-reject":
+        return _do_heal_reject((payload.get("file") or "").strip(), payload.get("reason") or "")
+    if action == "generate-approve":
+        return _do_generate_approve((payload.get("name") or "").strip())
+    if action == "generate-reject":
+        return _do_generate_reject((payload.get("name") or "").strip())
+    if action == "run-regression":
+        log = LOGDIR / "qa-regression.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("ab") as lf:
+            subprocess.Popen([sys.executable, str(ENGINE / "qa_run.py"), str(REPO), "--regression"],
+                             stdout=lf, stderr=lf, stdin=subprocess.DEVNULL, start_new_session=True)
+        return {"ok": True, "msg": "regression sweep started"}
+    if action == "run-explore":
+        if not _qa_exploratory_enabled():
+            return {"ok": False,
+                    "msg": "exploratory crawling is disabled — set qa.exploratory.enabled: true "
+                           "in .autopilot/config.yaml to turn it on"}
+        log = LOGDIR / "qa-explore.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("ab") as lf:
+            subprocess.Popen([sys.executable, str(ENGINE / "qa_run.py"), str(REPO), "--explore"],
+                             stdout=lf, stderr=lf, stdin=subprocess.DEVNULL, start_new_session=True)
+        return {"ok": True, "msg": "exploratory crawl started"}
+    if action == "run-generate":
+        log = LOGDIR / "qa-generate.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with _QA_SERVICES_LOCK:
+            attach = _QA_SERVICES["state"] == "running"
+        cmd = [sys.executable, str(ENGINE / "qa_run.py"), str(REPO), "--generate"]
+        if attach:
+            cmd.append("--attach")
+        with log.open("ab") as lf:
+            subprocess.Popen(cmd, stdout=lf, stderr=lf, stdin=subprocess.DEVNULL, start_new_session=True)
+        msg = "test generation started" + (" (attached to the running dev session)" if attach else "")
+        return {"ok": True, "msg": msg}
+    flow = (payload.get("flow") or "").strip()
+    if action != "run-flow":
+        return {"ok": False, "msg": f"unknown qa action '{action}'"}
+    if not SLUG_RE.match(flow):
+        return {"ok": False,
+                "msg": f"'{flow}' is not a valid flow name — use a lowercase slug "
+                       f"(letters/digits/./_/-, starting with a letter or digit)"}
+    flow_dir = _qa_flows_root() / flow
+    if not flow_dir.is_dir():
+        return {"ok": False, "msg": f"no flow named '{flow}' at {flow_dir}"}
+    log = LOGDIR / f"qa-run-{flow}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with _QA_SERVICES_LOCK:
+        attach = _QA_SERVICES["state"] == "running"
+    cmd = [sys.executable, str(ENGINE / "qa_run.py"), str(REPO), "--flow", flow]
+    if attach:
+        cmd.append("--attach")
+    with log.open("ab") as lf:
+        subprocess.Popen(cmd, stdout=lf, stderr=lf, stdin=subprocess.DEVNULL, start_new_session=True)
+    msg = f"flow {flow} started" + (" (attached to the running dev session)" if attach else "")
+    return {"ok": True, "msg": msg}
+
+
+# ── QA teach session — the dashboard's "New test / Record" panel, the web
+# equivalent of `orbit teach` (qa_teach.py). A CLI `teach` run is one process:
+# it blocks on qa_env.up(), then blocks on a foreground `codegen` recorder,
+# then blocks on stdin for intent/criteria, all before writing anything. The
+# dashboard has no stdin and must never block an HTTP handler for however
+# long qa.services take to become ready (up to ready_timeout_seconds) or for
+# however long the operator spends driving the recorder — so the same three
+# steps are spread across THREE requests instead of one process:
+#   POST /qa-teach-start  → validates exactly like qa_teach.main(), then
+#                           returns immediately while a background thread
+#                           does the (slow) qa_env.up() + spawns codegen,
+#                           THEN blocks on the recorder's own exit and tears
+#                           qa.services down itself the moment it happens.
+#   GET  /qa-teach-status → polled every ~1.5s by the panel; a pure read of
+#                           starting -> recording -> recorded|failed (no
+#                           side effects — the background thread above is
+#                           what drives that transition, not this route).
+#   POST /qa-teach-save   → once `recorded` (which already implies
+#                           qa.services are down), the operator's intent/
+#                           criteria are POSTed; reuses qa_teach._write_flow/
+#                           _update_flowmap verbatim, then removes the
+#                           scratch spec_dir and clears the session.
+# Exactly one session at a time (a single module-level dict + lock — this is
+# an operator's own dashboard tab, not a multi-tenant API). `_teach_session`
+# is the ONLY mutable global among AP_HOME/AP_STATE/REPO/etc in this file
+# (everything else here is either read-only or reloaded whole from disk).
+_TEACH_LOCK = threading.Lock()
+_teach_session: dict | None = None   # None = no session active
+
+
+def _teach_kill_proc(proc) -> None:
+    """Best-effort: terminate the codegen recorder if it's still alive, same
+    grace-then-force shape as qa_env's own _kill_one (SIGTERM, a few seconds
+    grace, then kill) — but simpler, since a lone Popen (not a whole process
+    group) is all a `codegen` child ever is here. Never raises."""
+    if proc is None:
+        return
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+    except Exception:
+        pass
+
+
+def _teach_claim_teardown(sess: dict) -> bool:
+    """Atomically claims responsibility for tearing THIS session's qa.services
+    down: several independent paths can each decide a given session's
+    services need tearing down (the bring-up thread's own post-recording
+    wait, /qa-teach-cancel, and the atexit hook) — under _TEACH_LOCK,
+    check-and-set `sess["torn_down"]` so exactly one of them actually calls
+    qa_env.down(handles); every other path sees it already True and skips
+    its own call. Returns True iff the CALLER must now call
+    qa_env.down(sess["handles"]) itself — deliberately done outside this
+    lock (down() can block for a few seconds per service tearing down
+    gracefully; nothing else should be blocked on that)."""
+    with _TEACH_LOCK:
+        if sess.get("torn_down"):
+            return False
+        sess["torn_down"] = True
+        return True
+
+
+def _qa_teach_bring_up(sess: dict, qa_cfg: dict, log_dir: Path) -> None:
+    """Runs off the request thread (spawned by do_qa_teach_start): brings
+    qa.services up, launches the recorder DETACHED (unlike qa_teach.py's own
+    foreground, blocking `_run_codegen`), then — still off this same thread —
+    blocks on the recorder's own exit and tears qa.services down the moment
+    it happens, before ever flipping the session to `recorded`/`failed`.
+    This (not GET /qa-teach-status) is what detects the recorder finishing:
+    a GET must be a pure read, never a place a teardown side effect can be
+    triggered from a blind, token-less, cross-origin-reachable request.
+    Mutates `sess` (the exact dict stored in _teach_session) in place at
+    each checkpoint, always re-checking `_teach_session is sess` under the
+    lock first: if /qa-teach-cancel ran while this thread was mid-flight,
+    cancel already tore down whatever existed AT THAT MOMENT — anything this
+    thread brings up/spawns AFTER that is this thread's own responsibility
+    to tear back down, never left running as an orphan. Every actual
+    qa_env.down() call (here and in cancel/atexit) goes through
+    `_teach_claim_teardown` so the same handles are never torn down twice.
+    Any exception bringing services up or launching the recorder (a
+    malformed qa.services entry, a launch OSError, a malformed
+    ORBIT_CODEGEN_CMD raising ValueError out of qa_teach.codegen_argv's
+    shlex.split, a ready-timeout QaEnvError — deliberately `except Exception`,
+    not just OSError: an uncaught exception here would silently kill this
+    daemon thread and strand the session in `starting` forever with
+    qa.services left running) tears down whatever THIS call started and
+    marks the session `failed` with the error message — the panel's next
+    status poll surfaces it.
+
+    ATTACH MODE: if the persistent "Dev session" (_QA_SERVICES) is already
+    `running` when this thread starts, qa_env.up() is skipped ENTIRELY —
+    calling it again would try to bind the exact same ports/processes the
+    persistent session already holds and fail. `sess["attached"]` is set
+    True and `sess["handles"]` stays `[]`; every qa_env.down() call below
+    (and in do_qa_teach_cancel/_teach_atexit_cleanup) checks that flag and
+    skips teardown when it's set — the persistent session's own
+    /qa-services-stop is the ONLY thing that ever tears those services
+    down. When _QA_SERVICES is not running, teach behaves exactly as
+    before: it brings its own qa.services up and tears them back down
+    itself, same as always."""
+    with _QA_SERVICES_LOCK:
+        attached = _QA_SERVICES["state"] == "running"
+
+    handles = []
+    if attached:
+        with _TEACH_LOCK:
+            cancelled = _teach_session is not sess
+            if not cancelled:
+                sess["attached"] = True
+                sess["handles"] = handles
+        if cancelled:
+            return   # nothing this thread started — nothing to tear down
+    else:
+        try:
+            handles = qa_env.up(REPO, qa_cfg, log_dir)
+        except Exception as e:
+            with _TEACH_LOCK:
+                if _teach_session is sess:
+                    sess["state"] = "failed"
+                    sess["error"] = f"could not bring qa.services up ({e})"
+            return
+
+        with _TEACH_LOCK:
+            cancelled = _teach_session is not sess
+            if not cancelled:
+                sess["handles"] = handles
+        if cancelled:
+            if _teach_claim_teardown(sess):
+                qa_env.down(handles)   # cancelled while services were coming up
+            return
+
+    try:
+        proc = subprocess.Popen(
+            qa_teach.codegen_argv(sess["url"], sess["spec_path"], sess["browser"]),
+            cwd=str(REPO),
+            env={**os.environ, "ORBIT_CODEGEN_OUTPUT": sess["spec_path"],
+                 "ORBIT_CODEGEN_URL": sess["url"]},
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception as e:   # OSError (launch) or ValueError (bad ORBIT_CODEGEN_CMD)
+        if not attached and _teach_claim_teardown(sess):
+            qa_env.down(handles)
+        with _TEACH_LOCK:
+            if _teach_session is sess:
+                sess["state"] = "failed"
+                sess["error"] = f"could not launch the recorder ({e})"
+        return
+
+    with _TEACH_LOCK:
+        cancelled = _teach_session is not sess
+        if not cancelled:
+            sess["proc"] = proc
+            sess["state"] = "recording"
+    if cancelled:
+        _teach_kill_proc(proc)
+        if not attached and _teach_claim_teardown(sess):
+            qa_env.down(handles)          # cancelled while codegen was launching
+        return
+
+    # Block on the recorder's own exit — the same "foreground" wait
+    # qa_teach.py's CLI _run_codegen does, just off the request thread
+    # instead of the operator's terminal. Whatever happens next (services
+    # torn down, state flipped) happens right here, unconditionally, whether
+    # or not anyone is still polling /qa-teach-status.
+    rc = proc.wait()
+
+    with _TEACH_LOCK:
+        if _teach_session is not sess:
+            return   # cancelled meanwhile — cancel's own kill+down+rmtree covers this
+        spec_p = Path(sess["spec_path"])
+        ok = rc == 0 and spec_p.exists() and spec_p.stat().st_size > 0
+
+    if not attached and _teach_claim_teardown(sess):
+        qa_env.down(handles)
+
+    with _TEACH_LOCK:
+        if _teach_session is not sess:
+            return
+        if ok:
+            sess["state"] = "recorded"
+            sess["error"] = None
+        else:
+            sess["state"] = "failed"
+            sess["error"] = (f"recorder exited {rc} — no flow recorded" if rc != 0
+                              else "recorder produced no output — no flow recorded")
+
+    if not ok:
+        # Nothing will ever save a failed recording — clean its scratch spec
+        # dir up right away rather than leaving it for an explicit cancel (or
+        # the atexit hook) to eventually get to.
+        shutil.rmtree(sess["spec_dir"], ignore_errors=True)
+
+
+def do_qa_teach_start(payload: dict) -> dict:
+    """POST /qa-teach-start — validates exactly like `orbit teach`'s
+    qa_teach.main() (SLUG_RE → qa: block present → flows_dir shape →
+    flow-not-exists → URL resolved), refuses a second concurrent session,
+    then hands the slow part (qa_env.up + spawning codegen) to a background
+    thread and returns immediately."""
+    global _teach_session
+    name = (payload.get("name") or "").strip()
+    url_in = (payload.get("url") or "").strip()
+
+    with _TEACH_LOCK:
+        if _teach_session is not None:
+            return {"ok": False,
+                    "msg": f"a teach session for '{_teach_session['name']}' is already "
+                           f"active — cancel or finish it first"}
+        if not SLUG_RE.match(name):
+            return {"ok": False,
+                    "msg": f"'{name}' is not a valid flow name — use a lowercase slug "
+                           f"(letters/digits/./_/-, starting with a letter or digit)"}
+        cfg = _load_cfg()
+        qa_cfg = cfg.get("qa")
+        if not isinstance(qa_cfg, dict):
+            return {"ok": False,
+                    "msg": "no 'qa:' block configured in .autopilot/config.yaml — "
+                           "see config/schema.yaml's qa: section and add one first"}
+        flows_dir = qa_cfg.get("flows_dir") or DEFAULT_QA_FLOWS_DIR
+        bad = _bad_flows_dir_reason(flows_dir)
+        if bad:
+            return {"ok": False, "msg": f"qa.flows_dir '{flows_dir}' is invalid ({bad})"}
+        flow_dir = AP_HOME / flows_dir / name
+        if flow_dir.exists():
+            return {"ok": False,
+                    "msg": f"a flow named '{name}' already exists at {flow_dir} — pick a new name"}
+        url = url_in or qa_cfg.get("base_url")
+        if not url:
+            return {"ok": False,
+                    "msg": "no target URL — pass one or set qa.base_url in config.yaml"}
+
+        spec_dir = tempfile.mkdtemp(prefix="orbit-teach-cc-")
+        spec_path = str(Path(spec_dir) / "steps.spec.ts")
+        flowmap = (AP_HOME / flows_dir).parent / "FLOWMAP.md"
+        sess = {
+            "state": "starting", "name": name, "url": url, "browser": qa_cfg.get("browser"),
+            "flow_dir": flow_dir, "flowmap": flowmap,
+            "spec_dir": spec_dir, "spec_path": spec_path,
+            "handles": [], "proc": None, "error": None, "torn_down": False,
+            # Set True by _qa_teach_bring_up when the persistent "Dev
+            # session" (_QA_SERVICES) is already running — see its own
+            # docstring's "ATTACH MODE" for what this flag then suppresses.
+            "attached": False,
+        }
+        _teach_session = sess
+
+    log_dir = AP_HOME / "state" / "qa" / "teach-logs"
+    threading.Thread(target=_qa_teach_bring_up, args=(sess, qa_cfg, log_dir), daemon=True).start()
+    return {"ok": True, "msg": f"bringing your app up for '{name}'…"}
+
+
+def do_qa_teach_status() -> dict:
+    """GET /qa-teach-status — polled every ~1.5s by the panel while a session
+    is active. A PURE READ of `sess["state"]` — no proc.poll(), no
+    qa_env.down(), no mutation of any kind. The `recording` -> `recorded`/
+    `failed` transition (and tearing qa.services down when it happens) is
+    now entirely _qa_teach_bring_up's job, off its own background thread,
+    because this route is reachable via a blind, token-less, cross-origin
+    GET (only the Host header is checked — see do_GET) and a side effect
+    like downing qa.services must never be triggerable from that."""
+    with _TEACH_LOCK:
+        sess = _teach_session
+        if sess is None:
+            return {"active": False}
+        return {"active": True, "state": sess["state"], "name": sess["name"],
+                "error": sess["error"]}
+
+
+def do_qa_teach_save(payload: dict) -> dict:
+    """POST /qa-teach-save — once `recorded`, writes the taught flow exactly
+    the way `orbit teach` does (reusing qa_teach._write_flow/_update_flowmap
+    verbatim), removes the scratch spec_dir, and clears the session.
+    qa.services are NOT downed here — by the time a session can reach
+    `recorded`, _qa_teach_bring_up has already torn them down itself (that's
+    the whole point of it blocking on the recorder's exit instead of a GET
+    poll doing it). An invalid intent/criteria/requires payload leaves the
+    session in `recorded` (never consumes it) so the operator can fix the
+    form and resubmit without re-recording.
+    Claims the session by flipping state to `saving` (still under the same
+    lock acquisition as the `recorded` check — no other request can observe
+    `recorded` and start a second save, or a cancel run out from under a
+    write in progress) BEFORE releasing the lock to do the (slower) file
+    I/O; do_qa_teach_cancel refuses outright while state is `saving`.
+
+    `requires` (test chaining, Task "prerequisites" — comma-separated string
+    or a list, same dual-shape acceptance as `criteria`) and `provides_auth`
+    (any truthy value) are threaded straight into qa_teach._write_flow, which
+    is the one place that validates each requires entry's SLUG_RE shape
+    (raises on an invalid one — caught below, same as any other _write_flow
+    failure). A named prerequisite that's SLUG_RE-valid but doesn't exist as
+    a flow YET is deliberately NOT blocked — warn, don't block (the operator
+    may be teaching flows out of order, or a chain's own login flow hasn't
+    been recorded yet) — the success message just notes which names weren't
+    found. A flow naming ITSELF in `requires` gets its own clearer note
+    ("a flow can't require itself") instead of being lumped in with that
+    "not taught yet" case — its own dir genuinely doesn't exist yet at this
+    point (mid-save), but that's not the real problem, so saying so would be
+    misleading; qa_run.py's `_resolve_chain` already refuses a self-loop at
+    run time (loud exit 2), this is just a friendlier heads-up now."""
+    global _teach_session
+    with _TEACH_LOCK:
+        sess = _teach_session
+        if sess is None:
+            return {"ok": False, "msg": "no teach session is active"}
+        if sess["state"] != "recorded":
+            return {"ok": False, "msg": f"nothing to save yet — session is '{sess['state']}'"}
+
+        intent = (payload.get("intent") or "").strip()
+        criteria_in = payload.get("criteria")
+        if isinstance(criteria_in, str):
+            criteria = [ln.strip() for ln in criteria_in.splitlines() if ln.strip()]
+        elif isinstance(criteria_in, list):
+            criteria = [str(c).strip() for c in criteria_in if str(c).strip()]
+        else:
+            criteria = []
+        if not intent:
+            return {"ok": False, "msg": "an intent (one line) is required"}
+        if not criteria:
+            return {"ok": False, "msg": "at least one success criterion is required"}
+
+        requires_in = payload.get("requires")
+        if isinstance(requires_in, str):
+            requires = [s.strip() for s in requires_in.split(",") if s.strip()]
+        elif isinstance(requires_in, list):
+            requires = [str(s).strip() for s in requires_in if str(s).strip()]
+        else:
+            requires = []
+        bad = next((r for r in requires if not SLUG_RE.match(r)), None)
+        if bad is not None:
+            return {"ok": False,
+                    "msg": f"'{bad}' is not a valid prerequisite flow name — use a lowercase "
+                           f"slug (letters/digits/./_/-, starting with a letter or digit)"}
+        provides_auth = bool(payload.get("provides_auth"))
+
+        sess["state"] = "saving"
+        name, url = sess["name"], sess["url"]
+        flow_dir, flowmap = sess["flow_dir"], sess["flowmap"]
+        spec_path, spec_dir = sess["spec_path"], sess["spec_dir"]
+
+    # A flow naming ITSELF in `requires` is a distinct case from a genuinely
+    # missing prerequisite: `flow_dir` (== flow_dir.parent / name) never
+    # exists yet at this point (we're still mid-save, before _write_flow
+    # below), so a naive "not (flow_dir.parent / r).is_dir()" check would
+    # lump a self-reference in with "not taught yet" — confusing, since a
+    # flow obviously can't be taught before itself, that's not what's wrong
+    # here. Checked separately so the note says the real problem instead.
+    # Run-time `_resolve_chain` (qa_run.py) already refuses a self-loop
+    # (loud exit 2) — this is purely a friendlier teach-time message, not a
+    # save-time block: the operator may fix `requires` later, same
+    # warn-don't-block posture as a missing prerequisite.
+    self_requires = name in requires
+    missing_prereqs = [r for r in requires if r != name and not (flow_dir.parent / r).is_dir()]
+
+    try:
+        qa_teach._write_flow(flow_dir, name, url, intent, criteria, Path(spec_path),
+                              requires=requires, provides_auth=provides_auth)
+    except Exception as e:
+        # _write_flow does flow_dir.mkdir(parents=True) with no exist_ok, then
+        # writes intent.md/steps.spec.ts/meta.json in sequence — a failure
+        # partway through (e.g. disk full on steps.spec.ts) leaves flow_dir
+        # existing-but-incomplete. Left alone, EVERY retry (save again, or
+        # even a fresh /qa-teach-start for this name after cancelling) would
+        # hit "already exists" forever. Mirrors qa_teach.main()'s own
+        # `except: shutil.rmtree(flow_dir, ignore_errors=True)`.
+        shutil.rmtree(flow_dir, ignore_errors=True)
+        with _TEACH_LOCK:
+            if _teach_session is sess:
+                sess["state"] = "recorded"   # let the operator retry the save
+        return {"ok": False, "msg": f"failed writing the flow ({e})"}
+
+    notes = []
+    if self_requires:
+        notes.append("a flow can't require itself — remove it from 'requires', "
+                      "or this flow's chain will fail every time it runs")
+    if missing_prereqs:
+        notes.append(f"prerequisite(s) not taught yet: {', '.join(missing_prereqs)} — "
+                      f"teach them before running this flow's chain")
+    prereq_note = f" (note: {'; '.join(notes)})" if notes else ""
+
+    try:
+        qa_teach._update_flowmap(flowmap, name, intent, url, "never run")
+    except OSError as e:
+        # Mirrors qa_teach.main(): a FLOWMAP write failure never masks an
+        # already-written flow — the flow itself is done; just say so.
+        shutil.rmtree(spec_dir, ignore_errors=True)
+        with _TEACH_LOCK:
+            if _teach_session is sess:
+                _teach_session = None
+        return {"ok": True, "msg": f"flow '{name}' saved; FLOWMAP update failed ({e}){prereq_note}",
+                "flow": name}
+
+    shutil.rmtree(spec_dir, ignore_errors=True)
+    with _TEACH_LOCK:
+        if _teach_session is sess:
+            _teach_session = None
+    return {"ok": True, "msg": f"flow '{name}' saved{prereq_note}", "flow": name}
+
+
+def do_qa_teach_cancel() -> dict:
+    """POST /qa-teach-cancel — kill the recorder if it's still alive, tear
+    qa.services down (unless _qa_teach_bring_up already claimed that — see
+    _teach_claim_teardown; harmless/idempotent either way, but the claim
+    keeps it to exactly one call), remove the scratch spec_dir, and clear
+    the session — for whatever state it was in (`starting`/`recording`/
+    `recorded`/`failed`), EXCEPT `saving`: a save in progress owns spec_dir
+    (mid-copy into flow_dir) and qa.services' fate, so cancel refuses rather
+    than rmtree-ing spec_dir or re-downing handles out from under it (that
+    race is what used to turn a concurrent save into a FileNotFoundError,
+    trip the "orphaned flow_dir" bug, and double-down the same handles).
+    ATTACH MODE: if this session attached to the persistent "Dev session"
+    (sess["attached"]), qa.services are never downed here — they were never
+    THIS session's to tear down (handles stays `[]` in that mode anyway, so
+    down() would be a no-op either way, but the flag makes the intent
+    explicit rather than relying on that)."""
+    global _teach_session
+    with _TEACH_LOCK:
+        sess = _teach_session
+        if sess is None:
+            return {"ok": False, "msg": "no teach session is active"}
+        if sess["state"] == "saving":
+            return {"ok": False, "msg": "a save is in progress — try again in a moment"}
+        _teach_session = None
+        proc, handles, spec_dir = sess["proc"], sess["handles"], sess["spec_dir"]
+        attached = sess.get("attached", False)
+    _teach_kill_proc(proc)
+    if not attached and _teach_claim_teardown(sess):
+        qa_env.down(handles)
+    shutil.rmtree(spec_dir, ignore_errors=True)
+    return {"ok": True, "msg": "teach session cancelled"}
+
+
+def _teach_atexit_cleanup() -> None:
+    """Best-effort orphan guard for the dashboard-restart-mid-session case:
+    command_center.py had no existing shutdown hook to piggyback on (grepped
+    for atexit/signal handlers — none), so this registers the first one.
+    Covers a clean process exit (Ctrl-C, /restart-dashboard) only — it
+    can't run after a SIGKILL/crash, which is why qa_env's own services and
+    the codegen child are each spawned with their own process group/lifetime
+    rather than relying solely on this to ever run. Kills the recorder,
+    tears qa.services down (via the same claim-guard everything else uses,
+    in case the bring-up thread is mid-teardown itself right now — and
+    skipped entirely when the session attached to the persistent "Dev
+    session", same as do_qa_teach_cancel), and removes the scratch spec_dir
+    — this last part used to be missing here (unlike cancel), leaking a
+    tmpdir on every restart mid-session."""
+    sess = _teach_session
+    if sess is None:
+        return
+    _teach_kill_proc(sess.get("proc"))
+    if not sess.get("attached") and _teach_claim_teardown(sess):
+        qa_env.down(sess.get("handles") or [])
+    spec_dir = sess.get("spec_dir")
+    if spec_dir:
+        shutil.rmtree(spec_dir, ignore_errors=True)
+
+
+atexit.register(_teach_atexit_cleanup)
+
+
+# ── onboarding: intake + knowledge-base build/refresh ─────────────────────────
+# Same detached-Popen discipline as do_epic_action/do_qa_action: spawn, log to
+# a FIXED name under $AP_STATE/logs/ (not timestamped — the Run view polls that
+# one name via /api/cmdlog), return immediately with a started-msg. The log is
+# opened "wb" (truncate) rather than "ab" (append) deliberately: unlike the QA
+# actions above (one log per flow/regression run, never reused), intake/
+# knowledge share ONE fixed filename across every re-run, so appending would
+# silently mix an old run's output into the next one's tail.
+_CMDLOG_ALLOW = {"intake", "knowledge"}
+_KNOWLEDGE_SUBS = {"build", "refresh"}
+
+
+def do_intake_run() -> str:
+    """Spawn `intake.py <REPO>` detached — the zero-day survey that proposes
+    backlog tasks (always status:proposed/autopilot:human; a human triages
+    them on Deep space). Safe to re-run any time."""
+    log = LOGDIR / "intake.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("wb") as lf:
+        subprocess.Popen([sys.executable, str(ENGINE / "intake.py"), str(REPO)],
+                         stdout=lf, stderr=lf, stdin=subprocess.DEVNULL, start_new_session=True)
+    return "Intake started — surveying the repo and proposing backlog tasks. Watch the log below."
+
+
+def do_knowledge_run(sub: str) -> str:
+    """Spawn `knowledge.py <REPO> build|refresh` detached — builds/refreshes
+    $AP_HOME/knowledge/, the architecture map the agent reads each cycle."""
+    sub = (sub or "build").strip() or "build"
+    if sub not in _KNOWLEDGE_SUBS:
+        return f"Invalid knowledge action '{sub}' — use build or refresh."
+    log = LOGDIR / "knowledge.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("wb") as lf:
+        subprocess.Popen([sys.executable, str(ENGINE / "knowledge.py"), str(REPO), sub],
+                         stdout=lf, stderr=lf, stdin=subprocess.DEVNULL, start_new_session=True)
+    verb = "Building" if sub == "build" else "Refreshing"
+    return f"{verb} the knowledge base — this can take a few minutes. Watch the log below."
+
+
+def read_cmdlog(name: str, max_lines: int = 400) -> str:
+    """Tail of $AP_STATE/logs/<name>.log for the Run view's live poll. `name`
+    must be pre-validated by the caller (do_GET checks membership in
+    _CMDLOG_ALLOW BEFORE calling this, same confinement discipline as
+    read_qa_shot/read_qa_report) — double-checked here too. Never raises and
+    never 500s: a log that hasn't been written yet (action never run) yields
+    an empty string, not an error — the Run view treats that as 'idle'."""
+    if name not in _CMDLOG_ALLOW:
+        return ""
+    p = LOGDIR / f"{name}.log"
+    if not p.is_file():
+        return ""
+    try:
+        return "\n".join(p.read_text(errors="ignore").splitlines()[-max_lines:])
+    except OSError:
+        return ""
+
+
 def cycletail(max_lines: int = 120) -> dict:
     """Human-readable live tail of the newest cycle log. stream-json logs are
     parsed into narrator lines (agent text, tool calls, final cost); legacy
@@ -1418,18 +2971,63 @@ def _validate_config(d: dict) -> list:
     return errs
 
 
+def _atomic_write_config_text(text: str) -> None:
+    """Write `text` to config.yaml via the same temp+rename pattern — the
+    ONLY way bytes ever land in config.yaml, whether that's a fresh save
+    (_write_config) or a rollback restore (do_save_config). Sharing this
+    means the restore-after-a-bad-validate path gets the same atomicity
+    guarantee as a normal save: a crash mid-write can never leave config.yaml
+    truncated, before OR after a rollback."""
+    tmp = AP_HOME / "config.yaml.tmp"
+    tmp.write_text(text)
+    tmp.replace(AP_HOME / "config.yaml")
+
+
 def _write_config(cfg: dict) -> None:
     """Atomically write config.yaml with a generated header (the Admin panel owns it)."""
     header = ("# Orbit config for this target repo — the single source of truth for\n"
               "# both the loop and the dashboard. Edited via the dashboard Admin panel.\n\n")
-    tmp = AP_HOME / "config.yaml.tmp"
-    tmp.write_text(header + yaml.safe_dump(cfg, sort_keys=False, default_flow_style=False, allow_unicode=True))
-    tmp.replace(AP_HOME / "config.yaml")
+    _atomic_write_config_text(header + yaml.safe_dump(cfg, sort_keys=False, default_flow_style=False, allow_unicode=True))
+
+
+def _config_py_validate(target: Path) -> tuple[bool, list[str]]:
+    """Run config.py's OWN `validate` subcommand against `target` — the same
+    authoritative schema check the loop's startup and `orbit intake` enforce
+    (gates, qa, plan, knowledge, pull_requests, spec, repo). Subprocess, not
+    an import: validate() calls sys.exit() on failure (a CLI contract, not a
+    library one) and reads config.yaml straight off disk — shelling out gets
+    both right for free instead of teaching this module a second copy of the
+    schema (which is exactly what config.py's docstring says it's for)."""
+    try:
+        r = subprocess.run([sys.executable, str(ENGINE / "config.py"), "validate", str(target)],
+                           capture_output=True, text=True, timeout=15)
+    except Exception as e:
+        return False, [f"could not run config.py validate: {e}"]
+    if r.returncode == 0:
+        return True, []
+    errs = [ln.strip().lstrip("✗").strip() for ln in (r.stdout or "").splitlines()
+            if ln.strip().startswith("✗")]
+    if not errs:
+        errs = [(r.stdout or r.stderr or "config validate failed").strip()]
+    return False, errs
 
 
 def do_save_config(raw: str) -> str:
     """Validate an incoming JSON patch, merge it into config.yaml, and persist.
-    Keys not present in the patch are preserved (gates/env/etc. survive)."""
+    Keys not present in the patch are preserved (gates/env/etc. survive).
+
+    Two validation passes: _validate_config's cheap shape checks run first
+    (no disk I/O — they cover fields config.py's validate() doesn't:
+    permission_mode, interval/max-tasks/timeout, git_host, sources,
+    workable_categories). The merged config is then WRITTEN and re-checked
+    with config.py's own validate() — the full-schema authority for gates/
+    qa/plan/knowledge/pull_requests/spec/repo. A validate() failure rolls the
+    write back (restoring the prior bytes via the same atomic temp+rename
+    _atomic_write_config_text uses, or removing the file if it didn't exist
+    before) so a bad qa/plan/knowledge block is rolled back within seconds —
+    it is genuinely on disk for the brief window the validate() subprocess
+    runs, but never stays there, and the restore itself can never leave a
+    half-written file even if the process dies mid-rollback."""
     try:
         incoming = json.loads(raw or "{}")
     except Exception as e:
@@ -1439,9 +3037,19 @@ def do_save_config(raw: str) -> str:
     errs = _validate_config(incoming)
     if errs:
         return "Rejected — " + "; ".join(errs)
+    cfg_path = AP_HOME / "config.yaml"
+    existed = cfg_path.exists()
+    backup = cfg_path.read_text() if existed else None
     cfg = _load_cfg()
     cfg.update(incoming)   # merge: preserves keys the UI did not send
     _write_config(cfg)
+    ok, cfg_errs = _config_py_validate(REPO)
+    if not ok:
+        if existed:
+            _atomic_write_config_text(backup)
+        else:
+            cfg_path.unlink(missing_ok=True)
+        return "Rejected — " + "; ".join(cfg_errs)
     reload_settings()
     return "✓ Saved config.yaml. Use 'Restart loop' to apply it to the running loop."
 
@@ -1595,6 +3203,70 @@ def _on_board(t: dict) -> bool:
     return t.get("autopilot") in ("review-only", "human") or t.get("status") == "proposed"
 
 
+def _qa_evidence(e: dict) -> dict:
+    # attachments/qa surfaced verbatim from a ledger entry (Task 15's attach /
+    # qa-verdict verbs) — absent on the entry means the key is ABSENT on the
+    # row (not null), so existing consumers that don't know these keys yet
+    # see no change.
+    extra = {}
+    if e.get("attachments"):
+        extra["attachments"] = e["attachments"]
+    if e.get("qa"):
+        extra["qa"] = e["qa"]
+    return extra
+
+
+# ── onboarding status (Run/Knowledge views) ────────────────────────────────
+# Terminal markers are each script's OWN final-line text (intake.py's very
+# last print; knowledge.py's success/failure lines) — deliberately NOT
+# anything printed mid-run (e.g. intake's per-gate "✓ gate <name>: PASS"
+# lines, which appear well before the run finishes and would read as done
+# while the survey agent is still working).
+_INTAKE_DONE_MARKERS = ("next: triage the proposals",)
+_KNOWLEDGE_DONE_MARKERS = ("knowledge build complete", "knowledge refresh complete",
+                          "VALIDATE:", "survey agent failed", "no knowledge base (run:",
+                          "knowledge is fresh")
+_CMDLOG_STALE_SECONDS = 1800   # 30 min — beyond this, treat a markerless log as dead, not running
+
+
+def _cmdlog_running(name: str, markers: tuple) -> bool:
+    """Best-effort 'is this onboarding action still going': the log exists,
+    was touched recently, and its tail doesn't yet show one of the action's
+    own terminal markers. Not a PID check — the spawned process is detached,
+    so the log is the only signal a (possibly-restarted) dashboard process
+    can see. Markerless-and-stale (>30min untouched) falls back to 'not
+    running' so a crash that skipped every marker doesn't stay stuck forever."""
+    p = LOGDIR / f"{name}.log"
+    if not p.is_file():
+        return False
+    try:
+        age = time.time() - p.stat().st_mtime
+        tail = p.read_text(errors="ignore")[-4000:]
+    except OSError:
+        return False
+    if any(m in tail for m in markers):
+        return False
+    return age <= _CMDLOG_STALE_SECONDS
+
+
+def onboarding_state() -> dict:
+    """Best-effort onboarding status for the Run/Knowledge views. Every value
+    defaults to a falsy/empty shape — a target with no onboarding story yet
+    (no knowledge/, no gates, nothing ever run) still gets a well-formed
+    dict, never an error; the UI reads absence as 'not done yet'."""
+    cfg = _load_cfg()
+    qa_cfg, plan_cfg = cfg.get("qa"), cfg.get("plan")
+    return {
+        "has_knowledge": (AP_HOME / "knowledge" / "INDEX.md").is_file(),
+        "knowledge_docs": _knowledge_docs(),
+        "intake_running": _cmdlog_running("intake", _INTAKE_DONE_MARKERS),
+        "knowledge_running": _cmdlog_running("knowledge", _KNOWLEDGE_DONE_MARKERS),
+        "gates_configured": bool(cfg.get("gates")),
+        "qa_configured": isinstance(qa_cfg, dict) and bool(qa_cfg),
+        "plan_configured": isinstance(plan_cfg, dict) and bool(plan_cfg),
+    }
+
+
 def build_state() -> dict:
     reload_settings()   # config.yaml is the source of truth — reflect Admin edits live
     backlog = load_backlog()
@@ -1657,6 +3329,7 @@ def build_state() -> dict:
                 running.append(row)
             else:
                 row["reason"] = row.get("reason") or "stalled — claimed but not the live cycle's task (orphaned; Answer & re-queue or Set aside)"
+                row.update(_qa_evidence(e))
                 escalated.append(row)
         elif st in ("committed", "pushed", "merged", "rejected"):
             branch = (e.get("remote_ref") or "").removeprefix("origin/") or e.get("branch") or ""
@@ -1686,10 +3359,12 @@ def build_state() -> dict:
                 "has_packet": (REVIEWS / f"task-{tid}.md").exists(),
                 "has_patch": bool(e.get("patch")),
             })
+            row.update(_qa_evidence(e))
             done.append(row)
         elif st == "escalated":
             row.update({"state": st, "forced": bool(e.get("forced")),
                         "can_reject": lifecycle.check(st, "rejected", e) is None})
+            row.update(_qa_evidence(e))
             escalated.append(row)
 
     # NEXT UP = the loop's real pick order: queue.json, safe + not worked/skipped,
@@ -1855,6 +3530,18 @@ def build_state() -> dict:
                "branches": _branch_rows,
                "counts": {"next": len(next_up), "board": len(board), "done": len(done),
                           "escalated": len(escalated), "skipped": len(skips)}})
+
+    # Present only when the target actually has a flow library — absent (not
+    # null) so a target with no QA story sees a byte-identical /api/state.
+    qa_flows = qa_flow_library()
+    if qa_flows is not None:
+        rt["qa_flows"] = qa_flows
+    # Same discipline: present only when qa.services is configured, so a
+    # target with no dev-session story sees a byte-identical /api/state.
+    qa_svc = qa_services_state()
+    if qa_svc is not None:
+        rt["qa_services"] = qa_svc
+    rt["onboarding"] = onboarding_state()
     return rt
 
 
@@ -1862,13 +3549,18 @@ def build_state() -> dict:
 
 
 class Handler(BaseHTTPRequestHandler):
-    def _send(self, body: bytes, ctype: str, code=200):
+    def _send(self, body: bytes, ctype: str, code=200, cache: str | None = None):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        # Never let the browser cache the SPA shell — otherwise a redeploy of the
-        # dashboard JS leaves a stale tab (buttons "missing" until a hard refresh).
-        self.send_header("Cache-Control", "no-store, must-revalidate")
+        # Never let the browser cache the SPA shell (or any other route) by
+        # default — otherwise a redeploy of the dashboard JS leaves a stale tab
+        # (buttons "missing" until a hard refresh). Routes that explicitly opt
+        # in (e.g. /vendor/* — static files not edited live; NOTE the URL is
+        # unversioned, not content-addressed, so a future edit to a vendored
+        # file needs a cache-busting rename, not just an in-place overwrite)
+        # pass their own `cache` value instead.
+        self.send_header("Cache-Control", cache or "no-store, must-revalidate")
         self.end_headers()
         self.wfile.write(body)
 
@@ -1907,6 +3599,37 @@ class Handler(BaseHTTPRequestHandler):
             self._send(json.dumps(config_payload()).encode(), "application/json")
         elif path == "/api/cycletail":
             self._send(json.dumps(cycletail()).encode(), "application/json")
+        elif path == "/api/cmdlog":
+            # Confined tail for the Run view's live poll — name must be in the
+            # fixed allowlist (never a filesystem path from the client).
+            name = (qs.get("name", [""])[0]).strip()
+            if name not in _CMDLOG_ALLOW:
+                self._send(b"invalid name", "text/plain", 400); return
+            self._send(read_cmdlog(name).encode(), "text/plain; charset=utf-8")
+        elif path == "/api/knowledge-doc":
+            # Confined GET for the Knowledge view's doc browser — see
+            # read_knowledge_doc (allowlist = a LIVE listing of $AP_HOME/knowledge/,
+            # not just a shape check).
+            name = (qs.get("name", [""])[0]).strip()
+            doc = read_knowledge_doc(name)
+            if doc is None:
+                self._send(b"not found", "text/plain", 404); return
+            self._send(doc.encode(), "text/plain; charset=utf-8")
+        elif path.startswith("/vendor/"):
+            # Confined GET for vendored client-side libs (e.g. cytoscape.min.js
+            # for the Knowledge view's graph mode) — token-less like /review,
+            # same posture (loopback-bound, GET is read-only). See read_vendor
+            # for the allowlist + confinement; cached since these are static
+            # files never edited live (unlike cc_shell.html, which is read
+            # per-request precisely so it ISN'T cached). NOTE: the URL is
+            # unversioned/not content-addressed (just the bare filename) — a
+            # future edit to a vendored file needs a cache-busting rename (or
+            # a shorter max-age), not just overwriting the file in place.
+            served = read_vendor(path[len("/vendor/"):])
+            if served is None:
+                self._send(b"not found", "text/plain", 404); return
+            body, ctype = served
+            self._send(body, ctype, cache="public, max-age=86400"); return
         elif path in ("/review", "/diff"):
             if not tid or not _TID_RE.match(tid):
                 self._send(b"invalid id", "text/plain", 400); return
@@ -1914,6 +3637,23 @@ class Handler(BaseHTTPRequestHandler):
             if body is None:
                 self._send(b"not found for this task", "text/plain", 404); return
             self._send(body.encode(), "text/plain; charset=utf-8")
+        elif path in ("/qa-shot", "/qa-report"):
+            # Confined GET routes for QA evidence — token-less like /review and
+            # /diff (loopback-bound, GET is read-only). `p` is a path relative
+            # to $AP_STATE/qa/; see _qa_path_ok/read_qa_shot/read_qa_report.
+            qp = (qs.get("p", [""])[0]).strip()
+            if not _qa_path_ok(qp):
+                self._send(b"invalid path", "text/plain", 400); return
+            if path == "/qa-shot":
+                shot = read_qa_shot(qp)
+                if shot is None:
+                    self._send(b"not found", "text/plain", 404); return
+                body, ctype = shot
+                self._send(body, ctype); return
+            report = read_qa_report(qp)
+            if report is None:
+                self._send(b"not found", "text/plain", 404); return
+            self._send(report.encode(), "text/plain; charset=utf-8")
         elif path == "/epic-spec":
             # The planner's spec for one epic — rendered in the packet viewer.
             if not tid or not _TID_RE.match(tid):
@@ -1929,6 +3669,11 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(gf.read_text().encode(), "text/plain; charset=utf-8"); return
             self._send(b"No guide found. Create GUIDE.md in your .autopilot/ directory.",
                        "text/plain; charset=utf-8")
+        elif path == "/qa-teach-status":
+            # Read-only poll for the "New test / Record" panel — same
+            # token-less GET posture as /api/state (host-checked above, no
+            # X-CC-Token; it changes nothing).
+            self._send(json.dumps(do_qa_teach_status()).encode(), "application/json")
         else:
             self._send(b"not found", "text/plain", 404)
 
@@ -1996,6 +3741,51 @@ class Handler(BaseHTTPRequestHandler):
                 msg = do_reap()
             elif path == "/lintok":
                 msg = do_lintok(tid)
+            elif path == "/intake-run":
+                msg = do_intake_run()
+            elif path == "/knowledge-run":
+                msg = do_knowledge_run((data.get("sub", ["build"])[0]).strip())
+            elif path == "/qa-action":
+                result = do_qa_action({"action": (data.get("action", [""])[0]).strip(),
+                                       "flow": (data.get("flow", [""])[0]).strip(),
+                                       "file": (data.get("file", [""])[0]).strip(),
+                                       "name": (data.get("name", [""])[0]).strip(),
+                                       "reason": (data.get("reason", [""])[0]).strip()})
+                self._send(json.dumps(result).encode(), "application/json"); return
+            elif path in ("/qa-teach-start", "/qa-teach-save", "/qa-teach-cancel"):
+                # JSON body (postJSON, not this handler's usual form-encoded
+                # `data`) — mirrors do_save_config's raw-body JSON parsing for
+                # /api/config, the one other JSON-bodied POST route here.
+                try:
+                    payload = json.loads(raw) if raw else {}
+                except Exception:
+                    payload = {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                if path == "/qa-teach-start":
+                    result = do_qa_teach_start(payload)
+                elif path == "/qa-teach-save":
+                    result = do_qa_teach_save(payload)
+                else:
+                    result = do_qa_teach_cancel()
+                self._send(json.dumps(result).encode(), "application/json"); return
+            elif path in ("/qa-services-start", "/qa-services-stop", "/qa-services-restart"):
+                # Same JSON-body posture as the /qa-teach-* trio above —
+                # /qa-services-restart's optional `service` field is the
+                # only payload any of these three ever take.
+                try:
+                    payload = json.loads(raw) if raw else {}
+                except Exception:
+                    payload = {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                if path == "/qa-services-start":
+                    result = do_qa_services_start()
+                elif path == "/qa-services-stop":
+                    result = do_qa_services_stop()
+                else:
+                    result = do_qa_services_restart(payload)
+                self._send(json.dumps(result).encode(), "application/json"); return
             elif path == "/epic-action":
                 if not tid:
                     self._send(b'{"ok":false,"msg":"missing epic id"}', "application/json", 400); return

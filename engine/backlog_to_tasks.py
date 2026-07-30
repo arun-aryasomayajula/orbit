@@ -85,6 +85,10 @@ def build_task_string(t: dict) -> str:
     if ans:
         parts.append("\n\nOPERATOR ANSWER (a human answered this task's earlier escalation — "
                      "treat it as part of the contract):\n" + ans)
+    qaf = (t.get("qa_findings") or "").strip()
+    if qaf:
+        parts.append("\n\nQA FINDINGS (a QA agent observed the previous attempt failing — "
+                     "read the full report file first): " + qaf)
     return "".join(parts)
 
 

@@ -35,6 +35,7 @@ skills:
 defaults:
   checker: { agent: checker, model: sonnet }      # the gate — always runs
   verifier: { agent: verifier, model: sonnet }    # spec-conformance — always runs
+  planner: { agent: planner, model: sonnet }      # task-level plan — runs when config `plan:` is on
   always_discipline: verification-before-completion   # execute the gate, evidence before "done"
   max_build_cycles: 5
 

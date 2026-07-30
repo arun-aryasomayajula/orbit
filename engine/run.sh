@@ -211,6 +211,17 @@ one_iteration() {
   # of the base branch) BEFORE regenerating the queue, so they never re-inject or
   # re-escalate into the operator inbox.
   python3 "$ENGINE/autoclose.py" >>"$LOGDIR/orbit.log" 2>&1 || log "WARN: autoclose failed"
+  python3 "$ENGINE/knowledge.py" "$TARGET" autorefresh --quiet >>"$LOGDIR/orbit.log" 2>&1 || log "WARN: knowledge autorefresh failed"
+  # Regression sweep (Task 27): cursor-triggered replay of every approved taught
+  # flow (steps.json-bearing). qa_run.py's own --regression --if-changed posture
+  # is silent-exit-0 fast whenever there's nothing to do (no qa: block at all,
+  # unchanged trunk/cadence, or a sweep already running) — this line can never
+  # break the loop: any nonzero exit (a failed flow, a bad qa.flows_dir, a crash)
+  # just logs a WARN and the iteration continues, exactly like every other
+  # best-effort hook here. Runs inline; bounded by the sweep deadline (qa_run.py
+  # stops LAUNCHING new flows past 2x qa.timeout_seconds of its own elapsed
+  # time — a flow already running still gets its full per-flow timeout).
+  python3 "$ENGINE/qa_run.py" "$TARGET" --regression --if-changed >>"$LOGDIR/orbit.log" 2>&1 || log "WARN: regression sweep failed"
   python3 "$ENGINE/backlog_to_tasks.py" >>"$LOGDIR/orbit.log" 2>&1 || log "WARN: backlog→queue refresh failed"
   if [ -f "$STATE/AUTO_PROMOTE" ] && [ "$(count_pickable)" = "0" ]; then
     log "auto-feed: promoting next safe task"
@@ -240,17 +251,44 @@ one_iteration() {
   if [ "$ahead" -gt 0 ]; then
     local sha branch; sha="$(git -C "$WT" rev-parse --short HEAD 2>/dev/null || echo '?')"
     branch="$ORBIT_BRANCH_PREFIX/task-${tid:-cycle-$(date '+%Y%m%dT%H%M%S')}"
-    # Runtime verification (opt-in `runtime_check:` config): observe the change in
-    # the RUNNING product before pushing. Only exit code 3 — the check RAN and
-    # observed behaviour contradicting a `required` category's contract — blocks
-    # the ship; every other outcome (skipped, unable-to-run, agent error) ships.
+    # Scope-fence gate (opt-in `plan.enforce: "block"`): refuse to push a commit
+    # that touches files outside the planner's plan_scope fence. Only exit code
+    # 3 — plan file + fence + enforce mode all present/parseable AND the commit
+    # strays outside it — blocks the ship; every other outcome (feature off,
+    # missing/unparseable plan, in-scope) ships.
     if [ -n "$tid" ]; then
-      python3 "$ENGINE/runtime_check.py" "$tid" "$WT" >>"$LOGDIR/orbit.log" 2>&1
+      python3 "$ENGINE/plan_gate.py" "$tid" "$WT" >>"$LOGDIR/orbit.log" 2>&1
       if [ "$?" = "3" ]; then
-        log "runtime check contradicted the contract — escalating instead of shipping (patch kept: ${patch:-none})"
-        python3 "$ENGINE/ledger.py" escalate "$tid" "runtime check: observed behaviour contradicts acceptance criteria (see reviews/task-$tid-runtime.md)" >>"$LOGDIR/orbit.log" 2>&1 \
+        log "plan gate: commit touches files outside the plan's scope — escalating instead of shipping (patch kept: ${patch:-none})"
+        python3 "$ENGINE/ledger.py" escalate "$tid" "plan gate: commit touches files outside the plan's scope (see reviews/task-$tid-plan-gate.txt)" >>"$LOGDIR/orbit.log" 2>&1 \
           || log "WARN: ledger escalate not recorded for $tid (lifecycle gate or write error — see orbit.log)"
-        notify "🛑 Orbit runtime check" "task $tid: the running product contradicts the contract — escalated, nothing pushed" "$DASH"
+        notify "🛑 Orbit plan gate" "task $tid: commit touches files outside the plan's scope — escalated, nothing pushed" "$DASH"
+        rm -f "$marker" "$STATE/.cycle-candidate" 2>/dev/null || true
+        echo OK; return
+      fi
+    fi
+    # QA gate (engine/qa_check.py): a browser-driving QA agent (opt-in `qa:`
+    # config) when present, else the legacy `runtime_check:` behaviour byte-
+    # for-byte — either way, observe the change in the RUNNING product before
+    # pushing. Exit 3 escalates (contradiction, or a QA `fail` on a `required`
+    # category at the bounce cap); QA-only exit 4 bounces the SAME task back
+    # to the queue with findings folded in instead. Every other outcome
+    # (skipped, unable-to-run, agent error) ships.
+    if [ -n "$tid" ]; then
+      python3 "$ENGINE/qa_check.py" "$tid" "$WT" "$patch" >>"$LOGDIR/orbit.log" 2>&1
+      local qa_rc="$?"
+      if [ "$qa_rc" = "3" ]; then
+        log "QA gate: contract contradicted or bounce cap reached — escalating instead of shipping (patch kept: ${patch:-none})"
+        python3 "$ENGINE/ledger.py" escalate "$tid" "QA gate: contract contradicted or bounce cap reached — see reviews/task-$tid-runtime.md" >>"$LOGDIR/orbit.log" 2>&1 \
+          || log "WARN: ledger escalate not recorded for $tid (lifecycle gate or write error — see orbit.log)"
+        notify "🛑 Orbit QA gate" "task $tid: contract contradicted or bounce cap reached — escalated, nothing pushed" "$DASH"
+        rm -f "$marker" "$STATE/.cycle-candidate" 2>/dev/null || true
+        echo OK; return
+      elif [ "$qa_rc" = "4" ]; then
+        # dev⇄QA bounce: qa_check.py already re-filed the SAME task (status
+        # queued, findings folded in) and cleared its ledger entry — nothing
+        # to push, nothing to escalate, and qa_check.py already notified.
+        log "QA bounced task $tid back to the queue"
         rm -f "$marker" "$STATE/.cycle-candidate" 2>/dev/null || true
         echo OK; return
       fi

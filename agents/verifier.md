@@ -19,6 +19,9 @@ NEVER edit code.
 - You inspect the actual change yourself — do not trust a summary.
 - The change is **staged but not yet committed** (the orchestrator stages it, then calls
   you, then commits only if you pass). So inspect the STAGED diff, not `HEAD`.
+- **When a plan is provided:** the plan file (`$AP_STATE/reviews/task-<id>-plan.md`) and
+  its current `plan_scope` fence (`edit`/`create`/`forbid`/`allow_incidental` — the last
+  such fence in the file if it was amended) — the scope the maker was told to honor.
 
 ## What to do
 1. See the change: `git diff --cached HEAD` (full staged diff vs the loop's base branch — HEAD is the base tip at verify time, since the atomic commit hasn't happened yet) and `git diff --cached --stat HEAD`. If that is empty, also check `git status --porcelain` — an empty staged diff with a dirty tree means nothing was staged; report that as `NONCONFORMING`.
@@ -36,6 +39,8 @@ NEVER edit code.
 - **Gamed:** the production code was weakened, a check was loosened/skipped, or behavior
   was changed only to make a test pass rather than to do the task.
 - **Spec drift:** the change contradicts the project's configured standing spec (if any) or the task's stated intent.
+- **Off-plan** (only when a plan is provided): a staged path outside `edit` ∪ `create` ∪
+  `allow_incidental`, or inside `forbid`. Name the offending path.
 
 When uncertain whether a requirement is met, default to **FAIL** and say what evidence is
 missing — a false PASS ships a bad change; a false FAIL only costs one more cycle.

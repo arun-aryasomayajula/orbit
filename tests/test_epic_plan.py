@@ -134,3 +134,93 @@ tasks:
     assert {t["id"]: t["status"] for t in doc["tasks"]} == {"one": "proposed", "two": "queued"}
     assert "# keep this comment" in bl.read_text()
     assert not ba.set_task_field(bl, "missing", "status", "queued")
+
+
+def test_get_task_field_reads_plain_and_missing(tmp_path):
+    bl = tmp_path / "backlog.yaml"
+    bl.write_text("""tasks:
+  - id: one
+    status: proposed
+    qa_bounces: 2
+  - id: two
+    status: queued
+""")
+    assert ba.get_task_field(bl, "one", "status") == "proposed"
+    assert ba.get_task_field(bl, "one", "qa_bounces") == "2"
+    assert ba.get_task_field(bl, "one", "no_such_field") is None
+    assert ba.get_task_field(bl, "missing", "status") is None
+
+
+def test_get_task_field_strips_trailing_inline_comment_on_unquoted_scalar(tmp_path):
+    # A hand-annotated field (`qa_bounces: 2  # bumped by hand`) must read as
+    # "2", not "2  # bumped by hand" — int("2  # ...") would raise, and a
+    # caller defaulting on that error (e.g. qa_check._read_qa_bounces) would
+    # silently treat an already-capped counter as zero.
+    bl = tmp_path / "backlog.yaml"
+    bl.write_text("""tasks:
+  - id: one
+    qa_bounces: 2  # bumped by hand after a manual retest
+""")
+    assert ba.get_task_field(bl, "one", "qa_bounces") == "2"
+
+
+def test_get_task_field_preserves_hash_inside_a_quoted_scalar(tmp_path):
+    # A `#` INSIDE a quoted value is content, not a comment — must survive.
+    bl = tmp_path / "backlog.yaml"
+    bl.write_text('''tasks:
+  - id: one
+    qa_findings: "drove the flow \\u2014 see ops/qa/SEEN.md #3 for the dupe"
+''')
+    val = ba.get_task_field(bl, "one", "qa_findings")
+    assert val == '"drove the flow \\u2014 see ops/qa/SEEN.md #3 for the dupe"'
+    assert json.loads(val) == "drove the flow — see ops/qa/SEEN.md #3 for the dupe"
+
+
+def test_get_task_field_trailing_comment_after_closing_quote_is_dropped(tmp_path):
+    bl = tmp_path / "backlog.yaml"
+    bl.write_text('''tasks:
+  - id: one
+    qa_findings: "no hash here"   # this trailing comment must be dropped
+''')
+    val = ba.get_task_field(bl, "one", "qa_findings")
+    assert val == '"no hash here"'
+    assert json.loads(val) == "no hash here"
+
+
+def test_set_task_field_value_with_backslash_u_sequence_is_literal(tmp_path):
+    # Regression for the regex-template bug (Phase 3 finding #1):
+    # `set_task_field` used to build its replacement as an f-string TEMPLATE
+    # (`rf"\g<1>{field}: {value}"`) fed straight into `pat.sub`, so a `value`
+    # containing a literal `\u` sequence — exactly what `json.dumps` emits
+    # for a non-ASCII em dash, as `_bounce` writes for `qa_findings` — raised
+    # `re.error: bad escape \u` the moment the field ALREADY existed on the
+    # block (the substitute path; a fresh insert never hit `pat.sub` at all).
+    # The fix replaces an EXISTING field's value with a plain callable, so
+    # `value` is always literal data, never re-interpreted as
+    # replacement-string escapes.
+    bl = tmp_path / "backlog.yaml"
+    bl.write_text('''tasks:
+  - id: one
+    qa_findings: "old value"
+''')
+    value = json.dumps("drove the flow — button dead \\ still")
+    assert ba.set_task_field(bl, "one", "qa_findings", value)   # must not raise re.error
+    text = bl.read_text()
+    assert f"qa_findings: {value}" in text
+    doc = yaml.safe_load(text)
+    tasks = {t["id"]: t for t in doc["tasks"]}
+    assert tasks["one"]["qa_findings"] == "drove the flow — button dead \\ still"
+
+
+def test_set_task_field_backreference_lookalike_value_is_literal(tmp_path):
+    # A value that LOOKS like a regex backreference (`\g<1>`, `\1`) must be
+    # written verbatim, not expanded against the match — same literal-value
+    # guarantee as the backslash-u case above, from the opposite direction.
+    bl = tmp_path / "backlog.yaml"
+    bl.write_text('''tasks:
+  - id: one
+    status: proposed
+''')
+    assert ba.set_task_field(bl, "one", "status", r"\g<1>weird\1value")
+    text = bl.read_text()
+    assert r"status: \g<1>weird\1value" in text

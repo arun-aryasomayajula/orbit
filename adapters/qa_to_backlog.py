@@ -23,9 +23,11 @@ Usage:  python3 qa_to_backlog.py            # append new tasks
         python3 qa_to_backlog.py --dry-run
 """
 from __future__ import annotations
+import json
 import os
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import yaml
@@ -39,9 +41,12 @@ ORBIT_HOME = Path(os.environ.get("ORBIT_HOME") or Path(__file__).resolve().paren
 sys.path.insert(0, str(ORBIT_HOME / "engine"))
 from backlog_append import append_raw_blocks
 
+AP_STATE = Path(os.environ.get("AP_STATE") or AP_HOME / "state")
 REPO = AP_HOME.parent
 BACKLOG = AP_HOME / "backlog.yaml"
 SEEN = REPO / "ops" / "qa" / "SEEN.md"
+MARKERS = AP_STATE / "merge_markers.jsonl"    # written by the dashboard's merge action
+ATTRIBUTION_WINDOW_DAYS = 7                   # merge → first-seen gap that still reads as suspect
 
 _SEV2PRI = {"critical": "high", "high": "high", "medium": "medium", "low": "low"}
 
@@ -79,7 +84,55 @@ def yq(s: str) -> str:
     return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def render_task(row: dict, tid: str) -> str:
+def load_merge_markers() -> list[dict]:
+    """Ships the operator merged (dashboard writes one line per merge)."""
+    if not MARKERS.exists():
+        return []
+    out = []
+    for ln in MARKERS.read_text().splitlines():
+        try:
+            out.append(json.loads(ln))
+        except ValueError:
+            pass
+    return out
+
+
+def suspects_for(row: dict, markers: list[dict]) -> list[dict]:
+    """Merges that landed BEFORE this finding was first seen, within the
+    attribution window — suspicion with evidence, never a verdict."""
+    try:
+        seen = datetime.strptime(row["date"][:10], "%Y-%m-%d")
+    except (ValueError, KeyError):
+        return []
+    hits = []
+    for m in markers:
+        try:
+            merged = datetime.strptime((m.get("at") or "")[:10], "%Y-%m-%d")
+        except ValueError:
+            continue
+        if merged <= seen and (seen - merged).days <= ATTRIBUTION_WINDOW_DAYS:
+            hits.append((merged, m))
+    return [m for _, m in sorted(hits, key=lambda x: x[0], reverse=True)[:3]]
+
+
+def attribution_lines(suspects: list[dict]) -> str:
+    if not suspects:
+        return ""
+    lines = ["POSSIBLE REGRESSION — merged shortly before this was first seen "
+             "(suspicion, not a verdict; triage against each diff):"]
+    for m in suspects:
+        bits = [f"task {m.get('task_id')}", f"merged {(m.get('at') or '')[:10]}"]
+        if m.get("branch"):
+            bits.append(m["branch"])
+        if m.get("pr_url"):
+            bits.append(m["pr_url"])
+        if m.get("patch"):
+            bits.append(f"revert patch: {m['patch']}")
+        lines.append("  - " + ", ".join(bits))
+    return "\n" + "\n".join(lines)
+
+
+def render_task(row: dict, tid: str, suspects: list[dict] | None = None) -> str:
     is_bug = row["type"] == "bug"
     category = "bug" if is_bug else "feature"
     autopilot = "review-only" if is_bug else "human"
@@ -89,7 +142,8 @@ def render_task(row: dict, tid: str) -> str:
            f"severity {row['severity']}, first seen {row['date']}. Finding:\n"
            f"  {row['sig']}\n"
            f"See ops/qa/FINDINGS.md for the full analysis + screenshots. "
-           f"NOTE: a lead — triage before promoting.")
+           f"NOTE: a lead — triage before promoting."
+           + attribution_lines(suspects or []))
     return f"""
   - id: {tid}
     title: {yq(f'{tag} ' + row['sig'][:80])}
@@ -109,13 +163,17 @@ def main() -> int:
     dry = "--dry-run" in sys.argv
     rows = parse_seen()
     have = existing_ids()
+    markers = load_merge_markers()
     blocks, added, seen = [], [], set()
     for r in rows:
         tid = "uitest-" + slug(r["sig"])
         if tid in have or tid in seen:
             continue
         seen.add(tid)
-        blocks.append(render_task(r, tid))
+        sus = suspects_for(r, markers)
+        if sus:
+            print(f"  ! {tid}: first seen after {len(sus)} recent merge(s) — attributed in context")
+        blocks.append(render_task(r, tid, sus))
         added.append(tid)
 
     print(f"QA findings: {len(rows)} | already in backlog: {len(rows)-len(added)} | new: {len(added)}")

@@ -45,16 +45,38 @@ From the router, load the category's `tracks:` ∪ every `path_tracks:` entry wh
 ## 2.6. Load GOLDEN calibration (graded exemplars of good output)
 The router's `goldens:` block points at `goldens/CALIBRATION.md` (target `.autopilot/goldens/` overrides `$ORBIT_HOME/goldens/`). Read it and pull the **`always` card** (applies to every task) PLUS the card named by `goldens.by_category[<category>]`. Fold these into the maker, checker, AND verifier briefs: "Match this graded exemplar of a strong <category> output; avoid the flaws it lists." If the card names an exemplar file, tell the maker it MAY Read `$ORBIT_HOME/goldens/<exemplar>` for a concrete model. The golden calibration is what "good" looks like; skills are how, tracks are repo facts. **Also read `$AP_HOME/goldens/LEARNED.md` if it exists** — THIS repo's own graded lessons, mined from its ledger and human-approved on the dashboard: fold its `## always` section plus the task category's section into the same maker/checker/verifier briefs, ALONGSIDE (never instead of) the engine calibration. Record the card(s) used for step 3.6.
 
+## 2.7. Load PROJECT KNOWLEDGE (if $AP_HOME/knowledge/INDEX.md exists)
+Read INDEX.md (it is short). From it, Read ONLY what this task implicates: the
+endpoints.md sections and flows/<slug>.md docs whose paths/terms match the task
+text or the files it will touch, plus er.mmd when the task touches persistence.
+Fold a compact extract into the maker, checker AND verifier briefs: "This repo's
+mapped surface for this task: <endpoints → handlers → tables; relevant flow
+summary>. The knowledge base is human-reviewed but code wins — if the code
+contradicts it, trust the code and note the discrepancy in the review notes."
+Record the docs read for step 3.6. No knowledge/ dir → skip (zero behaviour change).
+
+## 2.8. Task plan (planner subagent — scope fence before any code)
+If the target config has a `plan:` block AND the task's category is in
+plan.categories (absent categories list = all workable categories): dispatch the
+**planner** (Task; agent/model from the router's `defaults.planner`, config
+plan.model as fallback) with the full brief assembled in steps 2-2.7. It writes
+$AP_STATE/reviews/task-<id>-plan.md. Read that file back. `PLANNER: STOP` →
+escalate with its reason (a clean stop, not a build cycle). `PLANNER: READY` →
+extract the yaml `plan_scope` fence and the ## Standards section; fold BOTH into
+every maker, checker AND verifier brief for this task, and START every maker
+brief with: "Read $AP_STATE/reviews/task-<id>-plan.md first — follow its
+Approach and Standards." No `plan:` block → skip this step entirely.
+
 ## 3. Build → Check loop (max 5 cycles)
-1. Dispatch the chosen **maker** (Task) with the brief (cycle 1) or the checker's failure report. Brief it with the router `skill` method + track Read-instruction + the **golden calibration** (step 2.6) + the **gate commands** (run `python3 "$ORBIT_HOME/engine/config.py" gates "$(dirname "$AP_HOME")"` — each line is `name<TAB>cwd<TAB>cmd`).
+1. Dispatch the chosen **maker** (Task) with the brief (cycle 1) or the checker's failure report. Brief it with the router `skill` method + track Read-instruction + the **golden calibration** (step 2.6) + the **gate commands** (run `python3 "$ORBIT_HOME/engine/config.py" gates "$(dirname "$AP_HOME")"` — each line is `name<TAB>cwd<TAB>cmd`). If a plan exists (step 2.8), also brief it: "Follow the plan's Approach and Standards. Touch ONLY paths matching plan_scope edit/create; never touch forbid. If the task genuinely requires another file, STOP and report `BUILDER: STOPPED — needs out-of-plan file <path>: <why>`."
 2. Dispatch the **checker** (Task, `checker`, sonnet) — it runs the config gates and reports pass/fail with real output.
-3. STOP RULES: ALL GREEN → step 3.5. Same failure twice / a fix breaks a passing gate / maker STOPPED / checker INFRA / 5 cycles → STOP + escalate. Never weaken a gate to pass.
+3. STOP RULES: ALL GREEN → step 3.5. Same failure twice / a fix breaks a passing gate / maker STOPPED / checker INFRA / 5 cycles → STOP + escalate. Exception: if a plan exists and the maker reports `BUILDER: STOPPED — needs out-of-plan file <path>: <why>`, re-dispatch the **planner** (Task) ONCE with that reason — it appends a `## Amendment` with a new plan_scope fence (last fence wins) to the SAME plan file; re-read the plan file and fold the amended plan_scope fence into the next maker/checker/verifier briefs; this counts as one of the 5 build cycles. A second out-of-plan stop on the same task → STOP + escalate. Never weaken a gate to pass.
 
 ## 3.5. Spec-conformance gate
-Stage exactly the files to ship (never `git add -A`, never state/secrets). Dispatch the **verifier** (Task, `verifier`, sonnet) with the task id + description + the golden calibration card (step 2.6) as the quality bar; it reads `git diff --cached HEAD` and judges intent-vs-implementation AND whether the output matches the strong-exemplar shape (e.g. tests are executable & fail-before/pass-after, no unverified "all clear"). CONFORMS → step 3.6. NONCONFORMING → feed the gap back to the maker (counts as a cycle); second NONCONFORMING → escalate. Never skip/weaken this.
+Stage exactly the files to ship (never `git add -A`, never state/secrets). Dispatch the **verifier** (Task, `verifier`, sonnet) with the task id + description + the golden calibration card (step 2.6) as the quality bar; it reads `git diff --cached HEAD` and judges intent-vs-implementation AND whether the output matches the strong-exemplar shape (e.g. tests are executable & fail-before/pass-after, no unverified "all clear"). If a plan exists (step 2.8), also brief it with the plan file path + the current plan_scope fence (the last one if amended); it fails as NONCONFORMING — "Off-plan" any staged path outside edit∪create∪allow_incidental, or inside forbid, naming the path. CONFORMS → step 3.6. NONCONFORMING → feed the gap back to the maker (counts as a cycle); second NONCONFORMING → escalate. Never skip/weaken this.
 
 ## 3.6. Review notes
-Write `$AP_STATE/reviews/task-<id>-notes.md`: verifier verdict (per criterion), checker evidence (real gate output), risk notes, and `tracks: <names>` + `skill: <invoked>` + `golden: <calibration cards used>` + `model: <effective>`.
+Write `$AP_STATE/reviews/task-<id>-notes.md`: verifier verdict (per criterion), checker evidence (real gate output), risk notes, and `tracks: <names>` + `skill: <invoked>` + `golden: <calibration cards used>` + `knowledge: <docs read or none>` + `plan: task-<id>-plan.md · scope: <n> files · amendments: <n>` (or `plan: none`) + `model: <effective>`.
 
 ## 4. Finish (CONFORMS) — atomic commit on the detached base HEAD
 Files already staged. ONE atomic commit on the detached HEAD (no branch), message `<type>: <what changed>` (<72 chars) ending with the config `commit_trailer`. Do NOT push. Record: `python3 "$ORBIT_HOME/engine/ledger.py" committed <id> "<branch_prefix>/task-<id>" "$(git rev-parse HEAD)"`.
