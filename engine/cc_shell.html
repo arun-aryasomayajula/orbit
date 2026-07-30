@@ -403,6 +403,12 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
 #kgCanvas{width:100%;height:100%}
 .kg-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
   text-align:center;padding:24px;color:var(--faint);font-size:12.5px;line-height:1.7;background:var(--panel)}
+/* The overlay message is inline content (<br>, <code>, bare text). A flex
+   container blockifies every child into its own flex item, which drops the
+   <br>s and strands fragments like "Run" on their own line out of order, so
+   the message has to live inside ONE block child: flex centers that block,
+   and the text flows normally inside it. kgShowOverlay wraps for this. */
+.kg-overlay>.kg-overlay-msg{max-width:44ch}
 .kg-overlay b{color:var(--dim)}
 .kg-overlay code{color:var(--ink);background:var(--card2);padding:1px 5px;border-radius:4px}
 .kg-side .band{margin-bottom:10px}
@@ -1869,13 +1875,19 @@ function loadCytoscapeScript(){
 }
 function kgShowOverlay(html){
   const ov=document.getElementById('kgOverlay');if(!ov)return;
-  ov.innerHTML=html;ov.style.display='flex';
+  /* Single block child - see .kg-overlay>.kg-overlay-msg. */
+  ov.innerHTML='<div class="kg-overlay-msg">'+html+'</div>';ov.style.display='flex';
 }
 function kgHideOverlay(){const ov=document.getElementById('kgOverlay');if(ov)ov.style.display='none';}
 
 function ensureGraphLoaded(){
   if(cyLoadState==='loaded'||cyLoadState==='loading')return;
   cyLoadState='loading';
+  /* The legend is static (the node/edge type key never depends on the data),
+     but it used to be painted only by renderGraph() - so on every path that
+     never reaches a graph (no graph.json, oversize, bad shape, vendor 404)
+     the Legend band rendered as an empty bordered box. Paint it up front. */
+  renderGraphLegend();
   kgShowOverlay('Loading graph…');
   loadCytoscapeScript()
     .catch(e=>{throw {kind:'vendor',e}})
