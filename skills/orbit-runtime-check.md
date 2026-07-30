@@ -1,5 +1,5 @@
 ---
-description: Prove ONE just-committed Orbit ship in the RUNNING product — launch/attach per the repo's runtime_check config, drive the exact flow the acceptance criteria name, and write honest evidence + a verdict to $AP_STATE/reviews/. Driven headless by engine/runtime_check.py between commit and push.
+description: Prove ONE just-committed Orbit ship in the RUNNING product — launch/attach per the repo's runtime_check config, drive the exact flow the acceptance criteria name, and write honest evidence + a verdict to $AP_STATE/reviews/. Driven headless by engine/qa_check.py's legacy path (no `qa:` block configured) between commit and push.
 argument-hint: "<task-id> (the ship sits committed in this worktree)"
 allowed-tools: Read, Grep, Glob, Bash, Write
 model: opus
