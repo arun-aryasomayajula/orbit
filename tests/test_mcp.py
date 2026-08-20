@@ -105,3 +105,33 @@ def test_cli_settings_with_mcp_writes_merged_file(tmp_path):
     assert "mcp__metaql__metaql_execute_query" in data["permissions"]["allow"]
     # the base file's own protections must survive the merge
     assert "Bash(git push:*)" in data["permissions"]["deny"]
+
+
+def _validate(target):
+    return subprocess.run([sys.executable, str(ORBIT / "engine" / "config.py"),
+                           "validate", str(target)], capture_output=True, text=True)
+
+
+def test_validate_rejects_http_server_without_url(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG + 'mcp:\n  m:\n    transport: http\n    tools: "*"\n')
+    r = _validate(t)
+    assert r.returncode == 1
+    assert "mcp.m" in r.stdout and "url" in r.stdout
+
+
+def test_validate_rejects_bad_transport_and_bad_tools(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG +
+                   'mcp:\n  m:\n    transport: websocket\n    tools: 42\n')
+    r = _validate(t)
+    assert r.returncode == 1
+    assert "transport" in r.stdout and "tools" in r.stdout
+
+
+def test_validate_accepts_good_mcp_block(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG +
+                   'mcp:\n  metaql:\n    transport: http\n    url: "https://m/mcp"\n'
+                   '    token_env: METAQL_TOKEN\n    tools: [a]\n'
+                   '  figma:\n    transport: stdio\n    command: npx\n    args: ["-y", "x"]\n'
+                   '    env_passthrough: [FIGMA_TOKEN]\n    tools: "*"\n')
+    r = _validate(t)
+    assert r.returncode == 0, r.stdout

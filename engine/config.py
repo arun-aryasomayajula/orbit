@@ -181,6 +181,33 @@ def validate(target):
                         errs.append(f"qa.exploratory.enabled must be a boolean, got {exp.get('enabled')!r}")
                     if "max_pages" in exp and (not isinstance(exp["max_pages"], int) or isinstance(exp["max_pages"], bool) or exp["max_pages"] <= 0):
                         errs.append(f"qa.exploratory.max_pages must be a positive integer, got {exp.get('max_pages')!r}")
+    if "mcp" in raw and raw["mcp"] is not None:
+        mc = raw["mcp"]
+        if not isinstance(mc, dict):
+            errs.append(f"mcp must be a mapping of server-name to config, got {mc!r}")
+        else:
+            for name, s in mc.items():
+                pre = f"mcp.{name}"
+                if not isinstance(s, dict):
+                    errs.append(f"{pre} must be a mapping, got {s!r}"); continue
+                tr = s.get("transport")
+                if tr not in ("http", "stdio"):
+                    errs.append(f"{pre}.transport must be \"http\" or \"stdio\", got {tr!r}")
+                if tr == "http" and (not isinstance(s.get("url"), str) or not s.get("url")):
+                    errs.append(f"{pre}.url is required for http transport")
+                if tr == "stdio" and (not isinstance(s.get("command"), str) or not s.get("command")):
+                    errs.append(f"{pre}.command is required for stdio transport")
+                tools = s.get("tools", "*")
+                if tools != "*" and (not isinstance(tools, list)
+                                     or not all(isinstance(t, str) and t for t in tools)):
+                    errs.append(f"{pre}.tools must be \"*\" or a list of non-empty strings, got {tools!r}")
+                for fld in ("token_env",):
+                    if fld in s and (not isinstance(s[fld], str) or not s[fld]):
+                        errs.append(f"{pre}.{fld} must be a non-empty string, got {s.get(fld)!r}")
+                for fld in ("args", "env_passthrough"):
+                    if fld in s and (not isinstance(s[fld], list)
+                                     or not all(isinstance(x, str) for x in s[fld])):
+                        errs.append(f"{pre}.{fld} must be a list of strings, got {s.get(fld)!r}")
     if errs:
         print("\n".join("  ✗ " + e for e in errs)); sys.exit(1)
     print("  ✓ config valid")
