@@ -64,3 +64,44 @@ def test_cli_build_no_mcp_block_prints_nothing(tmp_path):
                        capture_output=True, text=True, env=env)
     assert r.returncode == 0
     assert r.stdout.strip() == ""
+
+
+def test_permission_allows_tool_list_and_wildcard():
+    cfg = {"metaql": {"transport": "http", "url": "u", "tools": ["a", "b"]},
+           "figma": {"transport": "stdio", "command": "npx", "tools": "*"}}
+    allows = mcp.mcp_permission_allows(cfg)
+    assert "mcp__metaql__a" in allows and "mcp__metaql__b" in allows
+    assert "mcp__figma__*" in allows
+    assert "mcp__metaql__*" not in allows   # a tool list must NOT widen to the whole server
+
+
+def test_build_settings_preserves_base_deny():
+    base = {"permissions": {"allow": ["Read"], "deny": ["Bash(git push:*)"]}}
+    out = mcp.build_settings({"m": {"transport": "http", "url": "u", "tools": ["q"]}}, base)
+    assert "Bash(git push:*)" in out["permissions"]["deny"]
+    assert "mcp__m__q" in out["permissions"]["allow"]
+    assert "Read" in out["permissions"]["allow"]
+    assert base["permissions"]["allow"] == ["Read"]   # base object untouched
+
+
+def test_cli_settings_no_mcp_prints_base_path(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG)
+    env = {k: v for k, v in os.environ.items() if k != "ORBIT_HOME"}
+    r = subprocess.run([sys.executable, str(ORBIT / "engine" / "mcp.py"), "settings", str(t)],
+                       capture_output=True, text=True, env=env)
+    assert r.returncode == 0
+    assert r.stdout.strip() == str(ORBIT / "config" / "orbit.settings.json")
+
+
+def test_cli_settings_with_mcp_writes_merged_file(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG +
+                   'mcp:\n  metaql:\n    transport: http\n    url: "https://m/mcp"\n    tools: [metaql_execute_query]\n')
+    env = {k: v for k, v in os.environ.items() if k != "ORBIT_HOME"}
+    r = subprocess.run([sys.executable, str(ORBIT / "engine" / "mcp.py"), "settings", str(t)],
+                       capture_output=True, text=True, env=env)
+    path = r.stdout.strip()
+    assert path.endswith("settings.json")
+    data = json.loads(Path(path).read_text())
+    assert "mcp__metaql__metaql_execute_query" in data["permissions"]["allow"]
+    # the base file's own protections must survive the merge
+    assert "Bash(git push:*)" in data["permissions"]["deny"]
