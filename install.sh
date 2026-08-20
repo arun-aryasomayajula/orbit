@@ -8,13 +8,14 @@ set -euo pipefail
 
 ORBIT_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="${1:-}"
-[ -n "$TARGET" ] || { echo "usage: ./install.sh <target-repo>"; exit 2; }
+FLAG="${2:-}"
+[ -n "$TARGET" ] || { echo "usage: ./install.sh <target-repo> [--product]"; exit 2; }
 TARGET="$(cd "$TARGET" && pwd)"
 [ -d "$TARGET/.git" ] || { echo "error: $TARGET is not a git repo"; exit 2; }
 
 echo "Orbit → $TARGET"
 echo "1. scaffolding .autopilot/ profile"
-python3 "$ORBIT_HOME/install/init.py" "$TARGET" "$ORBIT_HOME"
+python3 "$ORBIT_HOME/install/init.py" "$TARGET" "$ORBIT_HOME" $FLAG
 
 # 2. put `orbit` on PATH (thin dispatcher — plain script, not a packaged CLI)
 BINDIR="$HOME/.local/bin"; mkdir -p "$BINDIR"

@@ -3,8 +3,10 @@
 Called by install.sh. Usage: init.py <target-repo> <orbit-home>"""
 import sys, os, shutil
 
-TARGET = os.path.abspath(sys.argv[1])
-ORBIT_HOME = os.path.abspath(sys.argv[2])
+ARGS = [a for a in sys.argv[1:] if a != "--product"]
+PRODUCT = "--product" in sys.argv[1:]
+TARGET = os.path.abspath(ARGS[0])
+ORBIT_HOME = os.path.abspath(ARGS[1])
 AP = os.path.join(TARGET, ".autopilot")
 
 def detect_gates():
@@ -61,9 +63,51 @@ def main():
     else:
         os.makedirs(os.path.join(AP, "tracks"), exist_ok=True)
         os.makedirs(os.path.join(AP, "state"), exist_ok=True)
-        gates = detect_gates()
         base = detect_base_branch()
-        cfg = f"""# Orbit profile for this repo. Full field reference: {ORBIT_HOME}/config/schema.yaml
+        if PRODUCT:
+            cfg = f"""# Orbit PRODUCT workspace profile. Field reference: {ORBIT_HOME}/config/schema.yaml
+repo: "."
+base_branch: "{base}"
+model: "claude-opus-4-8"
+permission_mode: "acceptEdits"
+interval_seconds: 300
+max_tasks_per_day: 8
+cycle_timeout_seconds: 3600
+
+spec: null
+
+# The workspace gate: no cycle ships an insight that fails the grounding lint.
+gates:
+  insight_lint:
+    cmd: 'python3 {ORBIT_HOME}/engine/insight_lint.py .'
+    cwd: "."
+    needs: []
+
+workable_categories: [insight, documentation]
+sources: [backlog]
+
+# MCP servers this workspace's cycles may reach (see schema.yaml `mcp:` docs).
+# Uncomment and fill in; the token stays in your shell env, never in this file.
+# mcp:
+#   metaql:
+#     transport: http
+#     url: "https://<your-metaql-mcp-host>/mcp"
+#     token_env: METAQL_TOKEN
+#     tools: [metaql_list_verticals, metaql_list_projects, metaql_list_use_cases,
+#             metaql_list_explores, metaql_get_explore_fields, metaql_generate_query,
+#             metaql_execute_query]
+
+env:
+  passthrough: [METAQL_TOKEN]
+
+branch_prefix: "orbit-product"
+commit_trailer: ""
+"""
+            open(os.path.join(AP, "config.yaml"), "w").write(cfg)
+            print(f"  ✓ wrote .autopilot/config.yaml (base_branch={base}, product workspace, insight_lint gate)")
+        else:
+            gates = detect_gates()
+            cfg = f"""# Orbit profile for this repo. Full field reference: {ORBIT_HOME}/config/schema.yaml
 repo: "."
 base_branch: "{base}"
 model: "claude-opus-4-8"
@@ -93,13 +137,27 @@ env:
 branch_prefix: "autopilot"
 commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
 """
-        open(os.path.join(AP, "config.yaml"), "w").write(cfg)
-        print(f"  ✓ wrote .autopilot/config.yaml (base_branch={base}, {len(gates)} gate(s) detected)")
+            open(os.path.join(AP, "config.yaml"), "w").write(cfg)
+            print(f"  ✓ wrote .autopilot/config.yaml (base_branch={base}, {len(gates)} gate(s) detected)")
 
     # seed an empty backlog + state scaffolding
     bl = os.path.join(AP, "backlog.yaml")
     if not os.path.exists(bl):
-        open(bl, "w").write("# Orbit backlog — human-curated tasks.\n# Each: {id, title, category, priority, status: proposed|queued, autopilot: allow|human, acceptance_criteria: [...]}\ntasks: []\n")
+        if PRODUCT:
+            open(bl, "w").write(
+                "# Orbit backlog — product workspace.\n"
+                "# Example insight task (uncomment, edit, set status: queued to run):\n"
+                "# tasks:\n"
+                "# - id: 1\n"
+                "#   title: \"Where is the biggest week-over-week funnel drop?\"\n"
+                "#   category: insight\n"
+                "#   status: queued\n"
+                "#   autopilot: allow\n"
+                "#   acceptance_criteria:\n"
+                "#     - \"insights/ doc passes insight_lint (Answer + Basis, every number cited)\"\n"
+                "tasks: []\n")
+        else:
+            open(bl, "w").write("# Orbit backlog — human-curated tasks.\n# Each: {id, title, category, priority, status: proposed|queued, autopilot: allow|human, acceptance_criteria: [...]}\ntasks: []\n")
         print("  ✓ wrote empty .autopilot/backlog.yaml")
     # state gitignore
     gi = os.path.join(AP, "state", ".gitignore")
@@ -110,6 +168,20 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
     api = os.path.join(AP, ".gitignore")
     if not os.path.exists(api):
         open(api, "w").write("# Orbit secrets — never commit\n.jira_token\n.slack_webhook\n")
+    if PRODUCT:
+        for d in ("knowledge", "insights", "research", "surveys"):
+            os.makedirs(os.path.join(TARGET, d), exist_ok=True)
+        cm = os.path.join(TARGET, "CLAUDE.md")
+        if not os.path.exists(cm):
+            open(cm, "w").write(
+                "# <Product name> workspace\n\n"
+                "This is an Orbit product workspace (PM analysis, insights, research).\n"
+                "State facts, not interpretations. Do not plant hypotheses here.\n\n"
+                "## Data sources\n- MetaQL MCP (see .autopilot/config.yaml `mcp:`)\n\n"
+                "## Layout\n- knowledge/: screenshots, schema notes, error mappings\n"
+                "- insights/: grounded analysis outputs (gated by insight_lint)\n"
+                "- research/: PRD runs (M2)\n- surveys/: questionnaires and responses (M3)\n")
+        print("  ✓ scaffolded product workspace (knowledge/ insights/ research/ surveys/ CLAUDE.md)")
     # copy the engine's commands into the target's .claude/commands so the headless
     # calls resolve (`claude -p /orbit-cycle`, `/orbit-intake`, ...)
     cmd_dir = os.path.join(TARGET, ".claude", "commands")

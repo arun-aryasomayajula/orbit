@@ -1,6 +1,8 @@
 #!/bin/bash
 # orbit — thin dispatcher (plain script; routes to the engine). Not a packaged CLI.
-#   orbit init <target>      scaffold .autopilot/ (via install.sh)
+#   orbit init <target> [--product]
+#                            scaffold .autopilot/ (via install.sh); --product scaffolds a
+#                            PM workspace (knowledge/insights/research/surveys + insight_lint gate)
 #   orbit intake <target>    survey the repo: verify gates, fill tracks, propose a starter
 #                            backlog (proposed/human — triage on the dashboard). Flags:
 #                            --no-agent --dry-run --timeout N
@@ -31,7 +33,7 @@ ORBIT_HOME="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || ec
 verb="${1:-}"; target="${2:-.}"; target="$(cd "$target" && pwd)"
 export ORBIT_HOME
 case "$verb" in
-  init)    "$ORBIT_HOME/install.sh" "$target" ;;
+  init)    "$ORBIT_HOME/install.sh" "$target" "${@:3}" ;;
   intake)  python3 "$ORBIT_HOME/engine/intake.py" "$target" "${@:3}" ;;
   knowledge) python3 "$ORBIT_HOME/engine/knowledge.py" "$target" "${@:3}" ;;
   epic)    python3 "$ORBIT_HOME/engine/epic_plan.py" "$target" "${@:3}" ;;
