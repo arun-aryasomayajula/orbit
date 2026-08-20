@@ -266,6 +266,14 @@ force-with-reason override. A **Reap stalled** button covers what the wrapper's
 per-iteration reaper can't reach while the loop is paused.
 What each section means and how to operate it: **[docs/OPERATOR-GUIDE.md](docs/OPERATOR-GUIDE.md)**.
 
+## Product workspaces
+
+`orbit init <dir> --product` scaffolds a PM workspace: the same loop, gates,
+and dashboard, but the work items are grounded data insights instead of code
+(category `insight`, gated by `engine/insight_lint.py`), and cycles may reach
+MCP servers the profile declares under `mcp:` (see `config/schema.yaml`).
+Design: `docs/superpowers/specs/2026-08-20-orbit-product-teams-design.md`.
+
 ## Requirements
 
 - **[Claude Code](https://claude.com/claude-code)** (`claude`) on PATH — Orbit drives
