@@ -174,9 +174,12 @@ raise_pr() {
 run_cycle() {
   local out="$1"; cd "$WT" || return 1
   local caff=""; command -v caffeinate >/dev/null 2>&1 && caff="caffeinate -i"
+  local mcp_args=()
+  [ -n "${MCP_CONFIG:-}" ] && mcp_args=(--mcp-config "$MCP_CONFIG" --strict-mcp-config)
   $caff "$CLAUDE_BIN" --print "/orbit-cycle" \
-      --permission-mode "$PERM" --settings "$SETTINGS" --model "$MODEL" \
+      --permission-mode "$PERM" --settings "${CYCLE_SETTINGS:-$SETTINGS}" --model "$MODEL" \
       --add-dir "$REPO" --add-dir "$ORBIT_HOME" \
+      "${mcp_args[@]:+"${mcp_args[@]}"}" \
       --output-format stream-json --verbose >"$out" 2>&1 </dev/null &
   local cpid=$!
   # Watchdog: hard-kill the cycle if it outruns CYCLE_TIMEOUT.
@@ -196,6 +199,11 @@ run_cycle() {
 
 one_iteration() {
   gates_ready || { echo SKIP; return; }
+  # MCP seam (spec section 3): the engine decides which MCP servers and tools a
+  # cycle can reach. Empty MCP_CONFIG = no mcp: block = flags omitted entirely.
+  MCP_CONFIG="$(python3 "$ENGINE/mcp.py" build "$TARGET" 2>>"$LOGDIR/orbit.log" || true)"
+  CYCLE_SETTINGS="$(python3 "$ENGINE/mcp.py" settings "$TARGET" 2>>"$LOGDIR/orbit.log" || echo "$SETTINGS")"
+  [ -n "$CYCLE_SETTINGS" ] || CYCLE_SETTINGS="$SETTINGS"
   prepare_worktree || { echo FAIL; return; }
   # Reap entries stuck mid-cycle (claim-then-crash in_progress, commit-then-die
   # committed): no cycle is running at this point, so anything older than the
