@@ -110,7 +110,7 @@ if os.path.isdir(sp):
     for v in os.listdir(sp):
         d = os.path.join(sp, v, "skills")
         if os.path.isdir(d): sp_skills |= set(os.listdir(d))
-BUILTIN = {"simplify", "security-review", "code-review", "verify", "write-docs"}
+BUILTIN = {"simplify", "security-review", "code-review", "verify", "write-docs", "orbit-insight"}
 def skill_ok(s):
     if not s: return True
     if s.startswith("superpowers:"): return s.split(":",1)[1] in sp_skills

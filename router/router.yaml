@@ -31,6 +31,7 @@ skills:
   simplify:                     simplify                               # behavior-preserving cleanup (built-in)
   security-review:              security-review                        # audit the pending diff (built-in)
   write-docs:                   write-docs                             # doc = glossary of principles, not a code mirror
+  orbit-insight:                orbit-insight                          # grounded product-data insight (built-in, skills/orbit-insight.md)
 
 defaults:
   checker: { agent: checker, model: sonnet }      # the gate — always runs
