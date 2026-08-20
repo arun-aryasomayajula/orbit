@@ -108,8 +108,9 @@ def test_cli_settings_with_mcp_writes_merged_file(tmp_path):
 
 
 def _validate(target):
+    env = {k: v for k, v in os.environ.items() if k != "ORBIT_HOME"}
     return subprocess.run([sys.executable, str(ORBIT / "engine" / "config.py"),
-                           "validate", str(target)], capture_output=True, text=True)
+                           "validate", str(target)], capture_output=True, text=True, env=env)
 
 
 def test_validate_rejects_http_server_without_url(tmp_path):
