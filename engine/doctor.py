@@ -72,6 +72,16 @@ if jcfg:
 elif "jira" in sources:
     check("jira in sources has a jira: config block", False, "add a jira: block (see config/schema.yaml)")
 
+# 2d. mcp servers (optional): advisory only — a missing token_env doesn't
+# fail doctor, since the server may simply not be reached by any queued
+# task yet, but it's the top setup failure a PM will hit once one is.
+mcp_cfg = cfg.get("mcp") if isinstance(cfg.get("mcp"), dict) else {}
+for name, s in mcp_cfg.items():
+    te = isinstance(s, dict) and s.get("token_env")
+    if te and not os.environ.get(te):
+        print(f"  · mcp.{name}: token_env {te} is not set in this shell — "
+              f"cycles will reach {name} unauthenticated or fail")
+
 # 3. router — target's .autopilot/router.yaml overrides the engine default at router/router.yaml
 router_path = find("router.yaml") or (
     os.path.join(ORBIT_HOME, "router", "router.yaml")

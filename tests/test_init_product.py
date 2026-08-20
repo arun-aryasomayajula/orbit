@@ -45,3 +45,15 @@ def test_insight_is_a_safe_category(monkeypatch, tmp_path):
     sys.path.insert(0, str(ORBIT / "engine"))
     import backlog_to_tasks
     assert "insight" in backlog_to_tasks.SAFE_CATEGORIES
+
+def test_doctor_warns_on_missing_mcp_token_env(tmp_path):
+    _init_product(tmp_path)
+    cfg = tmp_path / ".autopilot" / "config.yaml"
+    cfg.write_text(cfg.read_text() + '\nmcp:\n  metaql:\n    transport: http\n'
+                   '    url: "https://m/mcp"\n    token_env: METAQL_TOKEN\n    tools: "*"\n')
+    import os
+    env = dict(os.environ, ORBIT_HOME=str(ORBIT))
+    env.pop("METAQL_TOKEN", None)
+    r = subprocess.run([sys.executable, str(ORBIT / "engine" / "doctor.py"), str(tmp_path)],
+                       capture_output=True, text=True, env=env)
+    assert "METAQL_TOKEN" in r.stdout
