@@ -54,6 +54,7 @@ SKIPS = AP_STATE / "skips.txt"
 
 SAFE_CATEGORIES = {
     "testing", "documentation", "dependencies", "code_quality", "developer_experience",
+    "insight",   # product workspace analysis (spec section 5): read-only data pulls into a gated doc
 }
 # Categories the loop MAY work when explicitly promoted (autopilot:allow). Safe
 # chores PLUS review-gated product work (bug/feature/refactor) — the operator opts

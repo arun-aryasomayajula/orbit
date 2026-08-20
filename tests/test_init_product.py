@@ -39,3 +39,9 @@ def test_code_scaffold_is_unchanged_without_flag(tmp_path):
     cfg = (tmp_path / ".autopilot" / "config.yaml").read_text()
     assert "insight_lint" not in cfg
     assert not (tmp_path / "insights").exists()
+
+def test_insight_is_a_safe_category(monkeypatch, tmp_path):
+    monkeypatch.setenv("AP_HOME", str(tmp_path / ".autopilot"))
+    sys.path.insert(0, str(ORBIT / "engine"))
+    import backlog_to_tasks
+    assert "insight" in backlog_to_tasks.SAFE_CATEGORIES
