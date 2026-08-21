@@ -1,5 +1,6 @@
-"""Tests for .autopilot/.secrets.env sourcing, scaffold, and doctor awareness."""
+"""Tests for .autopilot/.secrets.env parsing, scaffold, and doctor awareness."""
 import os
+import shlex
 import subprocess
 import stat
 import sys
@@ -95,15 +96,70 @@ def test_run_sh_syntax_is_valid(tmp_path):
     assert r.returncode == 0, f"run.sh has syntax errors: {r.stderr}"
 
 
-def test_run_sh_sourcing_snippet_syntax_valid(tmp_path):
-    """Verify the secrets sourcing snippet is valid bash."""
-    # The snippet should be syntactically valid standalone
-    snippet = '''
-    AP_HOME=".autopilot"
-    if [ -f "$AP_HOME/.secrets.env" ]; then
-      set -a; . "$AP_HOME/.secrets.env"; set +a
-    fi
-    '''
+_SECRETS_PARSE_LOOP = r'''
+if [ -f "$AP_HOME/.secrets.env" ]; then
+  while IFS= read -r _sline || [ -n "$_sline" ]; do
+    case "$_sline" in \#*|"") continue ;; esac
+    case "$_sline" in *=*) export "${_sline%%=*}=${_sline#*=}" ;; esac
+  done < "$AP_HOME/.secrets.env"
+fi
+'''
+
+
+def test_run_sh_secrets_parse_snippet_syntax_valid(tmp_path):
+    """run.sh no longer sources .secrets.env (that would execute its content
+    as shell) — it parses it line-by-line via this loop. Verify the loop
+    itself is syntactically valid standalone bash."""
+    snippet = 'AP_HOME=".autopilot"\n' + _SECRETS_PARSE_LOOP
     r = subprocess.run(["bash", "-n", "-c", snippet],
                        capture_output=True, text=True)
     assert r.returncode == 0, f"snippet has syntax errors: {r.stderr}"
+
+
+def test_run_sh_no_longer_sources_secrets_env(tmp_path):
+    """Regression guard for the shell-injection fix: run.sh must never contain
+    a `. "$AP_HOME/.secrets.env"` (or `source`) line — sourcing executes file
+    content as shell, which is exactly what a hand-edited or maliciously
+    written secret value could exploit."""
+    text = (ORBIT / "engine" / "run.sh").read_text()
+    assert '. "$AP_HOME/.secrets.env"' not in text
+    assert "source \"$AP_HOME/.secrets.env\"" not in text
+
+
+def test_secrets_parser_never_executes_shell_metacharacters(tmp_path):
+    """The loop's secrets loader parses KEY=VALUE lines; it must never
+    source/execute the file. A hand-edited line whose value looks like a
+    command substitution must land in the environment as a LITERAL string,
+    and the embedded command must never actually run."""
+    marker = tmp_path / "pwned"
+    secrets = tmp_path / ".secrets.env"
+    secrets.write_text(f"EVIL=$(touch {marker})\nGOOD=abc-123.def\n")
+
+    script = f'AP_HOME={shlex.quote(str(tmp_path))}\n' + _SECRETS_PARSE_LOOP + \
+        '\necho "EVIL_VALUE=[$EVIL]"\necho "GOOD_VALUE=[$GOOD]"\n'
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+    assert f"EVIL_VALUE=[$(touch {marker})]" in r.stdout, r.stdout
+    assert "GOOD_VALUE=[abc-123.def]" in r.stdout, r.stdout
+    assert not marker.exists(), (
+        "the secrets parser executed file content instead of treating it as a literal value"
+    )
+
+
+def test_secrets_parser_never_executes_under_bash_3_2(tmp_path):
+    """Same as above but pinned to /bin/bash (macOS ships bash 3.2 there) —
+    run.sh's `set -uo pipefail` + `read -r ... || [ -n ... ]` construct must
+    behave identically on the old bash most macOS machines still default to."""
+    if not os.path.exists("/bin/bash"):
+        pytest.skip("/bin/bash not present on this system")
+    marker = tmp_path / "pwned"
+    secrets = tmp_path / ".secrets.env"
+    secrets.write_text(f"EVIL=$(touch {marker})\n")
+
+    script = f'AP_HOME={shlex.quote(str(tmp_path))}\n' + _SECRETS_PARSE_LOOP + \
+        '\necho "EVIL_VALUE=[$EVIL]"\n'
+    r = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert f"EVIL_VALUE=[$(touch {marker})]" in r.stdout, r.stdout
+    assert not marker.exists()

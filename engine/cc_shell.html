@@ -2601,7 +2601,7 @@ function loadSettings(){
           <input id="secretValue" placeholder="value" type="password" spellcheck="false" autocapitalize="off">
         </div>
         <button class="btn btn-go btn-mini" style="margin-top:8px" onclick="addSecret()">Add</button>
-        <div class=hint>Used for MCP tokens (e.g. METAQL_TOKEN). The loop sources this file; values are never shown again.</div></div>
+        <div class=hint>Used for MCP tokens (e.g. METAQL_TOKEN). Values may contain only letters, digits, and _-./:+=@,~ (no spaces or shell metacharacters). The loop parses this file — it is never executed as shell — and values are never shown again.</div></div>
       <div class=setcard><h3>Advanced</h3>
         ${txt('spec','Standing spec file',c.spec||'','reread by the agent each cycle')}
         ${txt('commit_trailer','Commit trailer',c.commit_trailer||'')}</div>

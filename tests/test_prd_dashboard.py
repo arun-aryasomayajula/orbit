@@ -2,8 +2,10 @@
 # do_save_secrets validates names/values BEFORE touching disk (no partial
 # writes on a rejected payload), writes atomically at mode 0600 in the exact
 # bare KEY=VALUE format engine/doctor.py's _secrets_env parser (and the loop's
-# shell sourcing) expects, and the GET side (secrets_payload) never returns a
-# full value — only a name + short preview.
+# secrets parser in run.sh) expects, and the GET side (secrets_payload) never
+# returns a full value — only a name + short preview. Values are restricted
+# to a shell-metacharacter-free allowlist: defense in depth on top of run.sh
+# parsing (not sourcing) the file.
 #
 # Run: python3 -m pytest tests/test_prd_dashboard.py -v   (from orbit/)
 import importlib
@@ -73,6 +75,23 @@ def test_multiline_value_rejected(cc):
     msg = cc.do_save_secrets({"set": {"GOOD_NAME": "line1\nline2"}})
     assert "reject" in msg.lower()
     assert not _secrets_file(cc).exists()
+
+
+def test_shell_metacharacter_value_rejected(cc):
+    # run.sh's loader parses (never sources) this file, but the value
+    # allowlist is defense in depth: a value that looks like a command
+    # substitution must never be accepted, let alone hit disk.
+    msg = cc.do_save_secrets({"set": {"EVIL": "$(touch pwned)"}})
+    assert "reject" in msg.lower()
+    assert "pwned" not in msg   # value itself never echoed back
+    assert not _secrets_file(cc).exists()
+
+
+def test_jwt_like_value_with_dots_and_dashes_accepted(cc):
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N-XgL0n3I9PlFUP0THsR8U"
+    msg = cc.do_save_secrets({"set": {"AUTH_TOKEN": jwt}})
+    assert msg == "Saved 1 secret(s)"
+    assert _secrets_file(cc).read_text() == f"AUTH_TOKEN={jwt}\n"
 
 
 def test_delete_removes_key_and_preserves_others(cc):

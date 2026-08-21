@@ -23,10 +23,18 @@ TARGET="$(cd "$TARGET" && pwd)"
 eval "$(python3 "$ENGINE/config.py" shellenv "$TARGET")" || { echo "config load failed"; exit 2; }
 
 # Secrets (spec decision 10): PM tokens live in $AP_HOME/.secrets.env (0600,
-# gitignored). Sourced here so interactive runs and launchd services see the
-# same environment.
+# gitignored). PARSED line-by-line here, never sourced/executed — a value
+# containing shell metacharacters (backticks, $(), ;, |, &, quotes, ...)
+# lands in the environment as an inert literal string instead of running
+# with the loop's privileges. The dashboard's writer (command_center.py
+# do_save_secrets) also enforces a metacharacter-free value allowlist, so
+# this is defense in depth for hand-edited files. Interactive runs and
+# launchd services see the same environment either way.
 if [ -f "$AP_HOME/.secrets.env" ]; then
-  set -a; . "$AP_HOME/.secrets.env"; set +a
+  while IFS= read -r _sline || [ -n "$_sline" ]; do
+    case "$_sline" in \#*|"") continue ;; esac
+    case "$_sline" in *=*) export "${_sline%%=*}=${_sline#*=}" ;; esac
+  done < "$AP_HOME/.secrets.env"
 fi
 
 REPO="$ORBIT_REPO"

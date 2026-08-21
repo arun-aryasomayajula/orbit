@@ -3058,9 +3058,19 @@ def do_save_config(raw: str) -> str:
 # MCP tokens the loop needs at runtime (e.g. METAQL_TOKEN) but that must never
 # round-trip through config.yaml (committed) or the dashboard's state poll.
 # File format is a contract shared with two other readers: engine/doctor.py's
-# _secrets_env (bare KEY=VALUE, no quotes, no export) and the loop's own shell
-# sourcing of this file — so the writer below must emit exactly that.
+# _secrets_env (bare KEY=VALUE, no quotes, no export) and run.sh's own line
+# parser (which reads, never sources/executes, this file) — so the writer
+# below must emit exactly that.
 _SECRETS_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+# run.sh's loader PARSES this file line-by-line rather than sourcing it (a
+# deliberate fix — the file used to be `. "$file"`'d, which would execute any
+# shell metacharacters in a value with the loop's privileges). This allowlist
+# is defense in depth on top of that: even a hand-edited file, or a future
+# consumer that DOES source it, can never contain a value that does anything
+# but sit there as an inert string. Covers tokens, API keys, base64, JWTs
+# (dots/dashes/underscores), URLs, and file paths — nothing that a shell would
+# treat specially ($, `, ;, |, &, quotes, whitespace, newlines are all out).
+_SECRETS_VALUE_RE = re.compile(r"^[A-Za-z0-9_\-./:+=@,~]+$")
 _SECRETS_LOCK = threading.Lock()  # ThreadingHTTPServer: guards concurrent writers
 
 
@@ -3134,8 +3144,12 @@ def do_save_secrets(payload: dict) -> str:
     if bad:
         return "Rejected — invalid secret name(s): " + ", ".join(bad) + " (must match ^[A-Z][A-Z0-9_]*$)"
     for name, value in to_set.items():
-        if not isinstance(value, str) or "\n" in value or "\r" in value:
-            return f"Rejected — value for {name} must be a single line"
+        if not isinstance(value, str) or not _SECRETS_VALUE_RE.match(value):
+            # Never echo the value back — name only. This also rejects
+            # multi-line values (newlines aren't in the allowlist) and empty
+            # strings (the regex requires at least one char), so those don't
+            # need separate checks.
+            return f"Rejected — value for {name} must be non-empty and contain only letters, digits, and _-./:+=@,~ (no shell metacharacters)"
     with _SECRETS_LOCK:
         current = _read_secrets_env()
         for name in to_delete:
