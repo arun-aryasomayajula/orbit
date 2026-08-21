@@ -8,7 +8,7 @@ Subcommands:
   needs <target>      print the union of all gates' `needs` (one per line)
   validate <target>   exit 0 if config is well-formed, else print errors + exit 1
 """
-import sys, os, shlex
+import sys, os, shlex, re
 
 DEFAULTS = {
     "repo": ".", "base_branch": "main", "model": "claude-opus-4-8",
@@ -216,7 +216,6 @@ def validate(target):
         if not isinstance(watches, list):
             errs.append(f"watches must be a list, got {watches!r}")
         else:
-            import re
             name_re = re.compile(r"^[a-z0-9][a-z0-9-]*$")
             for i, w in enumerate(watches):
                 pre = f"watches[{i}]"

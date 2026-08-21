@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""metric_watch_to_backlog.py — cadence-based metric-watch signal adapter.
+"""metric_watch_to_backlog.py - cadence-based metric-watch signal adapter.
 
 Turns a profile's `watches:` list (`.autopilot/config.yaml`, see
 config/schema.yaml) into proposed backlog tasks on a per-watch cadence: each
@@ -9,11 +9,13 @@ should be re-asked into a fresh insights/ doc no more often than
 
 State (`$AP_STATE/watches.json`, `{name: last_filed_iso}`) tracks when each
 watch last filed a task. Missing or corrupt state starts fresh (a stderr
-warning, never a crash) — a watch with no recorded last_filed is due
-immediately. Writes are atomic (tmp file + os.replace).
+warning, never a crash) - a watch with no recorded last_filed is due
+immediately. Writes are atomic (tmp file + os.replace), and happen once per
+watch that advances (not only at the end of the run), so a malformed later
+entry can never cost an earlier, successfully processed watch its state.
 
 Adapter contract (see backlog_to_tasks.run_source_adapters): appends
-`status: proposed` tasks ONLY, via backlog_append — idempotent by id. A watch
+`status: proposed` tasks ONLY, via backlog_append - idempotent by id. A watch
 past cadence always advances its state to "now", even when the id it would
 file already exists in the backlog (append_tasks skips the duplicate); the
 id is date-granular (`watch-<name>-<YYYYMMDD>`, UTC), so a sub-daily cadence
@@ -39,7 +41,7 @@ import yaml
 # Adapter contract (see backlog_to_tasks.run_source_adapters): AP_HOME/AP_STATE/
 # ORBIT_HOME are exported and cwd is the target repo root.
 if not os.environ.get("AP_HOME"):
-    sys.exit("AP_HOME unset — adapters run via backlog_to_tasks (or set AP_HOME=<repo>/.autopilot)")
+    sys.exit("AP_HOME unset - adapters run via backlog_to_tasks (or set AP_HOME=<repo>/.autopilot)")
 AP_HOME = Path(os.environ["AP_HOME"])
 AP_STATE = Path(os.environ.get("AP_STATE") or AP_HOME / "state")
 ORBIT_HOME = Path(os.environ.get("ORBIT_HOME") or Path(__file__).resolve().parent.parent)
@@ -63,7 +65,7 @@ def load_state() -> dict:
     try:
         raw = json.loads(STATE_FILE.read_text())
     except (OSError, ValueError) as e:
-        print(f"WARN: {STATE_FILE} unreadable/corrupt ({e}) — starting fresh", file=sys.stderr)
+        print(f"WARN: {STATE_FILE} unreadable/corrupt ({e}) - starting fresh", file=sys.stderr)
         return {}
     return raw if isinstance(raw, dict) else {}
 
@@ -99,15 +101,14 @@ def is_due(name: str, state: dict, cadence_hours: int, now: datetime) -> bool:
 
 # --- proposal ----------------------------------------------------------------
 
-def build_proposal(watch: dict, now: datetime) -> dict:
+def build_proposal(watch: dict, now: datetime, cadence: int) -> dict:
     name = watch["name"]
-    cadence = int(watch.get("cadence_hours") or DEFAULT_CADENCE_HOURS)
     category = watch.get("category") or DEFAULT_CATEGORY
     return {
         "id": f"watch-{name}-{now.strftime('%Y%m%d')}",
         "title": watch["question"],
         "category": category,
-        "context": (f"Standing metric watch '{name}' (cadence: every {cadence}h) — "
+        "context": (f"Standing metric watch '{name}' (cadence: every {cadence}h) - "
                     "filed automatically when past cadence; see .autopilot/config.yaml "
                     "`watches:`."),
         "acceptance_criteria": [INSIGHT_LINT_CRITERION],
@@ -122,7 +123,7 @@ def main() -> int:
         sys.exit("no config.yaml under AP_HOME")
     watches = cfg.get("watches") or []
     if not watches:
-        print("metric_watch: no `watches:` configured — nothing to do")
+        print("metric_watch: no `watches:` configured - nothing to do")
         return 0
 
     state = load_state()
@@ -130,35 +131,48 @@ def main() -> int:
     filed = deduped = 0
     for watch in watches:
         if not isinstance(watch, dict):
-            print(f"WARN: malformed watch entry {watch!r} — skipping (see config/schema.yaml)")
+            print(f"WARN: malformed watch entry {watch!r} - skipping (see config/schema.yaml)")
             continue
         name = str(watch.get("name") or "").strip()
         question = str(watch.get("question") or "").strip()
         if not name or not NAME_RE.match(name) or not question:
-            print(f"WARN: malformed watch entry {watch!r} — skipping (see config/schema.yaml)")
+            print(f"WARN: malformed watch entry {watch!r} - skipping (see config/schema.yaml)")
             continue
-        cadence = int(watch.get("cadence_hours") or DEFAULT_CADENCE_HOURS)
+        # Single coercion site: a non-numeric cadence_hours (e.g. a typo'd
+        # string) must warn-and-skip THIS watch, never raise mid-loop - an
+        # uncaught exception here would abort the run before save_state and
+        # cost every earlier, successfully processed watch its own state.
+        try:
+            cadence = int(watch.get("cadence_hours") or DEFAULT_CADENCE_HOURS)
+        except (TypeError, ValueError):
+            print(f"WARN: watch '{name}' has a non-numeric cadence_hours "
+                  f"({watch.get('cadence_hours')!r}) - skipping (see config/schema.yaml)",
+                  file=sys.stderr)
+            continue
         if not is_due(name, state, cadence, now):
             continue
-        proposal = build_proposal(watch, now)
+        proposal = build_proposal(watch, now, cadence)
         added, skipped = append_tasks(BACKLOG, [proposal], "metric_watch",
                                       f"auto-filed metric watch '{name}'", dry_run=dry)
         if added:
-            print(f"  + watch '{name}' → {proposal['id']} (proposed)" + (" (dry-run)" if dry else ""))
+            print(f"  + watch '{name}' -> {proposal['id']} (proposed)" + (" (dry-run)" if dry else ""))
             filed += 1
         elif skipped:
-            print(f"  · watch '{name}': {skipped[0][1]} — state still advances")
+            print(f"  - watch '{name}': {skipped[0][1]} - state still advances")
             deduped += 1
         # Idempotent-by-id, cadence-driven: the watch is past cadence, so its
         # clock advances to now regardless of whether the (possibly
-        # same-day-duplicate) id actually landed in the backlog.
+        # same-day-duplicate) id actually landed in the backlog. Persisted
+        # immediately (not batched to the end of the loop) so a later watch
+        # being skipped - or any other error mid-loop - can never cost this
+        # watch its advanced state.
         state[name] = now.isoformat()
+        if not dry:
+            save_state(state)
 
     print(f"metric_watch: {len(watches)} watch(es) configured | filed: {filed} | "
           f"deduped (already filed today): {deduped}")
-    if not dry:
-        save_state(state)
-    else:
+    if dry:
         print("(--dry-run: backlog.yaml and watches.json NOT modified)")
     return 0
 

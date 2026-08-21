@@ -189,7 +189,7 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
 # (requires `metric_watch` in sources: above). State lives in
 # `$AP_STATE/watches.json` (`{name: last_filed_iso}`); a watch past its cadence
 # files ONE `status: proposed` task (id `watch-<name>-<YYYYMMDD>`, UTC) with the
-# insight_lint acceptance criterion — never queued, a human promotes it.
+# insight_lint acceptance criterion - never queued, a human promotes it.
 # watches:
 #   - name: wow-signup-conversion   # slug: ^[a-z0-9][a-z0-9-]*$
 #     question: "What's the week-over-week change in signup conversion, and why?"

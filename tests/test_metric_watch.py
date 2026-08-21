@@ -2,7 +2,7 @@
 # and adapters/metric_watch_to_backlog.py): reads the profile's `watches:` list
 # + $AP_STATE/watches.json, files ONE `status: proposed` task per watch past
 # cadence (id `watch-<name>-<YYYYMMDD>` UTC), and always advances the watch's
-# state — even when the dated id it would file already exists in the backlog.
+# state - even when the dated id it would file already exists in the backlog.
 #
 # Run: python3 -m pytest tests/test_metric_watch.py -v   (from orbit/)
 import json
@@ -107,7 +107,7 @@ def test_past_cadence_files_a_new_dated_id(tmp_path):
 def test_state_advances_even_when_id_already_exists(tmp_path):
     """Sub-daily cadence past due twice in one UTC day: the second attempt
     tries to file the SAME dated id (already in the backlog from the first
-    attempt) — it is deduped, but the watch's last_filed clock must still
+    attempt) - it is deduped, but the watch's last_filed clock must still
     advance."""
     cfg = ('repo: "."\nbase_branch: "main"\ngates:\n  t: {cmd: "true"}\n'
           'sources: [backlog, metric_watch]\n'
@@ -119,11 +119,11 @@ def test_state_advances_even_when_id_already_exists(tmp_path):
     tasks_before = _backlog_tasks(t)
     assert len(tasks_before) == 1
 
-    # 2 hours later, same UTC day, past the 1h cadence — same dated id.
+    # 2 hours later, same UTC day, past the 1h cadence - same dated id.
     r2 = _run(t, {"ORBIT_METRIC_WATCH_NOW": "2026-01-01T02:00:00+00:00"})
     assert r2.returncode == 0, r2.stderr
     tasks_after = _backlog_tasks(t)
-    assert len(tasks_after) == 1        # deduped by id — no new task landed
+    assert len(tasks_after) == 1        # deduped by id - no new task landed
 
     state = _state(t)
     assert state["hourly-check"] == "2026-01-01T02:00:00+00:00"   # clock still advanced
@@ -139,7 +139,7 @@ def test_corrupt_state_file_is_tolerated(tmp_path):
     assert "corrupt" in r.stdout.lower() or "unreadable" in r.stdout.lower() \
         or "corrupt" in r.stderr.lower() or "unreadable" in r.stderr.lower()
     tasks = _backlog_tasks(t)
-    assert len(tasks) == 1              # started fresh — still files the watch
+    assert len(tasks) == 1              # started fresh - still files the watch
 
 
 def test_missing_state_file_is_tolerated(tmp_path):
@@ -166,6 +166,35 @@ def test_malformed_watch_entry_is_rejected_loudly_not_crashed(tmp_path):
     assert r.returncode == 0, r.stderr
     assert "WARN" in r.stdout
     assert _backlog_tasks(t) == []
+
+
+def test_bad_cadence_skips_only_that_watch_others_still_process(tmp_path):
+    """A non-coercible cadence_hours (e.g. a typo'd string) on one watch must
+    never poison the run: earlier watches still file and their state still
+    persists, later watches still get processed, and the process exits 0
+    with a warning on stderr - never an unhandled crash mid-loop."""
+    cfg = ('repo: "."\nbase_branch: "main"\ngates:\n  t: {cmd: "true"}\n'
+          'sources: [backlog, metric_watch]\n'
+          'watches:\n'
+          '  - name: first-watch\n    question: "q1?"\n'
+          '  - name: bad-cadence\n    question: "q2?"\n    cadence_hours: "weekly"\n'
+          '  - name: third-watch\n    question: "q3?"\n')
+    t = _target(tmp_path, cfg)
+    r = _run(t)
+    assert r.returncode == 0, r.stderr
+    assert "WARN" in r.stderr and "bad-cadence" in r.stderr
+
+    tasks = _backlog_tasks(t)
+    ids = {tk["id"] for tk in tasks}
+    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    assert f"watch-first-watch-{today}" in ids     # entry 1 still filed
+    assert f"watch-third-watch-{today}" in ids     # entry 3 still processed
+    assert not any(i.startswith("watch-bad-cadence-") for i in ids)
+
+    state = _state(t)
+    assert "first-watch" in state                  # entry 1's state persisted
+    assert "third-watch" in state
+    assert "bad-cadence" not in state               # the skipped entry never advances
 
 
 def test_dry_run_does_not_touch_backlog_or_state(tmp_path):
