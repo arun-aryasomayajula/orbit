@@ -77,6 +77,24 @@ def test_product_scaffold_installs_prd_skills(tmp_path):
     for skill in prd_skills:
         assert (cmd_dir / skill).exists(), f"Missing PRD skill: {skill}"
 
+def test_product_scaffold_copies_the_grounding_track(tmp_path):
+    """The stage command no longer add-dirs the engine into the workspace, so
+    the grounding track has to ship into .autopilot/tracks/ instead - the
+    only engine file the PRD stage agents need."""
+    _init_product(tmp_path)
+    track = tmp_path / ".autopilot" / "tracks" / "prd-grounding.md"
+    assert track.exists()
+    assert track.read_text() == (ORBIT / "tracks" / "prd-grounding.md").read_text()
+
+def test_reinit_overwrites_the_grounding_track(tmp_path):
+    """Engine-owned: a stale copy from an older Orbit checkout must be
+    replaced on re-init, not preserved."""
+    _init_product(tmp_path)
+    track = tmp_path / ".autopilot" / "tracks" / "prd-grounding.md"
+    track.write_text("# stale copy from an older Orbit checkout\n")
+    _init_product(tmp_path)
+    assert track.read_text() == (ORBIT / "tracks" / "prd-grounding.md").read_text()
+
 def test_code_scaffold_is_unchanged_without_flag(tmp_path):
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     subprocess.run([sys.executable, str(ORBIT / "install" / "init.py"),

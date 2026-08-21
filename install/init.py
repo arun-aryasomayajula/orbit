@@ -202,6 +202,14 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
     ensure_gitignore_entries(os.path.join(AP, ".gitignore"), SECRET_GITIGNORE_ENTRIES)
     # secrets example (product workspaces only) — template for manual secret config
     if PRODUCT:
+        # Grounding track: the only engine file the PRD stage agents need.
+        # Copied into the workspace (not add-dir'd from the engine) so the
+        # stage command no longer has to hand the agents the whole engine
+        # dir. Engine-owned - overwrite on every init/re-init is intentional,
+        # not a workspace-editable file.
+        os.makedirs(os.path.join(AP, "tracks"), exist_ok=True)
+        shutil.copy(os.path.join(ORBIT_HOME, "tracks", "prd-grounding.md"),
+                    os.path.join(AP, "tracks", "prd-grounding.md"))
         ex = os.path.join(AP, ".secrets.env.example")
         if not os.path.exists(ex):
             open(ex, "w").write(

@@ -338,6 +338,21 @@ def test_missing_mcp_config_surfaces_as_gate_error(tmp_path, monkeypatch):
     assert "mcp" in str(e.value).lower()
 
 
+# --- _build_cmd: no engine-dir access for stage agents ---------------------
+
+def test_build_cmd_has_no_add_dir(tmp_path, monkeypatch):
+    """Stage agents read the grounding track from the workspace copy
+    (AP_HOME/tracks/prd-grounding.md, shipped by init.py) - they no longer
+    need the engine dir handed to them as a writable/readable add-dir."""
+    ws = _ws(tmp_path)
+    (ws / ".autopilot").mkdir()
+    (ws / ".autopilot" / "config.yaml").write_text('repo: "."\n')
+    monkeypatch.setattr(prd_flow.shutil, "which", lambda _name: "/usr/bin/claude")
+    cmd = prd_flow._build_cmd(str(ws), "r1", "intake", {})
+    assert "--add-dir" not in cmd
+    assert prd_flow.ORBIT_HOME not in cmd
+
+
 # --- run id shape is the controller's, not the dashboard's -----------------
 
 @pytest.mark.parametrize("bad", ["O'Brien", "../escape", "has space", "Upper", "", "-leading"])

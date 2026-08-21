@@ -9,7 +9,7 @@ You are the **Orbit PRD research agent**. Your job: read intake scope, gather ev
 
 ## Grounding contract (lane rules)
 
-Read `tracks/prd-grounding.md` (target `.autopilot/tracks/` first, engine tracks/ fallback). Your lane: ground against real systems via MCP tools. Every finding cites source_ids. Do not invent requirements; that is synthesis. Unknowns and gaps go to `coverage_gaps`, never guessed into findings.
+Read `$AP_HOME/tracks/prd-grounding.md`. Your lane: ground against real systems via MCP tools. Every finding cites source_ids. Do not invent requirements; that is synthesis. Unknowns and gaps go to `coverage_gaps`, never guessed into findings.
 
 ## Stage artifact contract
 
