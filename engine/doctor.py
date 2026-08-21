@@ -8,6 +8,9 @@ Env:   ORBIT_HOME (engine dir; defaults to this file's repo root)
 """
 import sys, os, json, shutil, subprocess
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import secrets_env
+
 TARGET = sys.argv[1] if len(sys.argv) > 1 else "."
 TARGET = os.path.abspath(TARGET)
 SHOW_ALL = "--all" in sys.argv
@@ -30,22 +33,10 @@ def check(label, passed, detail=""):
     print(f"  {'✓' if passed else '✗'} {label}" + (f"  {detail}" if detail else ""))
 
 def _secrets_env(target):
-    """Parse .autopilot/.secrets.env as KEY=VALUE lines; ignore comments and blanks."""
-    secrets = {}
-    path = os.path.join(target, ".autopilot", ".secrets.env")
-    if os.path.exists(path):
-        try:
-            with open(path) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        secrets[k.strip()] = v.strip()
-        except Exception:
-            pass
-    return secrets
+    """Parse .autopilot/.secrets.env as KEY=VALUE lines. Thin wrapper over the
+    shared parser (engine/secrets_env.py) so doctor, the dashboard's secrets
+    panel, run.sh's loop and prd_flow's stage children all agree on the format."""
+    return secrets_env.read(target)
 
 print(f"\nORBIT DOCTOR — {TARGET}\n")
 

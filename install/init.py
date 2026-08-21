@@ -51,6 +51,24 @@ def yaml_gates(g):
         out.append(f"    needs: {spec.get('needs', [])}")
     return "\n".join(out) + "\n"
 
+SECRET_GITIGNORE_ENTRIES = (".jira_token", ".slack_webhook", ".secrets.env")
+
+def ensure_gitignore_entries(path, entries):
+    """Write `entries` into the gitignore at `path`, appending only what is
+    missing. Returns the entries it had to add (empty = already complete)."""
+    if not os.path.exists(path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "w").write("# Orbit secrets - never commit\n" + "".join(f"{e}\n" for e in entries))
+        return list(entries)
+    body = open(path).read()
+    have = {ln.strip() for ln in body.splitlines()}
+    missing = [e for e in entries if e not in have]
+    if missing:
+        sep = "" if (not body or body.endswith("\n")) else "\n"
+        with open(path, "a") as f:
+            f.write(sep + "".join(f"{e}\n" for e in missing))
+    return missing
+
 def detect_base_branch():
     import subprocess
     try:
@@ -166,24 +184,37 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
     if not os.path.exists(gi):
         open(gi, "w").write("# Orbit runtime state — do not commit\n*\n!.gitignore\n")
     # profile-level gitignore: secrets that may live beside config.yaml (the
-    # documented fallback locations for notify's webhook and the jira token)
-    api = os.path.join(AP, ".gitignore")
-    if not os.path.exists(api):
-        open(api, "w").write("# Orbit secrets — never commit\n.jira_token\n.slack_webhook\n.secrets.env\n")
+    # documented fallback locations for notify's webhook and the jira token,
+    # plus .secrets.env). Idempotent on purpose: a workspace scaffolded before
+    # .secrets.env existed already has this file, and skipping it would leave
+    # that workspace one `git add -A` away from committing its tokens. Re-running
+    # init.py must top up whatever is missing instead of leaving it alone.
+    ensure_gitignore_entries(os.path.join(AP, ".gitignore"), SECRET_GITIGNORE_ENTRIES)
     # secrets example (product workspaces only) — template for manual secret config
     if PRODUCT:
         ex = os.path.join(AP, ".secrets.env.example")
         if not os.path.exists(ex):
             open(ex, "w").write(
-                "# .autopilot/.secrets.env — PM tokens live here (0600, gitignored).\n"
-                "# For product workspaces, add token values here. The dashboard's\n"
-                "# Settings > Secrets panel can write this file — OR edit manually.\n"
-                "# Source: engine/run.sh sources this when present so interactive runs\n"
-                "# and launchd services see the same environment.\n"
+                "# EXAMPLE ONLY - this file is never read. Copy it to\n"
+                "# .autopilot/.secrets.env (0600, gitignored) and put the real values\n"
+                "# there, or let the dashboard's Settings > Secrets panel write that\n"
+                "# file for you. Editing THIS file has no effect.\n"
+                "#\n"
+                "# One KEY=VALUE per line, no quotes, no `export`. run.sh parses this\n"
+                "# file (never executes it), so a value with shell metacharacters is an\n"
+                "# inert literal string. Interactive runs and launchd services see the\n"
+                "# same environment either way, and each cycle rereads the file.\n"
                 "#\n"
                 "# METAQL_TOKEN=<your-metaql-token-here>\n")
+        # .gitkeep in each: git tracks files, not directories, so a fresh clone
+        # of a committed workspace arrives with no research/ at all - and the
+        # dashboard hides the whole PRD band (and its New PRD button) when
+        # research/ is missing, by the absent-unless-configured rule.
         for d in ("knowledge", "insights", "research", "surveys"):
             os.makedirs(os.path.join(TARGET, d), exist_ok=True)
+            keep = os.path.join(TARGET, d, ".gitkeep")
+            if not os.path.exists(keep):
+                open(keep, "w").write("")
         cm = os.path.join(TARGET, "CLAUDE.md")
         if not os.path.exists(cm):
             open(cm, "w").write(

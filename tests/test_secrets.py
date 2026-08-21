@@ -4,6 +4,7 @@ import shlex
 import subprocess
 import stat
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,47 @@ def _init_product(tmp_path):
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr + r.stdout
     return r
+
+
+def _secrets_env_module():
+    sys.path.insert(0, str(ORBIT / "engine"))
+    import secrets_env
+    return secrets_env
+
+
+def test_shared_parser_reads_the_documented_format(tmp_path):
+    """One parser, four callers (run.sh's loop, the dashboard panel, doctor,
+    prd_flow's stage children). Three Python copies had already drifted."""
+    se = _secrets_env_module()
+    ap = tmp_path / ".autopilot"
+    ap.mkdir()
+    (ap / ".secrets.env").write_text(
+        "# a comment\n"
+        "\n"
+        "METAQL_TOKEN=tok123\n"
+        "  SPACED_KEY = spaced value \n"
+        "WITH_EQUALS=a=b=c\n"
+        "no-equals-line\n")
+    got = se.read(str(tmp_path))
+    assert got["METAQL_TOKEN"] == "tok123"
+    assert got["SPACED_KEY"] == " spaced value"   # key stripped, value from the first '='
+    assert got["WITH_EQUALS"] == "a=b=c"          # split on the FIRST '=' only
+    assert "no-equals-line" not in got
+    assert "# a comment" not in got
+
+
+def test_shared_parser_treats_a_missing_file_as_no_secrets(tmp_path):
+    se = _secrets_env_module()
+    assert se.read(str(tmp_path)) == {}
+
+
+def test_doctor_delegates_to_the_shared_parser():
+    """The wrapper must stay thin - a re-implementation is how the three Python
+    copies of this parser drifted the first time."""
+    doctor = (ORBIT / "engine" / "doctor.py").read_text()
+    body = doctor.split("def _secrets_env(target):", 1)[1].split("\nprint(", 1)[0]
+    assert "secrets_env.read(target)" in body
+    assert "split(" not in body, "doctor re-implements the parse instead of delegating"
 
 
 def test_doctor_quiet_when_token_env_in_secrets_file(tmp_path):
@@ -96,14 +138,19 @@ def test_run_sh_syntax_is_valid(tmp_path):
     assert r.returncode == 0, f"run.sh has syntax errors: {r.stderr}"
 
 
-_SECRETS_PARSE_LOOP = r'''
-if [ -f "$AP_HOME/.secrets.env" ]; then
-  while IFS= read -r _sline || [ -n "$_sline" ]; do
-    case "$_sline" in \#*|"") continue ;; esac
-    case "$_sline" in *=*) export "${_sline%%=*}=${_sline#*=}" ;; esac
-  done < "$AP_HOME/.secrets.env"
-fi
-'''
+def _extract_secrets_parse_loop():
+    """Pull run.sh's secrets loop out of run.sh itself rather than keeping a
+    second copy here - a copy silently stops testing the shipped loop the
+    first time one of them changes."""
+    text = (ORBIT / "engine" / "run.sh").read_text()
+    start = "# --- secrets parse loop (extracted verbatim by tests/test_secrets.py) ---\n"
+    end = "# --- end secrets parse loop ---"
+    assert start in text and end in text, "run.sh's secrets parse loop markers moved"
+    body = text.split(start, 1)[1].split(end, 1)[0]
+    return "\n" + textwrap.dedent(body)
+
+
+_SECRETS_PARSE_LOOP = _extract_secrets_parse_loop()
 
 
 def test_run_sh_secrets_parse_snippet_syntax_valid(tmp_path):
@@ -163,3 +210,50 @@ def test_secrets_parser_never_executes_under_bash_3_2(tmp_path):
     assert r.returncode == 0, r.stderr
     assert f"EVIL_VALUE=[$(touch {marker})]" in r.stdout, r.stdout
     assert not marker.exists()
+
+
+# Names whose VALUE is a code path: exporting one out of .secrets.env would
+# redirect every interpreter the loop shells out to. The dashboard's writer
+# refuses them (command_center._SECRETS_NAME_DENY), so a line carrying one can
+# only come from a hand-edited file - the loop must drop it anyway.
+_RESERVED_LINES = ["PATH=/tmp/evil", "PYTHONPATH=/tmp/evil", "NODE_OPTIONS=--require=/tmp/evil.js",
+                   "NODE_PATH=/tmp/evil", "PERL5LIB=/tmp/evil", "RUBYOPT=-r/tmp/evil",
+                   "GEM_PATH=/tmp/evil", "CLASSPATH=/tmp/evil.jar", "LD_PRELOAD=/tmp/evil.so",
+                   "DYLD_INSERT_LIBRARIES=/tmp/evil.dylib", "BASH_ENV=/tmp/evil.sh"]
+
+
+@pytest.mark.parametrize("line", _RESERVED_LINES)
+def test_secrets_parser_never_exports_a_reserved_name(tmp_path, line):
+    """A hand-written reserved-name line in .secrets.env must NOT be exported.
+    The value needs no shell metacharacters to be an attack: PATH=/tmp/evil
+    alone hijacks every bare python3/git/gh call the loop makes."""
+    name, _, value = line.partition("=")
+    secrets = tmp_path / ".secrets.env"
+    secrets.write_text(f"{line}\nGOOD=abc-123.def\n")
+
+    script = (f'AP_HOME={shlex.quote(str(tmp_path))}\n'
+              f'{name}=sentinel-original\n' + _SECRETS_PARSE_LOOP +
+              f'\necho "NAME_VALUE=[${name}]"\necho "GOOD_VALUE=[$GOOD]"\n')
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "NAME_VALUE=[sentinel-original]" in r.stdout, (
+        f"{name} was overwritten from .secrets.env: {r.stdout}")
+    assert value not in r.stdout, r.stdout
+    # The guard is surgical: the legitimate secret on the next line still lands.
+    assert "GOOD_VALUE=[abc-123.def]" in r.stdout, r.stdout
+
+
+def test_secrets_are_loaded_per_iteration_not_once_at_startup():
+    """A token saved in the dashboard's Secrets panel must reach the NEXT
+    iteration. Parsing .secrets.env at top-of-file meant waiting for a service
+    restart, so the loop lives inside one_iteration() now - before the cycle
+    runs, after the gate preflight."""
+    text = (ORBIT / "engine" / "run.sh").read_text()
+    marker = "# --- secrets parse loop (extracted verbatim by tests/test_secrets.py) ---"
+    body = text.split("one_iteration() {", 1)
+    assert len(body) == 2, "one_iteration() is gone from run.sh"
+    assert marker not in body[0], "the secrets loop is back at top-of-file (loaded once per process)"
+    iteration = body[1]
+    assert marker in iteration
+    assert iteration.index(marker) < iteration.index("prepare_worktree"), \
+        "secrets must load before the cycle runs, not after"

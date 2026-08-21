@@ -77,6 +77,42 @@ def test_insight_known_to_lint_and_dashboard():
     bl = _load("backlog_lint")
     assert "insight" in bl.KNOWN_CATEGORIES
 
+def test_product_scaffold_gitkeeps_the_workspace_dirs(tmp_path):
+    """git tracks files, not directories: without a .gitkeep a fresh clone of a
+    committed workspace arrives with no research/, and the dashboard hides the
+    whole PRD band (New PRD button included) when research/ is missing."""
+    _init_product(tmp_path)
+    for d in ("knowledge", "insights", "research", "surveys"):
+        assert (tmp_path / d / ".gitkeep").exists(), d
+
+def test_reinit_restores_a_missing_gitignore_entry(tmp_path):
+    """A workspace scaffolded before .secrets.env existed already has an
+    .autopilot/.gitignore, so a `write only if absent` init left it without the
+    entry forever - one `git add -A` from committing its tokens."""
+    _init_product(tmp_path)
+    gi = tmp_path / ".autopilot" / ".gitignore"
+    gi.write_text("# Orbit secrets - never commit\n.jira_token\n.slack_webhook\n")
+    _init_product(tmp_path)   # re-running init must top up what is missing
+    lines = gi.read_text().splitlines()
+    assert ".secrets.env" in lines
+    assert ".jira_token" in lines and ".slack_webhook" in lines
+
+def test_reinit_is_idempotent_on_a_complete_gitignore(tmp_path):
+    _init_product(tmp_path)
+    gi = tmp_path / ".autopilot" / ".gitignore"
+    before = gi.read_text()
+    _init_product(tmp_path)
+    assert gi.read_text() == before   # byte-identical: nothing appended twice
+
+def test_reinit_preserves_unrelated_gitignore_lines(tmp_path):
+    _init_product(tmp_path)
+    gi = tmp_path / ".autopilot" / ".gitignore"
+    gi.write_text("scratch/\n.jira_token\n")
+    _init_product(tmp_path)
+    lines = gi.read_text().splitlines()
+    assert lines[0] == "scratch/"
+    assert set(lines) >= {"scratch/", ".jira_token", ".slack_webhook", ".secrets.env"}
+
 def test_doctor_warns_on_missing_mcp_token_env(tmp_path):
     _init_product(tmp_path)
     cfg = tmp_path / ".autopilot" / "config.yaml"
