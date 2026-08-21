@@ -148,3 +148,16 @@ def test_validate_accepts_good_mcp_block(tmp_path):
                    '    env_passthrough: [FIGMA_TOKEN]\n    tools: "*"\n')
     r = _validate(t)
     assert r.returncode == 0, r.stdout
+
+
+def test_validate_accepts_good_prd_block(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG + 'prd:\n  model: "sonnet"\n  timeout_seconds: 1800\n')
+    r = _validate(t)
+    assert r.returncode == 0, r.stdout
+
+
+def test_validate_rejects_bad_prd_block(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG + 'prd:\n  model: ""\n  timeout_seconds: -1\n')
+    r = _validate(t)
+    assert r.returncode == 1
+    assert "prd.model" in r.stdout and "prd.timeout_seconds" in r.stdout

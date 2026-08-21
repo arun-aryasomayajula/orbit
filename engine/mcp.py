@@ -2,9 +2,10 @@
 """Per-target MCP wiring from the profile's `mcp:` block (spec section 3).
 
 The engine — not the agent — decides which MCP servers a cycle can reach and
-which of their tools are allowed. Tokens never touch disk: generated configs
-carry `${VAR}` references that Claude Code expands from the environment at
-run time.
+which of their tools are allowed. Tokens never land in the generated config:
+it carries `${VAR}` references that Claude Code expands from the environment
+at run time. The values come from the target's `.autopilot/.secrets.env`
+(0600, gitignored - see engine/secrets_env.py), never from config.yaml.
 
 Subcommands (both print a path on stdout, or nothing when noted):
   build <target>     write $AP_STATE/mcp/mcp-config.json from config `mcp:`.

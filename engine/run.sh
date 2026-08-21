@@ -199,6 +199,30 @@ run_cycle() {
 
 one_iteration() {
   gates_ready || { echo SKIP; return; }
+  # Secrets (spec decision 10): PM tokens live in $AP_HOME/.secrets.env (0600,
+  # gitignored). Loaded HERE, per iteration, not once at startup: a token the
+  # PM saves in the dashboard's Settings > Secrets panel must reach the NEXT
+  # cycle, not wait for someone to restart a KeepAlive service.
+  # PARSED line-by-line, never sourced/executed - a value containing shell
+  # metacharacters (backticks, $(), ;, |, &, quotes, ...) lands in the
+  # environment as an inert literal string instead of running with the loop's
+  # privileges. The `case` guard drops interpreter/shell/loader names whose
+  # values are code paths (PATH, PYTHONPATH, NODE_OPTIONS, LD_*, ...): the
+  # dashboard's writer rejects those too (command_center.py
+  # _SECRETS_NAME_DENY), so this is the same list enforced on both ends for
+  # hand-edited files. Interactive runs and launchd services see the same
+  # environment either way.
+  # --- secrets parse loop (extracted verbatim by tests/test_secrets.py) ---
+  if [ -f "$AP_HOME/.secrets.env" ]; then
+    while IFS= read -r _sline || [ -n "$_sline" ]; do
+      case "$_sline" in \#*|"") continue ;; esac
+      case "${_sline%%=*}" in
+        PATH|IFS|ENV|BASH_ENV|SHELL|HOME|PS4|CDPATH|PYTHONPATH|PYTHONSTARTUP|AP_HOME|AP_STATE|ORBIT_HOME|NODE_OPTIONS|NODE_PATH|PERL5LIB|RUBYOPT|GEM_PATH|CLASSPATH|LD_*|DYLD_*|BASH_*) continue ;;
+      esac
+      case "$_sline" in *=*) export "${_sline%%=*}=${_sline#*=}" ;; esac
+    done < "$AP_HOME/.secrets.env"
+  fi
+  # --- end secrets parse loop ---
   prepare_worktree || { echo FAIL; return; }
   # Reap entries stuck mid-cycle (claim-then-crash in_progress, commit-then-die
   # committed): no cycle is running at this point, so anything older than the

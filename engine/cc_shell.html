@@ -438,6 +438,14 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
   background:linear-gradient(0deg,var(--void) 55%,transparent);padding:14px 0 6px;margin-top:4px}
 .set-meta{font:500 11px/1.7 var(--mono);color:var(--faint)}
 .set-meta code{color:var(--dim)}
+.secrets-list{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}
+.secret-row{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--line2);
+  border-radius:8px;padding:7px 11px;font:500 12px var(--mono)}
+.secret-row code{color:var(--ink);font-weight:600}
+.secret-row .mut{color:var(--faint);flex:1}
+#secretName,#secretValue{width:100%;background:var(--void);border:1px solid var(--line2);
+  border-radius:8px;padding:8px 11px;color:var(--ink);font:500 12.5px var(--mono)}
+#secretName:focus,#secretValue:focus{outline:2px solid var(--blue);outline-offset:1px}
 @media(max-width:700px){.grid2{grid-template-columns:1fr}}
 
 /* ── project switcher (launcher proxy — hidden when no launcher is in front) */
@@ -587,6 +595,7 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
     <button class="btn" id="loopBtn" onclick="toggleLoop()">…</button>
     <button class="btn btn-ghost" id="feedBtn" onclick="toggleFeed()" title="When on, the loop promotes the next safe task itself whenever the queue runs dry.">Auto-feed</button>
     <button class="btn btn-ghost" onclick="newTaskForm()" title="create a backlog task right here — no YAML editing">＋ New task</button>
+    <button class="btn btn-ghost" onclick="newInsightForm()" title="quick-add an insights/ task — category, acceptance criteria, and queueing pre-filled">💡 New insight</button>
     <button class="btn btn-ghost" onclick="reapStalled()" title="escalate tasks stuck mid-cycle (claimed/committed by a dead cycle) onto the gates — the loop does this each iteration, but a paused loop can't">🧹 Reap stalled</button>
     <div class="meter" id="budgetMeter"></div>
   </div>
@@ -641,6 +650,7 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
   <!-- ── DEEP SPACE (proposals — Gmail-style reader) ── -->
   <section class="view" id="view-deepspace">
     <div id="epicsBand"></div>
+    <div id="prdBand"></div>
     <div id="calibrationBand"></div>
     <div class="chips" id="filterbar"></div>
     <div class="ds-wrap">
@@ -834,8 +844,8 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
   <h3 id="m5title"></h3>
   <div class="m3ctx" id="m5hint"></div>
   <div style="display:flex;flex-direction:column;gap:6px">
-    <input id="tfId" class="tfin" placeholder="id — lowercase slug, e.g. fix-login-timeout" autocomplete="off">
-    <input id="tfTitle" class="tfin" placeholder="title — what done looks like, in one line" autocomplete="off">
+    <input id="tfId" class="tfin" placeholder="id — lowercase slug, e.g. fix-login-timeout" autocomplete="off" oninput="tfIdAuto=false">
+    <input id="tfTitle" class="tfin" placeholder="title — what done looks like, in one line" autocomplete="off" oninput="_tfAutoSlug()">
     <div style="display:flex;gap:6px">
       <select id="tfCat" class="tfin" style="flex:1"></select>
       <select id="tfPri" class="tfin" style="width:130px">
@@ -1288,6 +1298,88 @@ function renderEpics(){
   band.innerHTML=`<div class=band><div class=bandhead><h3>Epics — planning tier</h3>
     <span class=bandsum>too big for one commit: Plan → review the spec → Approve → Decompose → queue the children below</span></div>
     <div class=grid>${es.map(epicCard).join('')}</div></div>`;
+}
+
+/* ── PRD band (research pipeline: intake → gates → research/synthesis/draft/review → done) ─ */
+const PRD_ARTIFACTS={intake:'01-intake.json',research:'02-research.json',synthesis:'03-synthesis.json',
+                     draft:'04-prd.md',review:'05-review.json'};
+const PRD_ACTION_LABEL={'run-intake':'▶ Run intake','run-chain':'▶ Run stage',
+                        'approve-scope':'Approve scope','approve-prd':'Approve PRD',
+                        'revise-intake':'Revise intake','revise-draft':'Revise draft',
+                        'revise-research':'Revise research'};
+const PRD_ACTION_CONFIRM={
+  'run-intake':r=>`Run intake for '${r}'? A headless agent call writes 01-intake.json.`,
+  'run-chain':(r,st)=>`Run '${st}' for '${r}'? It keeps chaining forward while each stage's eval passes.`,
+  'approve-scope':r=>`Approve scope for '${r}'? Research becomes runnable.`,
+  'approve-prd':r=>`Sign off '${r}'? This marks the PRD done.`,
+  'revise-intake':r=>`Revise '${r}' back to intake? Every stamp and approval is dropped.`,
+  'revise-draft':r=>`Revise '${r}' back to draft? The review stamp is dropped.`,
+  'revise-research':r=>`Revise '${r}' back to research? Synthesis, draft and review stamps are dropped.`,
+};
+function prdStatusBadge(st){
+  const m={intake:['intake','muted'],'awaiting-scope-approval':['awaiting scope approval','warn'],
+           research:['research','muted'],synthesis:['synthesis','muted'],draft:['draft','muted'],
+           review:['review','muted'],'awaiting-signoff':['awaiting signoff','warn'],done:['done','ok']};
+  const x=m[st]||[st,'muted'];return badge(x[0],x[1]);
+}
+function prdStageDots(stages){
+  return (stages||[]).map(s=>{
+    const color=s.ok===true?'var(--green)':s.ok===false?'var(--red)':'var(--faint)';
+    const label=s.ok===true?'passed':s.ok===false?'failed':'pending';
+    const when=s.stamped_at?' - '+s.stamped_at:'';
+    return `<span title="${escAttr(s.name+': '+label+when)}" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color};margin-right:4px" aria-hidden="true"></span>`;
+  }).join('')+`<span class=meta style="margin-left:4px">${(stages||[]).map(s=>s.name).join(' → ')}</span>`;
+}
+function prdArtifactLinks(r){
+  let links=`<button class="btn btn-mini" onclick="openText('prd-run.json - ${escJsAttr(r.run_id)}','/prd-artifact?run=${encodeURIComponent(r.run_id)}&file=prd-run.json',false)">marker</button>`;
+  (r.stages||[]).forEach(s=>{
+    if(!s.stamped_at)return;
+    const file=PRD_ARTIFACTS[s.name];
+    links+=`<button class="btn btn-mini" onclick="openText('${escJsAttr(file)} - ${escJsAttr(r.run_id)}','/prd-artifact?run=${encodeURIComponent(r.run_id)}&file=${encodeURIComponent(file)}',false)">${esc(s.name)}</button>`;
+  });
+  return links;
+}
+/* A pii_touch run's scope gate takes a SECOND, explicit question. The grounding
+   contract defers PII compliance to a human, and one click on the same button
+   every other run uses is not that human saying yes to PII. Answering it sends
+   ack_pii=1, which is what prd_flow.approve_scope requires on such a run. */
+const PRD_PII_CONFIRM="This PRD touches PII/sensitive data. Approving scope releases it to the research stage, which queries real systems. Confirm you have reviewed the data handling and take responsibility for it?";
+function prdActionBtn(r,a){
+  const cls=a.startsWith('approve')?'btn-go':a.startsWith('revise')?'btn-stop':'btn-vio';
+  const label=PRD_ACTION_LABEL[a]||a;
+  const fn=PRD_ACTION_CONFIRM[a];
+  const msg=fn?fn(r.run_id,r.status):`${label} for '${r.run_id}'?`;
+  const pii=(a==='approve-scope'&&!!r.pii_touch);
+  const gate=pii?`&&confirm('${escJsAttr(PRD_PII_CONFIRM)}')`:'';
+  const body=`{run:'${escJsAttr(r.run_id)}',action:'${a}'${pii?",ack_pii:'1'":''}}`;
+  return `<button class="btn ${cls} btn-mini" onclick="if(confirm('${escJsAttr(msg)}')${gate})post('/prd-action',${body})">${esc(label)}</button>`;
+}
+function prdCard(r){
+  const tamper=(r.tamper&&r.tamper.length)?`<div class=meta style="color:var(--red)">⚠ tamper: ${esc(r.tamper.join('; '))}</div>`:'';
+  const btns=(r.next_actions||[]).map(a=>prdActionBtn(r,a)).join('');
+  return `<div class=card><div class="card-h"><span class=tid>${esc(r.run_id)}</span> ${prdStatusBadge(r.status)}${r.pii_touch?' '+badge('PII','warn'):''}</div>
+    <div class=title>${esc(r.title)}</div>
+    <div class=meta>${prdStageDots(r.stages)}</div>${tamper}
+    <div class=btns>${btns}${prdArtifactLinks(r)}</div></div>`;
+}
+function newPrd(){
+  const run=prompt('Run id (lowercase letters, digits, hyphens - e.g. checkout-redesign):');
+  if(run===null)return;
+  if(!/^[a-z0-9][a-z0-9-]*$/.test(run.trim())){toast('Invalid run id.');return;}
+  const title=prompt('PRD title:');
+  if(title===null)return;
+  if(!title.trim()){toast('A title is required.');return;}
+  const brief=prompt('One-paragraph brief (optional - grounds the intake agent):')||'';
+  post('/prd-action',{action:'new',run:run.trim(),title:title.trim(),brief:brief});
+}
+function renderPrd(){
+  const band=document.getElementById('prdBand');if(!band)return;
+  if(!S||!('prd' in S)){band.innerHTML='';return;}
+  const rs=S.prd||[];
+  band.innerHTML=`<div class=band><div class=bandhead><h3>PRDs - research pipeline</h3>
+    <span class=bandsum>intake → approve scope → research → synthesis → draft → review → approve PRD → done</span>
+    <button class="btn btn-mini" style="margin-left:auto" onclick="newPrd()">+ New PRD</button></div>
+    <div class=grid>${rs.length?rs.map(prdCard).join(''):'<div class=meta style="padding:8px 0">No PRD runs yet - start one above.</div>'}</div></div>`;
 }
 
 /* ── calibration strip: the goldens learning loop's human gate ───────────── */
@@ -2379,12 +2471,26 @@ function closeModal4(){document.getElementById('modal4').style.display='none';}
 
 /* ── task create/edit form (modal5) ─────────────────────────────────────── */
 let tfMode='new';
+// True while the id field still holds whatever _tfAutoSlug derived from the
+// title — i.e. the user hasn't typed into #tfId themselves. Any keystroke in
+// #tfId (see its oninput) turns this off for the rest of the form's life, so
+// autopilot slug suggestions never clobber a manually-chosen id.
+let tfIdAuto=true;
+function _slugify(s){
+  return String(s||'').toLowerCase().trim().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,80);
+}
+function _tfAutoSlug(){
+  if(tfMode==='new'&&tfIdAuto)document.getElementById('tfId').value=_slugify(document.getElementById('tfTitle').value);
+}
 function _catOptions(sel){
-  return ((S&&S.categories)||['bug','feature','refactor','testing','documentation']).map(c=>
+  /* Fallback only fires before the first /api/state lands. It must still list
+     `insight` - product workspaces run on it, and the quick-add form preselects
+     it, which would silently fall back to `bug` if it were missing here. */
+  return ((S&&S.categories)||['bug','feature','refactor','testing','documentation','insight']).map(c=>
     `<option${c===sel?' selected':''}>${esc(c)}</option>`).join('');
 }
 function newTaskForm(){
-  tfMode='new';
+  tfMode='new'; tfIdAuto=true;
   document.getElementById('m5title').textContent='＋ New task';
   document.getElementById('m5hint').textContent='Same bar as the lint gate: a known category and at least one acceptance criterion — a task the verifier can actually grade.';
   document.getElementById('tfId').value=''; document.getElementById('tfId').disabled=false;
@@ -2395,6 +2501,20 @@ function newTaskForm(){
   document.getElementById('tfQueueRow').style.display='';
   document.getElementById('modal5').style.display='flex';
   document.getElementById('tfId').focus();
+}
+function newInsightForm(){
+  // Same modal, pre-filled for the insights/ workflow: category insight, one
+  // acceptance-criteria template line matching insight_lint's own bar
+  // (Answer + Basis, every number cited), and queued on by default since an
+  // insight write-up is safe/human-reviewed-after-the-fact (category is in
+  // SAFE — see command_center.py) rather than something that needs triage.
+  newTaskForm();
+  document.getElementById('m5title').textContent='💡 New insight';
+  document.getElementById('m5hint').textContent='Pre-filled for insights/ — pick a category, then edit the title; id follows the title until you edit it yourself.';
+  document.getElementById('tfCat').innerHTML=_catOptions('insight');
+  document.getElementById('tfAcc').value='insights/ doc passes insight_lint (Answer + Basis, every number cited)';
+  document.getElementById('tfQueue').checked=true;
+  document.getElementById('tfTitle').focus();
 }
 function editTaskForm(id){
   const t=findTask(id); if(!t||!t.title||t.title===id&&!t.category){toast('task not found');return;}
@@ -2586,6 +2706,18 @@ function loadSettings(){
         <div class=field><label>knowledge — JSON: refresh ("manual"|"auto"), stale_after_merges, timeout_seconds</label>
           <textarea id="set-knowledge" spellcheck="false">${esc(JSON.stringify(c.knowledge||{},null,2))}</textarea>
           <div class=hint>leave as {} to opt out — controls the every-cycle knowledge-base staleness check</div></div></div>
+      <div class=setcard><h3>MCP <span style="font-weight:500;text-transform:none;letter-spacing:0">(optional)</span></h3>
+        <div class=field><label>mcp — JSON: server name → { transport, url|command, token_env, tools }</label>
+          <textarea id="set-mcp" spellcheck="false">${esc(JSON.stringify(c.mcp||{},null,2))}</textarea>
+          <div class=hint>leave as {} to opt out — transport is "http" (needs url) or "stdio" (needs command); tools is "*" or a list of names; token_env names a secret set below. Deep validation runs on save.</div></div></div>
+      <div class=setcard><h3>Secrets</h3>
+        <div id="secretsList" class=secrets-list>Loading…</div>
+        <div class=grid2>
+          <input id="secretName" placeholder="NAME (e.g. METAQL_TOKEN)" spellcheck="false" autocapitalize="off">
+          <input id="secretValue" placeholder="value" type="password" spellcheck="false" autocapitalize="off">
+        </div>
+        <button class="btn btn-go btn-mini" style="margin-top:8px" onclick="addSecret()">Add</button>
+        <div class=hint>Used for MCP tokens (e.g. METAQL_TOKEN). Values may contain only letters, digits, and _-./:+=@,~ (no spaces or shell metacharacters). Names like PATH/LD_* are reserved. The loop parses this file — it is never executed as shell — and values are never shown again.</div></div>
       <div class=setcard><h3>Advanced</h3>
         ${txt('spec','Standing spec file',c.spec||'','reread by the agent each cycle')}
         ${txt('commit_trailer','Commit trailer',c.commit_trailer||'')}</div>
@@ -2596,13 +2728,39 @@ function loadSettings(){
         <button class="btn btn-amber" onclick="if(confirm('Restart the loop to apply saved config? Any in-flight cycle is aborted.'))post('/restart-loop',{})">Restart loop</button>
         <button class="btn" onclick="if(confirm('Restart the dashboard? The page will blink — hard-refresh after ~2s.'))post('/restart-dashboard',{})">Restart dashboard</button>
         <span class=set-meta>Save writes config.yaml · Restart loop applies it to the running loop</span></div>`;
+    loadSecrets();
   }).catch(e=>{document.getElementById('settingsBody').innerHTML=`<div class=empty>Could not load settings: ${esc(String(e))}</div>`;});
+}
+function loadSecrets(){
+  const list=document.getElementById('secretsList');if(!list)return;
+  fetch('/api/secrets',{headers:{'X-CC-Token':TOKEN}}).then(r=>r.json()).then(function(d){
+    const secrets=d.secrets||[];
+    list.innerHTML=secrets.length?secrets.map(s=>
+      `<div class=secret-row><code>${esc(s.name)}</code><span class=mut>${esc(s.preview)}</span>`+
+      `<button class="btn btn-stop btn-mini" onclick="deleteSecret('${escJsAttr(s.name)}')">Delete</button></div>`
+    ).join(''):'<div class=empty>No secrets set.</div>';
+  }).catch(e=>{list.innerHTML=`<div class=empty>Could not load secrets: ${esc(String(e))}</div>`;});
+}
+function addSecret(){
+  const nameEl=document.getElementById('secretName'),valEl=document.getElementById('secretValue');
+  const name=nameEl.value.trim(),value=valEl.value;
+  if(!name){toast('Name required');return;}
+  postJSON('/api/secrets',{set:{[name]:value}}).then(j=>{
+    toast(j.msg||'saved');
+    nameEl.value='';valEl.value='';
+    loadSecrets();
+  }).catch(e=>toast('Save failed: '+e));
+}
+function deleteSecret(name){
+  if(!confirm(`Delete secret ${name}?`))return;
+  postJSON('/api/secrets',{delete:[name]}).then(j=>{toast(j.msg||'deleted');loadSecrets();}).catch(e=>toast('Delete failed: '+e));
 }
 function saveSettings(){
   const blocks={};
-  for(const id of ['gates','qa','plan','knowledge']){
+  const labels={gates:'Gates',qa:'QA',plan:'Plan',knowledge:'Knowledge',mcp:'MCP'};
+  for(const id of ['gates','qa','plan','knowledge','mcp']){
     try{blocks[id]=JSON.parse(document.getElementById('set-'+id).value||'{}');}
-    catch(e){toast((id==='gates'?'Gates':id[0].toUpperCase()+id.slice(1))+' is not valid JSON: '+e.message);return;}
+    catch(e){toast(labels[id]+' is not valid JSON: '+e.message);return;}
   }
   const v=id=>document.getElementById('set-'+id).value.trim();
   const n=id=>parseInt(document.getElementById('set-'+id).value,10);
@@ -2612,7 +2770,7 @@ function saveSettings(){
     interval_seconds:n('interval_seconds'),max_tasks_per_day:n('max_tasks_per_day'),cycle_timeout_seconds:n('cycle_timeout_seconds'),
     sources:collectChecks('sources'),workable_categories:collectChecks('workable_categories'),
     spec:v('spec'),commit_trailer:v('commit_trailer'),gates:blocks.gates,qa:blocks.qa,plan:blocks.plan,knowledge:blocks.knowledge,
-    pull_requests:v('pull_requests')
+    mcp:blocks.mcp,pull_requests:v('pull_requests')
   };
   postJSON('/api/config',payload).then(j=>toast(j.msg||'saved')).catch(e=>toast('Save failed: '+e));
 }
@@ -2656,12 +2814,12 @@ document.addEventListener('click',e=>{
 });
 
 /* ── render pipeline ────────────────────────────────────────────────────── */
-function sig(r){return JSON.stringify([r.running,r.next_up,r.done,r.board,r.skipped,r.escalated,r.runlog,r.history,r.funnel,r.feature_builds,r.spend_history,r.branches,r.epics,r.qa_flows,r.qa_services,r.onboarding]);}
+function sig(r){return JSON.stringify([r.running,r.next_up,r.done,r.board,r.skipped,r.escalated,r.runlog,r.history,r.funnel,r.feature_builds,r.spend_history,r.branches,r.epics,r.qa_flows,r.qa_services,r.onboarding,r.prd]);}
 function renderViews(){
   // Preserve column scroll positions across rebuilds.
   const colsEl=document.getElementById('queueCols');
   const scrolls=[...colsEl.querySelectorAll('.col')].map(c=>c.scrollTop);
-  renderStats();renderInboxAll();renderFilters();renderEpics();renderCalibration();renderDeepspace();renderQueue();renderShips();renderBranches();renderAgents();renderQa();
+  renderStats();renderInboxAll();renderFilters();renderEpics();renderPrd();renderCalibration();renderDeepspace();renderQueue();renderShips();renderBranches();renderAgents();renderQa();
   renderKpis();renderSpend();renderHistory();renderFunnel();renderRunlog();renderOnboarding();renderKnowledge();
   [...colsEl.querySelectorAll('.col')].forEach((c,i)=>{if(scrolls[i])c.scrollTop=scrolls[i];});
 }

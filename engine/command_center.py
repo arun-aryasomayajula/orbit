@@ -46,6 +46,8 @@ from backlog_append import SLUG_RE
 from qa_teach import _bad_flows_dir_reason
 import qa_env
 import qa_teach
+import prd_flow
+import secrets_env
 
 # ── path model ───────────────────────────────────────────────────────────────
 # ENGINE       : this repo's engine dir (ships command_center.py, its converter,
@@ -189,7 +191,7 @@ CYCLE_TIMEOUT = int(os.environ.get("ORBIT_CYCLE_TIMEOUT") or os.environ.get("AP_
 
 PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}
 PRIORITY_LADDER = ["low", "medium", "high"]
-SAFE = {"testing", "documentation", "dependencies", "code_quality", "developer_experience"}
+SAFE = {"testing", "documentation", "dependencies", "code_quality", "developer_experience", "insight"}
 # What the loop CAN work when promoted (autopilot:allow). Must match
 # backlog_to_tasks.EMITTABLE_CATEGORIES. HUMAN_ONLY is never loop-pickable.
 EMITTABLE = SAFE | {"bug", "feature", "refactor"}
@@ -2811,6 +2813,152 @@ def do_epic_action(tid: str, action: str) -> str:
     return f"{who} launched for {tid} — the card's stage updates as it works (log: logs/{log.name})"
 
 
+# ── PRD pipeline (Deep space band) ─────────────────────────────────────────
+# research/<run>/prd-run.json is prd_flow-owned; this dashboard layer only
+# reads it (prd_pipeline_state), mirrors its status-machine legality
+# dashboard-side (_prd_next_actions, so illegal buttons never render), and
+# drives it the same two ways do_epic_action drives epic_plan: synchronous
+# calls for pure human acts (new/approve-*/revise), a detached CLI Popen for
+# the agent stages (run-intake/run-chain).
+_PRD_RUN_RE = prd_flow.RUN_RE   # the controller owns the run-id shape; no second copy
+_PRD_ARTIFACT_NAMES = {"01-intake.json", "02-research.json", "03-synthesis.json",
+                       "04-prd.md", "05-review.json", prd_flow.MARKER_NAME}
+# Legal next_actions per marker status. "revise-intake" (full reset) is ALSO
+# legal from every status except "intake" itself (already there) - appended
+# below, not listed per-entry. A "done" run keeps it explicitly: signing off is
+# not the end of a PRD's life, and reopening one was otherwise a dead end that
+# forced the PM to hand-edit the marker.
+_PRD_STATUS_ACTIONS = {
+    "intake": ["run-intake"],
+    "awaiting-scope-approval": ["approve-scope", "revise-intake"],
+    "research": ["run-chain"],
+    "synthesis": ["run-chain"],
+    "draft": ["run-chain"],
+    "review": ["run-chain"],
+    "awaiting-signoff": ["approve-prd", "revise-draft", "revise-research"],
+    "done": ["revise-intake"],
+}
+
+
+def _prd_next_actions(status: str) -> list:
+    actions = list(_PRD_STATUS_ACTIONS.get(status, []))
+    if status != "intake" and "revise-intake" not in actions:
+        actions.append("revise-intake")
+    return actions
+
+
+def _prd_research_root() -> Path:
+    return REPO / "research"
+
+
+def prd_pipeline_state() -> list | None:
+    """Deep space's PRD band data: one entry per research/*/prd-run.json.
+    Present only when the target repo actually has a research/ dir (absent-
+    unless-configured discipline, same as qa_flow_library/qa_services_state -
+    a target with no PRD story yet sees a byte-identical /api/state)."""
+    root = _prd_research_root()
+    if not root.is_dir():
+        return None
+    runs = []
+    for d in sorted(p for p in root.iterdir() if p.is_dir()):
+        if not (d / prd_flow.MARKER_NAME).exists():
+            continue
+        try:
+            marker = prd_flow.load_marker(str(REPO), d.name)
+            if not isinstance(marker, dict):
+                continue  # valid JSON but not an object (null/[]/a string) - not a marker
+            tamper = prd_flow.verify(str(REPO), d.name)
+        except (OSError, ValueError, AttributeError, TypeError, KeyError):
+            continue  # unreadable/malformed marker - skip rather than 500 the whole board
+        status = marker.get("status", "")
+        stamps = marker.get("stages", {})
+        stages = [{"name": name,
+                  "ok": (stamps[name].get("evals", {}).get("ok") if name in stamps else None),
+                  "stamped_at": (stamps[name].get("stamped_at") if name in stamps else None)}
+                 for name in prd_flow.STAGES]
+        runs.append({"run_id": marker.get("run_id", d.name), "title": marker.get("title", ""),
+                    "status": status, "stages": stages, "tamper": tamper,
+                    "pii_touch": bool(marker.get("pii_touch")),
+                    "next_actions": _prd_next_actions(status)})
+    return runs
+
+
+def do_prd_action(run: str, action: str, title: str = "", brief: str = "",
+                  ack_pii: bool = False, pm: str = "") -> str:
+    """Drive the PRD pipeline from the dashboard. `new` validates the run id
+    itself (no marker exists yet to check legality against); every other
+    action is checked against the CURRENT marker's status via
+    _prd_next_actions before anything mutates - an illegal action is a no-op
+    error, never a partial mutation."""
+    if action == "new":
+        if not _PRD_RUN_RE.match(run):
+            return f"invalid run id '{run}' - lowercase letters, digits, hyphens, must start alphanumeric"
+        if not title.strip():
+            return "a title is required"
+        if (_prd_research_root() / run / prd_flow.MARKER_NAME).exists():
+            return f"a PRD run named '{run}' already exists"
+        try:
+            # pm is optional on the wire: left out, prd_flow resolves it from
+            # the workspace's git identity. That default is better UX than a
+            # fourth prompt on the New PRD form, so the form doesn't ask.
+            prd_flow.new(str(REPO), run, title.strip(), brief=brief, pm=pm.strip())
+        except (OSError, prd_flow.GateError) as e:
+            return f"could not create PRD run '{run}': {e}"
+        return f"Created PRD run '{run}' - intake is next."
+
+    try:
+        marker = prd_flow.load_marker(str(REPO), run)
+    except (OSError, ValueError):
+        return f"no PRD run named '{run}'"
+    status = marker.get("status", "")
+    if action not in _prd_next_actions(status):
+        return f"cannot '{action}' from status '{status}'"
+
+    if action == "approve-scope":
+        try:
+            prd_flow.approve_scope(str(REPO), run, ack_pii=ack_pii)
+        except prd_flow.GateError as e:
+            return f"cannot approve scope: {e}"
+        return f"Scope approved for '{run}' - research is next."
+    if action == "approve-prd":
+        prd_flow.approve_prd(str(REPO), run)
+        return f"'{run}' signed off - done."
+    if action.startswith("revise-"):
+        stage = action[len("revise-"):]
+        try:
+            prd_flow.revise(str(REPO), run, stage)
+        except prd_flow.GateError as e:
+            return f"cannot revise: {e}"
+        return f"Revising '{run}' from '{stage}' - that stamp and every later one dropped."
+    if action in ("run-intake", "run-chain"):
+        stage = "intake" if action == "run-intake" else status
+        script = str(ENGINE / "prd_flow.py")
+        cmd = [sys.executable, script, "run", str(REPO), run, stage]
+        if action == "run-chain":
+            cmd.append("--chain")
+        log = AP_STATE / "logs" / f"prd-{run}-{stage}.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("ab") as lf:
+            subprocess.Popen(cmd, stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
+                             start_new_session=True)
+        return f"Stage '{stage}' launched for '{run}' - the card updates as it works (log: logs/{log.name})"
+    return f"unknown prd action '{action}'"
+
+
+def read_prd_artifact(run: str, file: str) -> str | None:
+    """Confined GET for the artifact viewer - `run` and `file` are both
+    client input. Same template as _qa_resolve/read_knowledge_doc: shape-
+    check both, then resolve → assert the RESOLVED path stays under the
+    RESOLVED research/ root → is_file() (catches a symlink escape)."""
+    if not _PRD_RUN_RE.match(run) or file not in _PRD_ARTIFACT_NAMES:
+        return None
+    root = _prd_research_root().resolve()
+    resolved = (_prd_research_root() / run / file).resolve()
+    if not str(resolved).startswith(str(root) + os.sep) or not resolved.is_file():
+        return None
+    return resolved.read_text(errors="ignore")
+
+
 def load_calibration_candidates() -> list:
     """Pending calibration-miner candidates for the dashboard's strip."""
     out = []
@@ -2968,6 +3116,8 @@ def _validate_config(d: dict) -> list:
             for name, spec in g.items():
                 if not isinstance(spec, dict) or not str(spec.get("cmd", "")).strip():
                     errs.append(f"gate '{name}' needs a non-empty cmd")
+    if "mcp" in d and d["mcp"] is not None and not isinstance(d["mcp"], dict):
+        errs.append("mcp must be an object of server-name -> {transport, url/command, tools}")
     return errs
 
 
@@ -3052,6 +3202,145 @@ def do_save_config(raw: str) -> str:
         return "Rejected — " + "; ".join(cfg_errs)
     reload_settings()
     return "✓ Saved config.yaml. Use 'Restart loop' to apply it to the running loop."
+
+
+# ── secrets (.autopilot/.secrets.env) ─────────────────────────────────────
+# MCP tokens the loop needs at runtime (e.g. METAQL_TOKEN) but that must never
+# round-trip through config.yaml (committed) or the dashboard's state poll.
+# File format is a contract shared with two other readers: engine/doctor.py's
+# _secrets_env (bare KEY=VALUE, no quotes, no export) and run.sh's own line
+# parser (which reads, never sources/executes, this file) — so the writer
+# below must emit exactly that.
+_SECRETS_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+# run.sh's loader PARSES this file line-by-line rather than sourcing it (a
+# deliberate fix — the file used to be `. "$file"`'d, which would execute any
+# shell metacharacters in a value with the loop's privileges). This allowlist
+# is defense in depth on top of that: even a hand-edited file, or a future
+# consumer that DOES source it, can never contain a value that does anything
+# but sit there as an inert string. Covers tokens, API keys, base64, JWTs
+# (dots/dashes/underscores), URLs, and file paths — nothing that a shell would
+# treat specially ($, `, ;, |, &, quotes, whitespace, newlines are all out).
+_SECRETS_VALUE_RE = re.compile(r"^[A-Za-z0-9_\-./:+=@,~]+$")
+# A metacharacter-free VALUE isn't enough: a crafted NAME can be just as
+# dangerous with no metacharacters at all. run.sh's parse loop `export`s
+# whatever name/value pair it reads, so a saved PATH=/tmp/evil silently
+# poisons every bare `python3`/`git`/`gh` call the loop makes on its next
+# restart — that's RCE via name alone, no shell metacharacters required.
+# Block the interpreter/shell variables an attacker would reach for, plus
+# this process's own AP_HOME/AP_STATE/ORBIT_HOME (overriding those would let
+# a "secret" redirect the loop at a different config/state tree entirely).
+# PYTHONPATH is not the only loader hook: node, perl, ruby and java each read
+# their own, and a cycle or stage child reaches at least node (mcp stdio
+# servers run via npx). Keep this list and run.sh's `case` guard identical.
+_SECRETS_NAME_DENY = {"PATH", "IFS", "ENV", "BASH_ENV", "SHELL", "HOME", "PS4", "CDPATH",
+                      "PYTHONPATH", "PYTHONSTARTUP", "AP_HOME", "AP_STATE", "ORBIT_HOME",
+                      "NODE_OPTIONS", "NODE_PATH", "PERL5LIB", "RUBYOPT", "GEM_PATH",
+                      "CLASSPATH"}
+_SECRETS_PREFIX_DENY = ("LD_", "DYLD_", "BASH_")
+_SECRETS_LOCK = threading.Lock()  # ThreadingHTTPServer: guards concurrent writers
+
+
+def _secrets_path() -> Path:
+    return AP_HOME / ".secrets.env"
+
+
+def _read_secrets_env() -> dict:
+    """Parse .autopilot/.secrets.env as KEY=VALUE lines. Thin wrapper over the
+    shared parser (engine/secrets_env.py) - one definition of the format for
+    this panel, doctor.py, run.sh's loop and prd_flow's stage children."""
+    return secrets_env.read_path(str(_secrets_path()))
+
+
+def _ensure_secrets_gitignored() -> None:
+    """Make sure .autopilot/.gitignore lists .secrets.env before we create that
+    file. A workspace scaffolded before .secrets.env existed has a .gitignore
+    without the entry (init.py used to write it once and never top it up), and
+    this panel must not be the thing that drops a token into a tracked path.
+    Appends only what is missing; never rewrites what is already there."""
+    gi = AP_HOME / ".gitignore"
+    entry = ".secrets.env"
+    try:
+        body = gi.read_text()
+    except OSError:
+        gi.parent.mkdir(parents=True, exist_ok=True)
+        gi.write_text(f"# Orbit secrets - never commit\n{entry}\n")
+        return
+    if entry in {ln.strip() for ln in body.splitlines()}:
+        return
+    sep = "" if (not body or body.endswith("\n")) else "\n"
+    with gi.open("a") as f:
+        f.write(f"{sep}{entry}\n")
+
+
+def _atomic_write_secrets(secrets_map: dict) -> None:
+    """Write secrets_map as bare KEY=VALUE lines to .secrets.env, atomically and
+    at mode 0600 throughout (the temp file too — a crash between os.open and
+    os.replace must never leave a world-readable temp copy of these values
+    lying next to the real file)."""
+    path = _secrets_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_secrets_gitignored()
+    tmp = path.with_name(path.name + ".tmp")
+    body = "".join(f"{k}={v}\n" for k, v in sorted(secrets_map.items()))
+    fd = os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    try:
+        os.chmod(str(tmp), 0o600)  # belt-and-suspenders against an umask widening the open() mode
+        with os.fdopen(fd, "w") as f:
+            f.write(body)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+    os.replace(str(tmp), str(path))  # same-dir rename — atomic, no partial-file window
+
+
+def secrets_payload() -> dict:
+    """GET /api/secrets — name + short preview only. Full values are NEVER
+    returned once saved (that's the whole point of a secrets store)."""
+    out = []
+    for name, value in sorted(_read_secrets_env().items()):
+        preview = f"{value[:2]}...{value[-2:]}" if len(value) >= 6 else "set"
+        out.append({"name": name, "preview": preview})
+    return {"secrets": out}
+
+
+def do_save_secrets(payload: dict) -> str:
+    """POST /api/secrets {"set": {NAME: value, ...}, "delete": [NAME, ...]}.
+    Validates everything BEFORE writing anything (a rejected payload leaves
+    the file untouched, never partially applied). Values are never logged —
+    only names appear in returned/raised messages."""
+    if not isinstance(payload, dict):
+        return "Rejected — payload must be an object"
+    to_set = payload.get("set") or {}
+    to_delete = payload.get("delete") or []
+    if not isinstance(to_set, dict):
+        return "Rejected — 'set' must be an object of NAME -> value"
+    if not isinstance(to_delete, list):
+        return "Rejected — 'delete' must be a list of names"
+    names = list(to_set.keys()) + [str(n) for n in to_delete]
+    bad = sorted({str(n) for n in names if not _SECRETS_NAME_RE.match(str(n))})
+    if bad:
+        return "Rejected — invalid secret name(s): " + ", ".join(bad) + " (must match ^[A-Z][A-Z0-9_]*$)"
+    reserved = sorted({n for n in names if n in _SECRETS_NAME_DENY or n.startswith(_SECRETS_PREFIX_DENY)})
+    if reserved:
+        return "Rejected — reserved variable name: " + ", ".join(reserved)
+    for name, value in to_set.items():
+        if not isinstance(value, str) or not _SECRETS_VALUE_RE.match(value):
+            # Never echo the value back — name only. This also rejects
+            # multi-line values (newlines aren't in the allowlist) and empty
+            # strings (the regex requires at least one char), so those don't
+            # need separate checks.
+            return f"Rejected — value for {name} must be non-empty and contain only letters, digits, and _-./:+=@,~ (no shell metacharacters)"
+    with _SECRETS_LOCK:
+        current = _read_secrets_env()
+        for name in to_delete:
+            current.pop(str(name), None)
+        for name, value in to_set.items():
+            current[name] = value
+        _atomic_write_secrets(current)
+    return f"Saved {len(to_set) + len(to_delete)} secret(s)"
 
 
 def do_restart(label: str, delay: float = 0) -> str:
@@ -3541,6 +3830,12 @@ def build_state() -> dict:
     qa_svc = qa_services_state()
     if qa_svc is not None:
         rt["qa_services"] = qa_svc
+    # Same discipline again: present only when the target repo has a
+    # research/ dir, so a target with no PRD story yet sees a byte-identical
+    # /api/state.
+    prd = prd_pipeline_state()
+    if prd is not None:
+        rt["prd"] = prd
     rt["onboarding"] = onboarding_state()
     return rt
 
@@ -3597,6 +3892,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(json.dumps(build_state()).encode(), "application/json")
         elif path == "/api/config":
             self._send(json.dumps(config_payload()).encode(), "application/json")
+        elif path == "/api/secrets":
+            # Read-only like /api/config — host-checked above, token-less, and
+            # MUST NEVER return a full value (see secrets_payload's masking).
+            self._send(json.dumps(secrets_payload()).encode(), "application/json")
         elif path == "/api/cycletail":
             self._send(json.dumps(cycletail()).encode(), "application/json")
         elif path == "/api/cmdlog":
@@ -3669,6 +3968,15 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(gf.read_text().encode(), "text/plain; charset=utf-8"); return
             self._send(b"No guide found. Create GUIDE.md in your .autopilot/ directory.",
                        "text/plain; charset=utf-8")
+        elif path == "/prd-artifact":
+            # Confined GET for the PRD artifact viewer - see read_prd_artifact
+            # for the run-id/filename allowlist + realpath confinement.
+            run = (qs.get("run", [""])[0]).strip()
+            file = (qs.get("file", [""])[0]).strip()
+            body = read_prd_artifact(run, file)
+            if body is None:
+                self._send(b"not found", "text/plain", 404); return
+            self._send(body.encode(), "text/plain; charset=utf-8")
         elif path == "/qa-teach-status":
             # Read-only poll for the "New test / Record" panel — same
             # token-less GET posture as /api/state (host-checked above, no
@@ -3790,6 +4098,15 @@ class Handler(BaseHTTPRequestHandler):
                 if not tid:
                     self._send(b'{"ok":false,"msg":"missing epic id"}', "application/json", 400); return
                 msg = do_epic_action(tid, (data.get("action", [""])[0]).strip())
+            elif path == "/prd-action":
+                run = (data.get("run", [""])[0]).strip()
+                if not run:
+                    self._send(b'{"ok":false,"msg":"missing run id"}', "application/json", 400); return
+                msg = do_prd_action(run, (data.get("action", [""])[0]).strip(),
+                                    (data.get("title", [""])[0]).strip(),
+                                    data.get("brief", [""])[0],
+                                    ack_pii=(data.get("ack_pii", [""])[0] == "1"),
+                                    pm=data.get("pm", [""])[0])
             elif path == "/calibration-action":
                 if not tid:
                     self._send(b'{"ok":false,"msg":"missing candidate id"}', "application/json", 400); return
@@ -3816,6 +4133,14 @@ class Handler(BaseHTTPRequestHandler):
                 msg = do_delete_branches_bulk((data.get("kind", [""])[0]).strip())
             elif path == "/api/config":
                 msg = do_save_config(raw)
+            elif path == "/api/secrets":
+                # JSON body (postJSON), same posture as /api/config's raw-body
+                # JSON parsing — {"set": {...}, "delete": [...]}.
+                try:
+                    payload = json.loads(raw) if raw else {}
+                except Exception:
+                    payload = {}
+                msg = do_save_secrets(payload)
             elif path == "/restart-loop":
                 msg = do_restart(LAUNCHD_LABEL)
             elif path == "/restart-dashboard":

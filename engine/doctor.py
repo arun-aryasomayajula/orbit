@@ -8,6 +8,9 @@ Env:   ORBIT_HOME (engine dir; defaults to this file's repo root)
 """
 import sys, os, json, shutil, subprocess
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import secrets_env
+
 TARGET = sys.argv[1] if len(sys.argv) > 1 else "."
 TARGET = os.path.abspath(TARGET)
 SHOW_ALL = "--all" in sys.argv
@@ -28,6 +31,12 @@ def check(label, passed, detail=""):
     global ok
     ok = ok and passed
     print(f"  {'✓' if passed else '✗'} {label}" + (f"  {detail}" if detail else ""))
+
+def _secrets_env(target):
+    """Parse .autopilot/.secrets.env as KEY=VALUE lines. Thin wrapper over the
+    shared parser (engine/secrets_env.py) so doctor, the dashboard's secrets
+    panel, run.sh's loop and prd_flow's stage children all agree on the format."""
+    return secrets_env.read(target)
 
 print(f"\nORBIT DOCTOR — {TARGET}\n")
 
@@ -76,12 +85,21 @@ elif "jira" in sources:
 # fail doctor, since the server may simply not be reached by any queued
 # task yet, but it's the top setup failure a PM will hit once one is.
 mcp_cfg = cfg.get("mcp") if isinstance(cfg.get("mcp"), dict) else {}
+secrets = _secrets_env(TARGET)
 for name, s in mcp_cfg.items():
     te = isinstance(s, dict) and s.get("token_env")
-    if te and not os.environ.get(te):
+    if te and te not in os.environ and te not in secrets:
         print(f"  · mcp.{name}: token_env {te} is not set in this shell — interactive cycles "
               f"will reach {name} unauthenticated; a service-mode loop needs it in the "
               f"service environment too")
+
+# Check .secrets.env permissions (if it exists)
+secrets_path = os.path.join(AP, ".secrets.env")
+if os.path.exists(secrets_path):
+    st = os.stat(secrets_path)
+    mode = st.st_mode & 0o777
+    if mode & 0o077:
+        print(f"  · .secrets.env exists with mode {oct(mode)} — group/other bits are readable; should be 0600 or stricter for security")
 
 # 3. router — target's .autopilot/router.yaml overrides the engine default at router/router.yaml
 router_path = find("router.yaml") or (

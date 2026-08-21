@@ -158,13 +158,23 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
 # --- MCP servers (optional) ---------------------------------------------------
 # MCP (Model Context Protocol) servers the cycle may reach, configured here with
 # transport, credentials, and tool allowlists (spec section 3).
+#
+# Where the token itself lives (spec decision 10): .autopilot/.secrets.env, one
+# KEY=VALUE per line, mode 0600, gitignored. Write it with the dashboard's
+# Settings > Secrets panel (which is also what keeps the .gitignore entry in
+# place), or by hand. It is NOT in this file and NOT in git: config.yaml only
+# names the variable, and the generated MCP config only carries a ${VAR}
+# reference that Claude Code expands from the environment at run time. run.sh
+# loads .secrets.env once per iteration, so a token saved in the panel reaches
+# the next cycle without a restart.
 # mcp:
 #   metaql:                          # server name → mcp__metaql__* tool prefix
 #     transport: http                # http | stdio
 #     url: "https://<host>/mcp"      # http only
 #     token_env: METAQL_TOKEN        # optional; sent as `Authorization: Bearer ${METAQL_TOKEN}` —
 #                                    # the ${VAR} is expanded by Claude Code at run time; the
-#                                    # token itself never lands on disk or in the repo
+#                                    # value comes from .autopilot/.secrets.env (see above), so
+#                                    # the token never lands in config.yaml or in the repo
 #     tools: [metaql_execute_query]  # REQUIRED — "*" = allow every tool on this server;
 #                                    # a list allows only those tools; absent/empty allows none
 #   figma:
@@ -173,6 +183,15 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
 #     args: ["-y", "figma-mcp"]
 #     env_passthrough: [FIGMA_TOKEN] # env var names forwarded to the server process as ${VAR}
 #     tools: "*"
+
+# --- PRD pipeline (optional, product workspaces) -------------------------------
+# Tunes the headless `claude` call prd_flow.py makes per stage (intake, research,
+# synthesis, draft, review — driven from the dashboard's PRD view, see
+# `prd_flow.py` and `docs/superpowers/specs/`). No block needed to use the
+# pipeline; these just override its defaults.
+# prd:
+#   model: "claude-opus-4-8"      # per-stage model (this is already the default)
+#   timeout_seconds: 3600         # cap on each stage's headless call (also the default)
 
 # --- pull requests (optional, wrapper-only) ------------------------------------
 # "github" → after pushing a ship, the WRAPPER (never the agent) runs `gh pr create`

@@ -211,6 +211,17 @@ def validate(target):
                     if fld in s and (not isinstance(s[fld], list)
                                      or not all(isinstance(x, str) for x in s[fld])):
                         errs.append(f"{pre}.{fld} must be a list of strings, got {s.get(fld)!r}")
+    if "prd" in raw and raw["prd"] is not None:
+        prd = raw["prd"]
+        if not isinstance(prd, dict):
+            errs.append(f"prd must be a mapping, got {prd!r}")
+        else:
+            if "model" in prd and (not isinstance(prd["model"], str) or not prd["model"]):
+                errs.append(f"prd.model must be a non-empty string, got {prd.get('model')!r}")
+            if "timeout_seconds" in prd and (not isinstance(prd["timeout_seconds"], int)
+                                              or isinstance(prd["timeout_seconds"], bool)
+                                              or prd["timeout_seconds"] <= 0):
+                errs.append(f"prd.timeout_seconds must be a positive integer, got {prd.get('timeout_seconds')!r}")
     if errs:
         print("\n".join("  ✗ " + e for e in errs)); sys.exit(1)
     print("  ✓ config valid")
