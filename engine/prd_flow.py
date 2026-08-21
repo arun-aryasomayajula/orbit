@@ -29,7 +29,7 @@ CLI:
   prd_flow.py new <target> <run> <title> [--brief <text>]
   prd_flow.py status <target> <run>
   prd_flow.py record <target> <run> <stage>
-  prd_flow.py approve-scope <target> <run>
+  prd_flow.py approve-scope <target> <run> [--ack-pii]
   prd_flow.py approve-prd <target> <run>
   prd_flow.py revise <target> <run> <stage>
   prd_flow.py run <target> <run> <stage> [--chain]
@@ -37,6 +37,7 @@ CLI:
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -47,6 +48,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mcp
 import prd_evals
+import secrets_env
 
 ORBIT_HOME = os.environ.get("ORBIT_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_MODEL = "claude-opus-4-8"
@@ -81,6 +83,12 @@ NEXT_STATUS = {
     "review": "awaiting-signoff",
 }
 MARKER_NAME = "prd-run.json"
+# A run id becomes a DIRECTORY name under research/ and a token in a slash
+# command, so the controller - not just the dashboard that happens to call it -
+# owns the shape. Anything with a slash, a dot, a quote or a space is refused
+# here, which also keeps `research/<run>/` inside research/. The dashboard
+# imports this rather than keeping its own copy.
+RUN_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
 def _now():
@@ -118,6 +126,10 @@ def _atomic_write_json(path, data):
 
 def new(target, run_id, title, brief=""):
     """Create research/<run>/ and its marker at status 'intake'."""
+    if not RUN_RE.match(run_id or ""):
+        raise GateError(
+            f"invalid run id {run_id!r} - lowercase letters, digits and hyphens only, "
+            "must start alphanumeric")
     os.makedirs(_run_dir(target, run_id), exist_ok=True)
     marker = {
         "run_id": run_id,
@@ -125,6 +137,7 @@ def new(target, run_id, title, brief=""):
         "brief": brief,
         "created": _now(),
         "status": "intake",
+        "pii_touch": False,   # set from 01-intake.json when intake is recorded
         "stages": {},
         "approvals": {"scope": None, "prd": None},
     }
@@ -175,6 +188,28 @@ def _run_evals(target, run, stage, raw):
     raise GateError(f"no eval dispatch for stage '{stage}'")  # unreachable given STAGES
 
 
+def _eval_verdict(target, run, stage, raw):
+    """The stamp's `evals` block for `stage`. An artifact that won't parse, or
+    a shape no checker anticipated, must FAIL the eval - never kill the stage
+    process. A crash here is recorded as an error string so the run stays put
+    with a readable reason on the card instead of dying silently mid-stage."""
+    try:
+        errs = _run_evals(target, run, stage, raw)
+    except Exception as e:  # noqa: BLE001 - the whole point is that nothing escapes
+        return {"ok": False, "errors": [f"eval crashed: {e!r}"]}
+    return {"ok": not errs, "errors": errs}
+
+
+def _intake_pii_touch(raw):
+    """intake's `pii_touch`, read off the artifact bytes. A malformed artifact
+    reads as False - its eval is failing anyway, so the run cannot reach the
+    scope gate this flag guards."""
+    try:
+        return bool(json.loads(raw).get("pii_touch"))
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
 def record_stage(target, run, stage):
     """Stamp `stage`'s artifact (sha + chained prev_sha) and run its Tier-A
     eval. Refuses (GateError) if `stage` isn't the marker's current status
@@ -197,13 +232,18 @@ def record_stage(target, run, stage):
     if idx > 0:
         prev_stamp = marker["stages"].get(STAGES[idx - 1])
         prev_sha = prev_stamp["sha"] if prev_stamp else None
-    errs = _run_evals(target, run, stage, raw)
-    ok = not errs
+    if stage == "intake":
+        # Lift intake's pii_touch onto the marker so the scope gate (and the
+        # dashboard card) can see it without re-reading the artifact. Recorded
+        # on every intake stamp, so a revise that clears the flag clears it here.
+        marker["pii_touch"] = _intake_pii_touch(raw)
+    verdict = _eval_verdict(target, run, stage, raw)
+    ok = verdict["ok"]
     marker["stages"][stage] = {
         "sha": sha,
         "prev_sha": prev_sha,
         "stamped_at": _now(),
-        "evals": {"ok": ok, "errors": errs},
+        "evals": verdict,
     }
     if ok:
         marker["status"] = NEXT_STATUS[stage]
@@ -229,13 +269,19 @@ def verify(target, run):
     return problems
 
 
-def approve_scope(target, run):
+def approve_scope(target, run, ack_pii=False):
+    """Approve the scope gate. On a run whose intake set pii_touch, approval
+    needs `ack_pii` on top of the status check: the grounding contract defers
+    PII compliance to a human, and a one-click approve is not that human
+    saying yes to PII. The dashboard asks a second, explicit question."""
     marker = load_marker(target, run)
     if marker["status"] != "awaiting-scope-approval":
         raise GateError(
             f"cannot approve scope: status is '{marker['status']}', "
             "expected 'awaiting-scope-approval'")
-    marker["approvals"]["scope"] = {"at": _now()}
+    if marker.get("pii_touch") and not ack_pii:
+        raise GateError("pii_touch run: scope approval requires explicit PII acknowledgement")
+    marker["approvals"]["scope"] = {"at": _now(), "ack_pii": bool(marker.get("pii_touch"))}
     marker["status"] = "research"
     _write_marker(target, run, marker)
     return marker
@@ -282,17 +328,34 @@ def _load_prd_cfg(target):
     return raw.get("prd") or {}
 
 
+def _mcp_wire(target):
+    """(settings_path, build_path) for the stage's headless call.
+
+    mcp.py is a CLI first: on a missing/broken config it calls sys.exit(), which
+    raises SystemExit - and SystemExit is not an Exception, so it would sail
+    straight through every `except Exception` and terminate the process that
+    called us. From the dashboard that is a stage that dies with nothing on the
+    card. Convert it (and anything else that escapes) into a GateError the
+    caller already knows how to report. KeyboardInterrupt stays fatal."""
+    try:
+        return mcp.write_settings(target), mcp.write_build(target)
+    except KeyboardInterrupt:
+        raise
+    except BaseException as e:  # noqa: BLE001 - SystemExit is the whole reason
+        raise GateError(f"mcp wiring failed for {target}: {e}") from e
+
+
 def _build_cmd(target, run, stage, prd_cfg):
     claude = shutil.which("claude")
     if not claude:
         raise GateError("claude not found on PATH")
     model = prd_cfg.get("model") or DEFAULT_MODEL
+    settings_path, build_path = _mcp_wire(target)
     cmd = [claude, "--print", f"/{SKILLS[stage]} {run}",
            "--permission-mode", "acceptEdits",
-           "--settings", mcp.write_settings(target),
+           "--settings", settings_path,
            "--model", model,
            "--add-dir", ORBIT_HOME]
-    build_path = mcp.write_build(target)
     if build_path:
         cmd += ["--mcp-config", build_path, "--strict-mcp-config"]
     return cmd
@@ -308,7 +371,17 @@ def _invoke_claude(target, run, stage):
     override = os.environ.get("ORBIT_PRD_CMD")
     cmd = shlex.split(override) if override else _build_cmd(target, run, stage, prd_cfg)
     ap = os.path.join(target, ".autopilot")
-    env = dict(os.environ, PRD_STAGE=stage, PRD_RUN=run, PRD_TARGET=target,
+    # Stage children need the PM's tokens: an MCP server configured with
+    # token_env sends `Authorization: Bearer ${VAR}`, and Claude Code expands
+    # ${VAR} from THIS child's environment. The dashboard writes those tokens
+    # to .autopilot/.secrets.env; run.sh's loop exports them for cycles, but a
+    # stage launched from the dashboard (do_prd_action -> Popen) inherits the
+    # server's environment, not the loop's - so read them here. Precedence:
+    # inherited env < .secrets.env < the PRD_*/AP_* names this call owns.
+    # Never log these values.
+    env = dict(os.environ)
+    env.update(secrets_env.read(target))
+    env.update(PRD_STAGE=stage, PRD_RUN=run, PRD_TARGET=target,
                AP_HOME=ap, AP_STATE=os.path.join(ap, "state"), ORBIT_HOME=ORBIT_HOME)
     try:
         p = subprocess.run(cmd, cwd=target, env=env, timeout=timeout,
@@ -372,7 +445,8 @@ CMDS = {
     "new": _cli_new,
     "status": lambda rest: load_marker(rest[0], rest[1]),
     "record": lambda rest: record_stage(rest[0], rest[1], rest[2]),
-    "approve-scope": lambda rest: approve_scope(rest[0], rest[1]),
+    "approve-scope": lambda rest: approve_scope(rest[0], rest[1],
+                                                ack_pii="--ack-pii" in rest[2:]),
     "approve-prd": lambda rest: approve_prd(rest[0], rest[1]),
     "revise": lambda rest: revise(rest[0], rest[1], rest[2]),
     "run": _cli_run,

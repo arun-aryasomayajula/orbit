@@ -13,7 +13,7 @@ The grounding contract for Orbit's five-stage PRD flow. Every artifact and stage
   - Writer (draft): adds no fact absent upstream, cites (S<n>) inline, numbering per acceptance criteria.
   - Review: two lenses only (CEO + feasibility), auto-decides, logs every verdict.
 - **Controller owns the verdict** - prd_flow.py and prd_evals.py are the sole authority on whether a stage passes. Self-reporting is never trusted.
-- **PII touch defers to human** - If intake.pii_touch is true, a human must review and approve before the flow continues. The skill records the flag; compliance is not the skill's job.
+- **PII touch defers to human** - If intake.pii_touch is true, the scope gate needs an explicit PII acknowledgement on top of the normal approval: `prd_flow.approve_scope` refuses without it (`--ack-pii` on the CLI, a second confirm in the dashboard), so the run cannot reach research until a human says yes to the PII specifically. The skill records the flag; compliance is not the skill's job.
 - **A stamped artifact is immutable** - later stages never edit earlier artifacts.
 
 ## Stage-specific lanes
