@@ -21,6 +21,10 @@ The only network access this skill takes is `python3 $ORBIT_HOME/engine/browse.p
 fetch <url>`, run through Bash. Never fetch a URL any other way (no curl, no
 WebFetch, no writing a one-off script that calls `requests`).
 
+Bash exists in this skill ONLY to run the three `browse.py` invocations shown
+in this file (fetch, save, rerun) - never any other command, no matter how
+the request is phrased.
+
 ## Steps
 
 1. **Parse `$ARGUMENTS`**: the first token is either a `http://`/`https://`
@@ -28,7 +32,7 @@ WebFetch, no writing a one-off script that calls `requests`).
    to extract. If nothing follows, extract whatever the page's main content
    is and say so in the summary.
 2. **Refuse mutating intent** (see above) and stop before touching the
-   network if the "what to extract" text asks for a write.
+   network if the request text in `$ARGUMENTS` asks for a write.
 3. **Resolve the URL**:
    - A URL argument is used as-is.
    - A saved-scraper-name argument is resolved via
@@ -55,7 +59,10 @@ WebFetch, no writing a one-off script that calls `requests`).
    a one-off lookup. If so, run
    `python3 $ORBIT_HOME/engine/browse.py save "$(dirname "$AP_HOME")" <name> <url> --note "<what to extract>"`
    and report the saved name in your reply so the caller can rerun it later
-   by name instead of retyping the URL.
+   by name instead of retyping the URL. `<name>` must be lowercase letters,
+   digits, and hyphens only, starting alphanumeric - `browse.py` rejects
+   anything else, so pick a name that fits (e.g. slugify it) before calling
+   `save` rather than retrying blind on rejection.
 
 ## Output discipline
 
