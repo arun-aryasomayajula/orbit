@@ -46,6 +46,14 @@ def test_insight_is_a_safe_category(monkeypatch, tmp_path):
     import backlog_to_tasks
     assert "insight" in backlog_to_tasks.SAFE_CATEGORIES
 
+def test_init_rejects_unknown_flag(tmp_path):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    r = subprocess.run([sys.executable, str(ORBIT / "install" / "init.py"),
+                        str(tmp_path), str(ORBIT), "--produkt"],
+                       capture_output=True, text=True)
+    assert r.returncode != 0
+    assert not (tmp_path / ".autopilot" / "config.yaml").exists()
+
 def test_doctor_warns_on_missing_mcp_token_env(tmp_path):
     _init_product(tmp_path)
     cfg = tmp_path / ".autopilot" / "config.yaml"

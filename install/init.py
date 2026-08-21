@@ -5,6 +5,8 @@ import sys, os, shutil
 
 ARGS = [a for a in sys.argv[1:] if a != "--product"]
 PRODUCT = "--product" in sys.argv[1:]
+if len(ARGS) != 2 or any(a.startswith("-") for a in ARGS):
+    sys.exit("usage: init.py <target-repo> <orbit-home> [--product]")
 TARGET = os.path.abspath(ARGS[0])
 ORBIT_HOME = os.path.abspath(ARGS[1])
 AP = os.path.join(TARGET, ".autopilot")
@@ -87,7 +89,10 @@ workable_categories: [insight, documentation]
 sources: [backlog]
 
 # MCP servers this workspace's cycles may reach (see schema.yaml `mcp:` docs).
-# Uncomment and fill in; the token stays in your shell env, never in this file.
+# Uncomment and fill in.
+# token: export METAQL_TOKEN in the shell that runs `orbit run`. Service mode
+# (launchd/systemd) does NOT inherit your shell — add the variable to the
+# service environment (see `orbit install`) until Keychain delivery lands (M2).
 # mcp:
 #   metaql:
 #     transport: http
@@ -96,9 +101,6 @@ sources: [backlog]
 #     tools: [metaql_list_verticals, metaql_list_projects, metaql_list_use_cases,
 #             metaql_list_explores, metaql_get_explore_fields, metaql_generate_query,
 #             metaql_execute_query]
-
-env:
-  passthrough: [METAQL_TOKEN]
 
 branch_prefix: "orbit-product"
 commit_trailer: ""

@@ -197,10 +197,13 @@ def validate(target):
                     errs.append(f"{pre}.url is required for http transport")
                 if tr == "stdio" and (not isinstance(s.get("command"), str) or not s.get("command")):
                     errs.append(f"{pre}.command is required for stdio transport")
-                tools = s.get("tools", "*")
-                if tools != "*" and (not isinstance(tools, list)
-                                     or not all(isinstance(t, str) and t for t in tools)):
-                    errs.append(f"{pre}.tools must be \"*\" or a list of non-empty strings, got {tools!r}")
+                if "tools" not in s:
+                    errs.append(f'{pre}.tools is required — use "*" to allow every tool on this server')
+                else:
+                    tools = s.get("tools")
+                    if tools != "*" and (not isinstance(tools, list)
+                                         or not all(isinstance(t, str) and t for t in tools)):
+                        errs.append(f"{pre}.tools must be \"*\" or a list of non-empty strings, got {tools!r}")
                 for fld in ("token_env",):
                     if fld in s and (not isinstance(s[fld], str) or not s[fld]):
                         errs.append(f"{pre}.{fld} must be a non-empty string, got {s.get(fld)!r}")

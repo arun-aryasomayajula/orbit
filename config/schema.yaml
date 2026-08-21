@@ -157,16 +157,16 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
 
 # --- MCP servers (optional) ---------------------------------------------------
 # MCP (Model Context Protocol) servers the cycle may reach, configured here with
-# transport, credentials, and tool allowlists. The cycle discovers tool names
-# from the loaded servers and merges them into the settings for gating.
-# mcp:                               # OPTIONAL — MCP servers the cycle may reach (spec section 3).
+# transport, credentials, and tool allowlists (spec section 3).
+# mcp:
 #   metaql:                          # server name → mcp__metaql__* tool prefix
 #     transport: http                # http | stdio
 #     url: "https://<host>/mcp"      # http only
 #     token_env: METAQL_TOKEN        # optional; sent as `Authorization: Bearer ${METAQL_TOKEN}` —
 #                                    # the ${VAR} is expanded by Claude Code at run time; the
 #                                    # token itself never lands on disk or in the repo
-#     tools: [metaql_execute_query]  # allowlist merged into the cycle's settings; "*" = all
+#     tools: [metaql_execute_query]  # REQUIRED — "*" = allow every tool on this server;
+#                                    # a list allows only those tools; absent/empty allows none
 #   figma:
 #     transport: stdio
 #     command: npx

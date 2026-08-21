@@ -75,6 +75,11 @@ def test_permission_allows_tool_list_and_wildcard():
     assert "mcp__metaql__*" not in allows   # a tool list must NOT widen to the whole server
 
 
+def test_permission_allows_omitted_tools_grants_nothing():
+    cfg = {"metaql": {"transport": "http", "url": "u"}}
+    assert mcp.mcp_permission_allows(cfg) == []
+
+
 def test_build_settings_preserves_base_deny():
     base = {"permissions": {"allow": ["Read"], "deny": ["Bash(git push:*)"]}}
     out = mcp.build_settings({"m": {"transport": "http", "url": "u", "tools": ["q"]}}, base)
@@ -126,6 +131,13 @@ def test_validate_rejects_bad_transport_and_bad_tools(tmp_path):
     r = _validate(t)
     assert r.returncode == 1
     assert "transport" in r.stdout and "tools" in r.stdout
+
+
+def test_validate_rejects_missing_tools(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG + 'mcp:\n  m:\n    transport: http\n    url: "https://m/mcp"\n')
+    r = _validate(t)
+    assert r.returncode == 1
+    assert "mcp.m" in r.stdout and "tools" in r.stdout
 
 
 def test_validate_accepts_good_mcp_block(tmp_path):

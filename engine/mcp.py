@@ -46,11 +46,12 @@ def build_mcp_config(mcp_cfg: dict) -> dict:
 def mcp_permission_allows(mcp_cfg: dict) -> list:
     allows = []
     for name, s in mcp_cfg.items():
-        tools = s.get("tools", "*")
+        tools = s.get("tools")
         if tools == "*":
             allows.append(f"mcp__{name}__*")
-        else:
+        elif tools:
             allows += [f"mcp__{name}__{t}" for t in tools]
+        # absent/empty -> no allows; the server loads but no tool is permitted
     return allows
 
 

@@ -199,10 +199,16 @@ run_cycle() {
 
 one_iteration() {
   gates_ready || { echo SKIP; return; }
-  # MCP seam (spec section 3): the engine decides which MCP servers and tools a
-  # cycle can reach. Empty MCP_CONFIG = no mcp: block = flags omitted entirely.
-  MCP_CONFIG="$(python3 "$ENGINE/mcp.py" build "$TARGET" 2>>"$LOGDIR/orbit.log" || true)"
-  CYCLE_SETTINGS="$(python3 "$ENGINE/mcp.py" settings "$TARGET" 2>>"$LOGDIR/orbit.log" || echo "$SETTINGS")"
+  # MCP seam (spec section 3): empty MCP_CONFIG = no mcp: block = flags omitted.
+  # A FAILURE here (malformed mcp: block) must not silently run the cycle blind.
+  if ! MCP_CONFIG="$(python3 "$ENGINE/mcp.py" build "$TARGET" 2>>"$LOGDIR/orbit.log")"; then
+    log "ERROR: mcp.py build failed for $TARGET — see orbit.log; skipping iteration"
+    echo SKIP; return
+  fi
+  if ! CYCLE_SETTINGS="$(python3 "$ENGINE/mcp.py" settings "$TARGET" 2>>"$LOGDIR/orbit.log")"; then
+    log "ERROR: mcp.py settings failed for $TARGET — see orbit.log; skipping iteration"
+    echo SKIP; return
+  fi
   [ -n "$CYCLE_SETTINGS" ] || CYCLE_SETTINGS="$SETTINGS"
   prepare_worktree || { echo FAIL; return; }
   # Reap entries stuck mid-cycle (claim-then-crash in_progress, commit-then-die
