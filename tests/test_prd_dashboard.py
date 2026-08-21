@@ -283,3 +283,23 @@ def test_prd_artifact_confinement(cc):
     body = cc.read_prd_artifact("r1", "01-intake.json")
     assert body is not None
     assert json.loads(body) == GOOD_INTAKE
+
+
+def test_corrupt_marker_does_not_freeze_the_state_poll(cc):
+    # A prd-run.json that's valid JSON but not an object (null, a bare list,
+    # a string) must not take down build_state()'s every-3s poll for every
+    # other run - one bad marker is skipped, not fatal.
+    cc.prd_flow.new(str(cc.REPO), "r1", "Healthy PRD")
+
+    (Path(cc.REPO) / "research" / "r2").mkdir()
+    (Path(cc.REPO) / "research" / "r2" / "prd-run.json").write_text("null")
+
+    (Path(cc.REPO) / "research" / "r3").mkdir()
+    (Path(cc.REPO) / "research" / "r3" / "prd-run.json").write_text("[]")
+
+    runs = cc.prd_pipeline_state()
+    assert runs is not None
+    assert [r["run_id"] for r in runs] == ["r1"]
+
+    s = cc.build_state()   # the actual /api/state path - must not raise
+    assert [r["run_id"] for r in s["prd"]] == ["r1"]

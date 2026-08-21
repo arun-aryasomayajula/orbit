@@ -2862,8 +2862,10 @@ def prd_pipeline_state() -> list | None:
             continue
         try:
             marker = prd_flow.load_marker(str(REPO), d.name)
+            if not isinstance(marker, dict):
+                continue  # valid JSON but not an object (null/[]/a string) - not a marker
             tamper = prd_flow.verify(str(REPO), d.name)
-        except (OSError, ValueError):
+        except (OSError, ValueError, AttributeError, TypeError, KeyError):
             continue  # unreadable/malformed marker - skip rather than 500 the whole board
         status = marker.get("status", "")
         stamps = marker.get("stages", {})
