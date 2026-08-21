@@ -175,3 +175,111 @@ def test_task_new_insight_with_queue_lands_queued_and_allow(cc):
     assert "category: insight" in text
     assert "status: queued" in text
     assert "autopilot: allow" in text
+
+
+# ── PRD pipeline band (Task 9) ─────────────────────────────────────────────
+# prd_pipeline_state()/build_state's `prd` key, /prd-action's dashboard-side
+# legality mirror of prd_flow's status machine, and /prd-artifact's
+# confinement (run-id shape, artifact allowlist, realpath-under-research/).
+
+GOOD_INTAKE = {"run_id": "r1", "title": "t", "pm": "p", "goal": "g", "scope_in": ["a"],
+              "scope_out": [], "data_targets": [], "code_targets": [], "pii_touch": False}
+
+
+def test_prd_key_absent_without_research_dir(cc):
+    assert not (Path(cc.REPO) / "research").exists()
+    assert "prd" not in cc.build_state()
+    assert cc.prd_pipeline_state() is None
+
+
+def test_prd_pipeline_state_shape_and_next_actions(cc):
+    cc.prd_flow.new(str(cc.REPO), "r1", "My PRD", brief="ctx")
+    (Path(cc.REPO) / "research" / "r1" / "01-intake.json").write_text(json.dumps(GOOD_INTAKE))
+    cc.prd_flow.record_stage(str(cc.REPO), "r1", "intake")
+
+    runs = cc.prd_pipeline_state()
+    assert runs is not None and len(runs) == 1
+    r = runs[0]
+    assert r["run_id"] == "r1"
+    assert r["title"] == "My PRD"
+    assert r["status"] == "awaiting-scope-approval"
+    assert r["tamper"] == []
+    names = [s["name"] for s in r["stages"]]
+    assert names == ["intake", "research", "synthesis", "draft", "review"]
+    intake_stage = r["stages"][0]
+    assert intake_stage["ok"] is True and intake_stage["stamped_at"]
+    research_stage = r["stages"][1]
+    assert research_stage["ok"] is None and research_stage["stamped_at"] is None
+    assert r["next_actions"] == ["approve-scope", "revise-intake"]
+
+    # build_state carries the same key, present because research/ now exists.
+    s = cc.build_state()
+    assert "prd" in s and s["prd"][0]["run_id"] == "r1"
+
+
+def test_prd_action_approve_scope_flips_marker_status(cc):
+    cc.prd_flow.new(str(cc.REPO), "r1", "My PRD")
+    (Path(cc.REPO) / "research" / "r1" / "01-intake.json").write_text(json.dumps(GOOD_INTAKE))
+    cc.prd_flow.record_stage(str(cc.REPO), "r1", "intake")
+
+    msg = cc.do_prd_action("r1", "approve-scope")
+    assert "approved" in msg.lower()
+    assert cc.prd_flow.load_marker(str(cc.REPO), "r1")["status"] == "research"
+
+    # Illegal from the new status - no mutation, an error message instead.
+    msg2 = cc.do_prd_action("r1", "approve-scope")
+    assert "cannot" in msg2.lower()
+    assert cc.prd_flow.load_marker(str(cc.REPO), "r1")["status"] == "research"
+
+
+def test_prd_action_run_chain_spawns_detached_popen_with_chain_flag(cc, monkeypatch):
+    cc.prd_flow.new(str(cc.REPO), "r1", "My PRD")
+    (Path(cc.REPO) / "research" / "r1" / "01-intake.json").write_text(json.dumps(GOOD_INTAKE))
+    cc.prd_flow.record_stage(str(cc.REPO), "r1", "intake")
+    cc.prd_flow.approve_scope(str(cc.REPO), "r1")   # status -> "research"
+
+    calls = []
+
+    class FakeProc:
+        pass
+
+    def fake_popen(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return FakeProc()
+
+    monkeypatch.setattr(cc.subprocess, "Popen", fake_popen)
+    msg = cc.do_prd_action("r1", "run-chain")
+    assert "launched" in msg.lower()
+    assert len(calls) == 1
+    cmd, kwargs = calls[0]
+    assert "run" in cmd
+    assert "r1" in cmd
+    assert "research" in cmd          # the marker's CURRENT stage, not "intake"
+    assert "--chain" in cmd
+    assert kwargs.get("start_new_session") is True
+
+
+def test_prd_action_run_intake_has_no_chain_flag(cc, monkeypatch):
+    cc.prd_flow.new(str(cc.REPO), "r1", "My PRD")   # status stays "intake"
+    calls = []
+    monkeypatch.setattr(cc.subprocess, "Popen", lambda cmd, **kw: calls.append((cmd, kw)))
+    cc.do_prd_action("r1", "run-intake")
+    cmd, kwargs = calls[0]
+    assert "intake" in cmd
+    assert "--chain" not in cmd
+    assert kwargs.get("start_new_session") is True
+
+
+def test_prd_artifact_confinement(cc):
+    cc.prd_flow.new(str(cc.REPO), "r1", "My PRD")
+    (Path(cc.REPO) / "research" / "r1" / "01-intake.json").write_text(json.dumps(GOOD_INTAKE))
+    cc.prd_flow.record_stage(str(cc.REPO), "r1", "intake")
+
+    assert cc.read_prd_artifact("r1", "../../etc/passwd") is None
+    assert cc.read_prd_artifact("r1", "not-a-real-artifact.json") is None
+    assert cc.read_prd_artifact("../r1", "01-intake.json") is None
+    assert cc.read_prd_artifact("R1", "01-intake.json") is None   # uppercase not in the allowed shape
+
+    body = cc.read_prd_artifact("r1", "01-intake.json")
+    assert body is not None
+    assert json.loads(body) == GOOD_INTAKE

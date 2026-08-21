@@ -46,6 +46,7 @@ from backlog_append import SLUG_RE
 from qa_teach import _bad_flows_dir_reason
 import qa_env
 import qa_teach
+import prd_flow
 
 # ── path model ───────────────────────────────────────────────────────────────
 # ENGINE       : this repo's engine dir (ships command_center.py, its converter,
@@ -2811,6 +2812,140 @@ def do_epic_action(tid: str, action: str) -> str:
     return f"{who} launched for {tid} — the card's stage updates as it works (log: logs/{log.name})"
 
 
+# ── PRD pipeline (Deep space band) ─────────────────────────────────────────
+# research/<run>/prd-run.json is prd_flow-owned; this dashboard layer only
+# reads it (prd_pipeline_state), mirrors its status-machine legality
+# dashboard-side (_prd_next_actions, so illegal buttons never render), and
+# drives it the same two ways do_epic_action drives epic_plan: synchronous
+# calls for pure human acts (new/approve-*/revise), a detached CLI Popen for
+# the agent stages (run-intake/run-chain).
+_PRD_RUN_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+_PRD_ARTIFACT_NAMES = {"01-intake.json", "02-research.json", "03-synthesis.json",
+                       "04-prd.md", "05-review.json", prd_flow.MARKER_NAME}
+# Legal next_actions per marker status. "revise-intake" (full reset) is ALSO
+# legal from every status except "done" (nothing left to revise into) and
+# "intake" itself (already there) - appended below, not listed per-entry.
+_PRD_STATUS_ACTIONS = {
+    "intake": ["run-intake"],
+    "awaiting-scope-approval": ["approve-scope", "revise-intake"],
+    "research": ["run-chain"],
+    "synthesis": ["run-chain"],
+    "draft": ["run-chain"],
+    "review": ["run-chain"],
+    "awaiting-signoff": ["approve-prd", "revise-draft", "revise-research"],
+    "done": [],
+}
+
+
+def _prd_next_actions(status: str) -> list:
+    actions = list(_PRD_STATUS_ACTIONS.get(status, []))
+    if status not in ("done", "intake") and "revise-intake" not in actions:
+        actions.append("revise-intake")
+    return actions
+
+
+def _prd_research_root() -> Path:
+    return REPO / "research"
+
+
+def prd_pipeline_state() -> list | None:
+    """Deep space's PRD band data: one entry per research/*/prd-run.json.
+    Present only when the target repo actually has a research/ dir (absent-
+    unless-configured discipline, same as qa_flow_library/qa_services_state -
+    a target with no PRD story yet sees a byte-identical /api/state)."""
+    root = _prd_research_root()
+    if not root.is_dir():
+        return None
+    runs = []
+    for d in sorted(p for p in root.iterdir() if p.is_dir()):
+        if not (d / prd_flow.MARKER_NAME).exists():
+            continue
+        try:
+            marker = prd_flow.load_marker(str(REPO), d.name)
+            tamper = prd_flow.verify(str(REPO), d.name)
+        except (OSError, ValueError):
+            continue  # unreadable/malformed marker - skip rather than 500 the whole board
+        status = marker.get("status", "")
+        stamps = marker.get("stages", {})
+        stages = [{"name": name,
+                  "ok": (stamps[name].get("evals", {}).get("ok") if name in stamps else None),
+                  "stamped_at": (stamps[name].get("stamped_at") if name in stamps else None)}
+                 for name in prd_flow.STAGES]
+        runs.append({"run_id": marker.get("run_id", d.name), "title": marker.get("title", ""),
+                    "status": status, "stages": stages, "tamper": tamper,
+                    "next_actions": _prd_next_actions(status)})
+    return runs
+
+
+def do_prd_action(run: str, action: str, title: str = "", brief: str = "") -> str:
+    """Drive the PRD pipeline from the dashboard. `new` validates the run id
+    itself (no marker exists yet to check legality against); every other
+    action is checked against the CURRENT marker's status via
+    _prd_next_actions before anything mutates - an illegal action is a no-op
+    error, never a partial mutation."""
+    if action == "new":
+        if not _PRD_RUN_RE.match(run):
+            return f"invalid run id '{run}' - lowercase letters, digits, hyphens, must start alphanumeric"
+        if not title.strip():
+            return "a title is required"
+        if (_prd_research_root() / run / prd_flow.MARKER_NAME).exists():
+            return f"a PRD run named '{run}' already exists"
+        try:
+            prd_flow.new(str(REPO), run, title.strip(), brief=brief)
+        except OSError as e:
+            return f"could not create PRD run '{run}': {e}"
+        return f"Created PRD run '{run}' - intake is next."
+
+    try:
+        marker = prd_flow.load_marker(str(REPO), run)
+    except (OSError, ValueError):
+        return f"no PRD run named '{run}'"
+    status = marker.get("status", "")
+    if action not in _prd_next_actions(status):
+        return f"cannot '{action}' from status '{status}'"
+
+    if action == "approve-scope":
+        prd_flow.approve_scope(str(REPO), run)
+        return f"Scope approved for '{run}' - research is next."
+    if action == "approve-prd":
+        prd_flow.approve_prd(str(REPO), run)
+        return f"'{run}' signed off - done."
+    if action.startswith("revise-"):
+        stage = action[len("revise-"):]
+        try:
+            prd_flow.revise(str(REPO), run, stage)
+        except prd_flow.GateError as e:
+            return f"cannot revise: {e}"
+        return f"Revising '{run}' from '{stage}' - that stamp and every later one dropped."
+    if action in ("run-intake", "run-chain"):
+        stage = "intake" if action == "run-intake" else status
+        script = str(ENGINE / "prd_flow.py")
+        cmd = [sys.executable, script, "run", str(REPO), run, stage]
+        if action == "run-chain":
+            cmd.append("--chain")
+        log = AP_STATE / "logs" / f"prd-{run}-{stage}.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("ab") as lf:
+            subprocess.Popen(cmd, stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
+                             start_new_session=True)
+        return f"Stage '{stage}' launched for '{run}' - the card updates as it works (log: logs/{log.name})"
+    return f"unknown prd action '{action}'"
+
+
+def read_prd_artifact(run: str, file: str) -> str | None:
+    """Confined GET for the artifact viewer - `run` and `file` are both
+    client input. Same template as _qa_resolve/read_knowledge_doc: shape-
+    check both, then resolve → assert the RESOLVED path stays under the
+    RESOLVED research/ root → is_file() (catches a symlink escape)."""
+    if not _PRD_RUN_RE.match(run) or file not in _PRD_ARTIFACT_NAMES:
+        return None
+    root = _prd_research_root().resolve()
+    resolved = (_prd_research_root() / run / file).resolve()
+    if not str(resolved).startswith(str(root) + os.sep) or not resolved.is_file():
+        return None
+    return resolved.read_text(errors="ignore")
+
+
 def load_calibration_candidates() -> list:
     """Pending calibration-miner candidates for the dashboard's strip."""
     out = []
@@ -3663,6 +3798,12 @@ def build_state() -> dict:
     qa_svc = qa_services_state()
     if qa_svc is not None:
         rt["qa_services"] = qa_svc
+    # Same discipline again: present only when the target repo has a
+    # research/ dir, so a target with no PRD story yet sees a byte-identical
+    # /api/state.
+    prd = prd_pipeline_state()
+    if prd is not None:
+        rt["prd"] = prd
     rt["onboarding"] = onboarding_state()
     return rt
 
@@ -3795,6 +3936,15 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(gf.read_text().encode(), "text/plain; charset=utf-8"); return
             self._send(b"No guide found. Create GUIDE.md in your .autopilot/ directory.",
                        "text/plain; charset=utf-8")
+        elif path == "/prd-artifact":
+            # Confined GET for the PRD artifact viewer - see read_prd_artifact
+            # for the run-id/filename allowlist + realpath confinement.
+            run = (qs.get("run", [""])[0]).strip()
+            file = (qs.get("file", [""])[0]).strip()
+            body = read_prd_artifact(run, file)
+            if body is None:
+                self._send(b"not found", "text/plain", 404); return
+            self._send(body.encode(), "text/plain; charset=utf-8")
         elif path == "/qa-teach-status":
             # Read-only poll for the "New test / Record" panel — same
             # token-less GET posture as /api/state (host-checked above, no
@@ -3916,6 +4066,13 @@ class Handler(BaseHTTPRequestHandler):
                 if not tid:
                     self._send(b'{"ok":false,"msg":"missing epic id"}', "application/json", 400); return
                 msg = do_epic_action(tid, (data.get("action", [""])[0]).strip())
+            elif path == "/prd-action":
+                run = (data.get("run", [""])[0]).strip()
+                if not run:
+                    self._send(b'{"ok":false,"msg":"missing run id"}', "application/json", 400); return
+                msg = do_prd_action(run, (data.get("action", [""])[0]).strip(),
+                                    (data.get("title", [""])[0]).strip(),
+                                    data.get("brief", [""])[0])
             elif path == "/calibration-action":
                 if not tid:
                     self._send(b'{"ok":false,"msg":"missing candidate id"}', "application/json", 400); return

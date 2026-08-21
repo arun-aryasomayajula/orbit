@@ -650,6 +650,7 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
   <!-- ── DEEP SPACE (proposals — Gmail-style reader) ── -->
   <section class="view" id="view-deepspace">
     <div id="epicsBand"></div>
+    <div id="prdBand"></div>
     <div id="calibrationBand"></div>
     <div class="chips" id="filterbar"></div>
     <div class="ds-wrap">
@@ -1297,6 +1298,80 @@ function renderEpics(){
   band.innerHTML=`<div class=band><div class=bandhead><h3>Epics — planning tier</h3>
     <span class=bandsum>too big for one commit: Plan → review the spec → Approve → Decompose → queue the children below</span></div>
     <div class=grid>${es.map(epicCard).join('')}</div></div>`;
+}
+
+/* ── PRD band (research pipeline: intake → gates → research/synthesis/draft/review → done) ─ */
+const PRD_ARTIFACTS={intake:'01-intake.json',research:'02-research.json',synthesis:'03-synthesis.json',
+                     draft:'04-prd.md',review:'05-review.json'};
+const PRD_ACTION_LABEL={'run-intake':'▶ Run intake','run-chain':'▶ Run stage',
+                        'approve-scope':'Approve scope','approve-prd':'Approve PRD',
+                        'revise-intake':'Revise intake','revise-draft':'Revise draft',
+                        'revise-research':'Revise research'};
+const PRD_ACTION_CONFIRM={
+  'run-intake':r=>`Run intake for '${r}'? A headless agent call writes 01-intake.json.`,
+  'run-chain':(r,st)=>`Run '${st}' for '${r}'? It keeps chaining forward while each stage's eval passes.`,
+  'approve-scope':r=>`Approve scope for '${r}'? Research becomes runnable.`,
+  'approve-prd':r=>`Sign off '${r}'? This marks the PRD done.`,
+  'revise-intake':r=>`Revise '${r}' back to intake? Every stamp and approval is dropped.`,
+  'revise-draft':r=>`Revise '${r}' back to draft? The review stamp is dropped.`,
+  'revise-research':r=>`Revise '${r}' back to research? Synthesis, draft and review stamps are dropped.`,
+};
+function prdStatusBadge(st){
+  const m={intake:['intake','muted'],'awaiting-scope-approval':['awaiting scope approval','warn'],
+           research:['research','muted'],synthesis:['synthesis','muted'],draft:['draft','muted'],
+           review:['review','muted'],'awaiting-signoff':['awaiting signoff','warn'],done:['done','ok']};
+  const x=m[st]||[st,'muted'];return badge(x[0],x[1]);
+}
+function prdStageDots(stages){
+  return (stages||[]).map(s=>{
+    const color=s.ok===true?'var(--green)':s.ok===false?'var(--red)':'var(--faint)';
+    const label=s.ok===true?'passed':s.ok===false?'failed':'pending';
+    const when=s.stamped_at?' - '+s.stamped_at:'';
+    return `<span title="${escAttr(s.name+': '+label+when)}" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color};margin-right:4px" aria-hidden="true"></span>`;
+  }).join('')+`<span class=meta style="margin-left:4px">${(stages||[]).map(s=>s.name).join(' → ')}</span>`;
+}
+function prdArtifactLinks(r){
+  let links=`<button class="btn btn-mini" onclick="openText('prd-run.json - ${escJsAttr(r.run_id)}','/prd-artifact?run=${encodeURIComponent(r.run_id)}&file=prd-run.json',false)">marker</button>`;
+  (r.stages||[]).forEach(s=>{
+    if(!s.stamped_at)return;
+    const file=PRD_ARTIFACTS[s.name];
+    links+=`<button class="btn btn-mini" onclick="openText('${escJsAttr(file)} - ${escJsAttr(r.run_id)}','/prd-artifact?run=${encodeURIComponent(r.run_id)}&file=${encodeURIComponent(file)}',false)">${esc(s.name)}</button>`;
+  });
+  return links;
+}
+function prdActionBtn(r,a){
+  const cls=a.startsWith('approve')?'btn-go':a.startsWith('revise')?'btn-stop':'btn-vio';
+  const label=PRD_ACTION_LABEL[a]||a;
+  const fn=PRD_ACTION_CONFIRM[a];
+  const msg=fn?fn(r.run_id,r.status):`${label} for '${r.run_id}'?`;
+  return `<button class="btn ${cls} btn-mini" onclick="if(confirm('${escJsAttr(msg)}'))post('/prd-action',{run:'${escJsAttr(r.run_id)}',action:'${a}'})">${esc(label)}</button>`;
+}
+function prdCard(r){
+  const tamper=(r.tamper&&r.tamper.length)?`<div class=meta style="color:var(--red)">⚠ tamper: ${esc(r.tamper.join('; '))}</div>`:'';
+  const btns=(r.next_actions||[]).map(a=>prdActionBtn(r,a)).join('');
+  return `<div class=card><div class="card-h"><span class=tid>${esc(r.run_id)}</span> ${prdStatusBadge(r.status)}</div>
+    <div class=title>${esc(r.title)}</div>
+    <div class=meta>${prdStageDots(r.stages)}</div>${tamper}
+    <div class=btns>${btns}${prdArtifactLinks(r)}</div></div>`;
+}
+function newPrd(){
+  const run=prompt('Run id (lowercase letters, digits, hyphens - e.g. checkout-redesign):');
+  if(run===null)return;
+  if(!/^[a-z0-9][a-z0-9-]*$/.test(run.trim())){toast('Invalid run id.');return;}
+  const title=prompt('PRD title:');
+  if(title===null)return;
+  if(!title.trim()){toast('A title is required.');return;}
+  const brief=prompt('One-paragraph brief (optional - grounds the intake agent):')||'';
+  post('/prd-action',{action:'new',run:run.trim(),title:title.trim(),brief:brief});
+}
+function renderPrd(){
+  const band=document.getElementById('prdBand');if(!band)return;
+  if(!S||!('prd' in S)){band.innerHTML='';return;}
+  const rs=S.prd||[];
+  band.innerHTML=`<div class=band><div class=bandhead><h3>PRDs - research pipeline</h3>
+    <span class=bandsum>intake → approve scope → research → synthesis → draft → review → approve PRD → done</span>
+    <button class="btn btn-mini" style="margin-left:auto" onclick="newPrd()">+ New PRD</button></div>
+    <div class=grid>${rs.length?rs.map(prdCard).join(''):'<div class=meta style="padding:8px 0">No PRD runs yet - start one above.</div>'}</div></div>`;
 }
 
 /* ── calibration strip: the goldens learning loop's human gate ───────────── */
@@ -2728,12 +2803,12 @@ document.addEventListener('click',e=>{
 });
 
 /* ── render pipeline ────────────────────────────────────────────────────── */
-function sig(r){return JSON.stringify([r.running,r.next_up,r.done,r.board,r.skipped,r.escalated,r.runlog,r.history,r.funnel,r.feature_builds,r.spend_history,r.branches,r.epics,r.qa_flows,r.qa_services,r.onboarding]);}
+function sig(r){return JSON.stringify([r.running,r.next_up,r.done,r.board,r.skipped,r.escalated,r.runlog,r.history,r.funnel,r.feature_builds,r.spend_history,r.branches,r.epics,r.qa_flows,r.qa_services,r.onboarding,r.prd]);}
 function renderViews(){
   // Preserve column scroll positions across rebuilds.
   const colsEl=document.getElementById('queueCols');
   const scrolls=[...colsEl.querySelectorAll('.col')].map(c=>c.scrollTop);
-  renderStats();renderInboxAll();renderFilters();renderEpics();renderCalibration();renderDeepspace();renderQueue();renderShips();renderBranches();renderAgents();renderQa();
+  renderStats();renderInboxAll();renderFilters();renderEpics();renderPrd();renderCalibration();renderDeepspace();renderQueue();renderShips();renderBranches();renderAgents();renderQa();
   renderKpis();renderSpend();renderHistory();renderFunnel();renderRunlog();renderOnboarding();renderKnowledge();
   [...colsEl.querySelectorAll('.col')].forEach((c,i)=>{if(scrolls[i])c.scrollTop=scrolls[i];});
 }
