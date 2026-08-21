@@ -40,6 +40,7 @@ def test_product_scaffold_installs_prd_skills(tmp_path):
         "orbit-prd-synthesis.md",
         "orbit-prd-writer.md",
         "orbit-prd-review.md",
+        "orbit-scrape.md",
     ]
     cmd_dir = tmp_path / ".claude" / "commands"
     for skill in prd_skills:

@@ -1,7 +1,7 @@
 ---
 description: Ground findings in real systems via MetaQL, Jira, Confluence, code reads, and docs. Write 02-research.json - sourced findings per the grounding contract.
 argument-hint: "<run-id>"
-allowed-tools: Read, Grep, Glob, Write, Edit, mcp__*
+allowed-tools: Read, Grep, Glob, Write, Edit, mcp__*, Bash # sanctioned use: python3 $ORBIT_HOME/engine/browse.py fetch (scrape sources)
 model: opus
 ---
 
@@ -39,6 +39,7 @@ Write `research/$ARGUMENTS/02-research.json`:
 ```
 
 - sources: one entry per tool result used. kind is one of: metaql, jira, confluence, scrape, doc, code.
+- For a `scrape`-kind source, fetch it with `python3 $ORBIT_HOME/engine/browse.py fetch <url>` via Bash - the only sanctioned network access in this skill.
 - findings: every claim must cite at least one source_id; unsourced claims fail eval.
 - coverage_gaps: explicitly record what research could not reach.
 
