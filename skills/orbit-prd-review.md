@@ -18,7 +18,7 @@ Write `research/$ARGUMENTS/05-review.json`:
 {
   "verdicts": [
     {
-      "lens": "CEO" | "feasibility",
+      "lens": "<CEO | feasibility>",
       "finding": "<specific observation about the PRD>",
       "decision": "<pass | concern | blocker>",
       "rationale": "<why this decision was made>"
@@ -43,7 +43,7 @@ And APPEND to `research/$ARGUMENTS/04-prd.md`:
 ```
 
 - ok: true means the PRD is ready for signoff (no contradictions).
-- ok: false only if a contradiction exists (two requirements that cannot both be met, or scope so broad build is infeasible). PM must resolve before proceeding.
+- ok: false only if a contradiction exists (two requirements that cannot both be true). PM must resolve before proceeding.
 
 ## Review lenses
 

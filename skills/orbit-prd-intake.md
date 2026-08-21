@@ -24,7 +24,7 @@ Write `research/$ARGUMENTS/01-intake.json`:
   "scope_out": ["<explicitly out of scope>", "..."],
   "data_targets": ["<systems research will query: MetaQL:explore, Jira:project, etc.>", "..."],
   "code_targets": ["<repos/modules research will review>", "..."],
-  "pii_touch": true
+  "pii_touch": <true | false>
 }
 ```
 
