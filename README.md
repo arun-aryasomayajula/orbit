@@ -274,6 +274,10 @@ and dashboard, but the work items are grounded data insights instead of code
 MCP servers the profile declares under `mcp:` (see `config/schema.yaml`).
 Design: `docs/superpowers/specs/2026-08-20-orbit-product-teams-design.md`.
 
+Product workspaces also carry a gated PRD pipeline: intake, research, synthesis, draft, and review, each stamped and Tier-A-evaluated by `engine/prd_flow.py` before the run can advance.
+Scope and sign-off are human gates, run from the dashboard's PRD view, never auto-approved.
+Design: section 4 of `docs/superpowers/specs/2026-08-20-orbit-product-teams-design.md`.
+
 ## Requirements
 
 - **[Claude Code](https://claude.com/claude-code)** (`claude`) on PATH — Orbit drives
