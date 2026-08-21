@@ -104,7 +104,17 @@ gates:
     needs: []
 
 workable_categories: [insight, funnel, hypothesis, survey_design, survey_analysis, documentation]
-sources: [backlog]
+sources: [backlog, metric_watch]
+
+# Standing metric watches (optional): each names a question that gets re-asked
+# into a fresh insights/ doc on a cadence, via the metric_watch adapter above.
+# Uncomment and fill in (see config/schema.yaml `watches:` for the full field
+# reference).
+# watches:
+#   - name: wow-signup-conversion
+#     question: "What's the week-over-week change in signup conversion, and why?"
+#     cadence_hours: 168        # default: weekly
+#     category: insight         # insight | funnel | hypothesis (default: insight)
 
 # MCP servers this workspace's cycles may reach (see schema.yaml `mcp:` docs).
 # Uncomment and fill in.

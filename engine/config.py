@@ -211,6 +211,28 @@ def validate(target):
                     if fld in s and (not isinstance(s[fld], list)
                                      or not all(isinstance(x, str) for x in s[fld])):
                         errs.append(f"{pre}.{fld} must be a list of strings, got {s.get(fld)!r}")
+    if "watches" in raw and raw["watches"] is not None:
+        watches = raw["watches"]
+        if not isinstance(watches, list):
+            errs.append(f"watches must be a list, got {watches!r}")
+        else:
+            import re
+            name_re = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+            for i, w in enumerate(watches):
+                pre = f"watches[{i}]"
+                if not isinstance(w, dict):
+                    errs.append(f"{pre} must be a mapping, got {w!r}"); continue
+                name = w.get("name")
+                if not isinstance(name, str) or not name_re.match(name or ""):
+                    errs.append(f"{pre}.name must be a lowercase slug, got {name!r}")
+                if not isinstance(w.get("question"), str) or not w.get("question"):
+                    errs.append(f"{pre}.question must be a non-empty string, got {w.get('question')!r}")
+                if "cadence_hours" in w and (not isinstance(w["cadence_hours"], int)
+                                            or isinstance(w["cadence_hours"], bool)
+                                            or w["cadence_hours"] <= 0):
+                    errs.append(f"{pre}.cadence_hours must be a positive integer, got {w.get('cadence_hours')!r}")
+                if "category" in w and w["category"] not in ("insight", "funnel", "hypothesis"):
+                    errs.append(f"{pre}.category must be one of insight/funnel/hypothesis, got {w.get('category')!r}")
     if "prd" in raw and raw["prd"] is not None:
         prd = raw["prd"]
         if not isinstance(prd, dict):

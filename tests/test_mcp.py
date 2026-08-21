@@ -161,3 +161,43 @@ def test_validate_rejects_bad_prd_block(tmp_path):
     r = _validate(t)
     assert r.returncode == 1
     assert "prd.model" in r.stdout and "prd.timeout_seconds" in r.stdout
+
+
+def test_validate_accepts_good_watches_block(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG +
+                   'watches:\n  - name: wow-signup\n    question: "How did signup change WoW?"\n'
+                   '    cadence_hours: 24\n    category: funnel\n'
+                   '  - name: min-fields\n    question: "Any regressions?"\n')
+    r = _validate(t)
+    assert r.returncode == 0, r.stdout
+
+
+def test_validate_rejects_bad_watch_name(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG +
+                   'watches:\n  - name: "Not A Slug!"\n    question: "q?"\n')
+    r = _validate(t)
+    assert r.returncode == 1
+    assert "watches[0].name" in r.stdout
+
+
+def test_validate_rejects_missing_watch_question(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG + 'watches:\n  - name: foo\n')
+    r = _validate(t)
+    assert r.returncode == 1
+    assert "watches[0].question" in r.stdout
+
+
+def test_validate_rejects_bad_watch_cadence_and_category(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG +
+                   'watches:\n  - name: foo\n    question: "q?"\n    cadence_hours: -5\n'
+                   '    category: bogus\n')
+    r = _validate(t)
+    assert r.returncode == 1
+    assert "watches[0].cadence_hours" in r.stdout and "watches[0].category" in r.stdout
+
+
+def test_validate_rejects_watches_not_a_list(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG + 'watches:\n  name: foo\n')
+    r = _validate(t)
+    assert r.returncode == 1
+    assert "watches must be a list" in r.stdout
