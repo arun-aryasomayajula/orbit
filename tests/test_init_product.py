@@ -54,6 +54,16 @@ def test_init_rejects_unknown_flag(tmp_path):
     assert r.returncode != 0
     assert not (tmp_path / ".autopilot" / "config.yaml").exists()
 
+def test_insight_known_to_lint_and_dashboard():
+    import importlib.util
+    def _load(name):
+        spec = importlib.util.spec_from_file_location(name, str(ORBIT / "engine" / f"{name}.py"))
+        m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
+    import os
+    os.environ.setdefault("AP_HOME", "/tmp/x")  # backlog_lint has no AP_HOME need; guard anyway
+    bl = _load("backlog_lint")
+    assert "insight" in bl.KNOWN_CATEGORIES
+
 def test_doctor_warns_on_missing_mcp_token_env(tmp_path):
     _init_product(tmp_path)
     cfg = tmp_path / ".autopilot" / "config.yaml"

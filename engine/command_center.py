@@ -189,7 +189,7 @@ CYCLE_TIMEOUT = int(os.environ.get("ORBIT_CYCLE_TIMEOUT") or os.environ.get("AP_
 
 PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}
 PRIORITY_LADDER = ["low", "medium", "high"]
-SAFE = {"testing", "documentation", "dependencies", "code_quality", "developer_experience"}
+SAFE = {"testing", "documentation", "dependencies", "code_quality", "developer_experience", "insight"}
 # What the loop CAN work when promoted (autopilot:allow). Must match
 # backlog_to_tasks.EMITTABLE_CATEGORIES. HUMAN_ONLY is never loop-pickable.
 EMITTABLE = SAFE | {"bug", "feature", "refactor"}

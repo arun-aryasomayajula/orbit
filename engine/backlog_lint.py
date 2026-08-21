@@ -28,6 +28,7 @@ KNOWN_CATEGORIES = {
     "security", "infrastructure", "release_management", "git_practices",
     "observability",   # in real use in backlog.yaml; human-only for the emit gate
     "epic",            # planning-tier container: planned/decomposed via epic_plan.py, never loop-worked
+    "insight",         # product workspace analysis (safe; gated by insight_lint)
 }
 
 
