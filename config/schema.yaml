@@ -155,6 +155,25 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
 #     enabled: false                 # scheduled exploratory crawl → ops/qa/SEEN.md rows
 #     max_pages: 10
 
+# --- MCP servers (optional) ---------------------------------------------------
+# MCP (Model Context Protocol) servers the cycle may reach, configured here with
+# transport, credentials, and tool allowlists (spec section 3).
+# mcp:
+#   metaql:                          # server name → mcp__metaql__* tool prefix
+#     transport: http                # http | stdio
+#     url: "https://<host>/mcp"      # http only
+#     token_env: METAQL_TOKEN        # optional; sent as `Authorization: Bearer ${METAQL_TOKEN}` —
+#                                    # the ${VAR} is expanded by Claude Code at run time; the
+#                                    # token itself never lands on disk or in the repo
+#     tools: [metaql_execute_query]  # REQUIRED — "*" = allow every tool on this server;
+#                                    # a list allows only those tools; absent/empty allows none
+#   figma:
+#     transport: stdio
+#     command: npx
+#     args: ["-y", "figma-mcp"]
+#     env_passthrough: [FIGMA_TOKEN] # env var names forwarded to the server process as ${VAR}
+#     tools: "*"
+
 # --- pull requests (optional, wrapper-only) ------------------------------------
 # "github" → after pushing a ship, the WRAPPER (never the agent) runs `gh pr create`
 # against base_branch with the review packet as the PR body, and records the URL in

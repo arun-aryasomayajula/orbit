@@ -174,9 +174,12 @@ raise_pr() {
 run_cycle() {
   local out="$1"; cd "$WT" || return 1
   local caff=""; command -v caffeinate >/dev/null 2>&1 && caff="caffeinate -i"
+  local mcp_args=()
+  [ -n "${MCP_CONFIG:-}" ] && mcp_args=(--mcp-config "$MCP_CONFIG" --strict-mcp-config)
   $caff "$CLAUDE_BIN" --print "/orbit-cycle" \
-      --permission-mode "$PERM" --settings "$SETTINGS" --model "$MODEL" \
+      --permission-mode "$PERM" --settings "${CYCLE_SETTINGS:-$SETTINGS}" --model "$MODEL" \
       --add-dir "$REPO" --add-dir "$ORBIT_HOME" \
+      "${mcp_args[@]:+"${mcp_args[@]}"}" \
       --output-format stream-json --verbose >"$out" 2>&1 </dev/null &
   local cpid=$!
   # Watchdog: hard-kill the cycle if it outruns CYCLE_TIMEOUT.
@@ -211,6 +214,17 @@ one_iteration() {
   # of the base branch) BEFORE regenerating the queue, so they never re-inject or
   # re-escalate into the operator inbox.
   python3 "$ENGINE/autoclose.py" >>"$LOGDIR/orbit.log" 2>&1 || log "WARN: autoclose failed"
+  # MCP seam (spec section 3): empty MCP_CONFIG = no mcp: block = flags omitted.
+  # A FAILURE here (malformed mcp: block) must not silently run the cycle blind.
+  if ! MCP_CONFIG="$(python3 "$ENGINE/mcp.py" build "$TARGET" 2>>"$LOGDIR/orbit.log")"; then
+    log "ERROR: mcp.py build failed for $TARGET — see orbit.log; skipping iteration"
+    echo SKIP; return
+  fi
+  if ! CYCLE_SETTINGS="$(python3 "$ENGINE/mcp.py" settings "$TARGET" 2>>"$LOGDIR/orbit.log")"; then
+    log "ERROR: mcp.py settings failed for $TARGET — see orbit.log; skipping iteration"
+    echo SKIP; return
+  fi
+  [ -n "$CYCLE_SETTINGS" ] || CYCLE_SETTINGS="$SETTINGS"
   python3 "$ENGINE/knowledge.py" "$TARGET" autorefresh --quiet >>"$LOGDIR/orbit.log" 2>&1 || log "WARN: knowledge autorefresh failed"
   # Regression sweep (Task 27): cursor-triggered replay of every approved taught
   # flow (steps.json-bearing). qa_run.py's own --regression --if-changed posture

@@ -72,6 +72,17 @@ if jcfg:
 elif "jira" in sources:
     check("jira in sources has a jira: config block", False, "add a jira: block (see config/schema.yaml)")
 
+# 2d. mcp servers (optional): advisory only — a missing token_env doesn't
+# fail doctor, since the server may simply not be reached by any queued
+# task yet, but it's the top setup failure a PM will hit once one is.
+mcp_cfg = cfg.get("mcp") if isinstance(cfg.get("mcp"), dict) else {}
+for name, s in mcp_cfg.items():
+    te = isinstance(s, dict) and s.get("token_env")
+    if te and not os.environ.get(te):
+        print(f"  · mcp.{name}: token_env {te} is not set in this shell — interactive cycles "
+              f"will reach {name} unauthenticated; a service-mode loop needs it in the "
+              f"service environment too")
+
 # 3. router — target's .autopilot/router.yaml overrides the engine default at router/router.yaml
 router_path = find("router.yaml") or (
     os.path.join(ORBIT_HOME, "router", "router.yaml")
@@ -101,10 +112,12 @@ if os.path.isdir(sp):
         d = os.path.join(sp, v, "skills")
         if os.path.isdir(d): sp_skills |= set(os.listdir(d))
 BUILTIN = {"simplify", "security-review", "code-review", "verify", "write-docs"}
+_orbit_sk = os.path.join(ORBIT_HOME, "skills")
+ORBIT_SKILLS = {f[:-3] for f in os.listdir(_orbit_sk) if f.endswith(".md")} if os.path.isdir(_orbit_sk) else set()
 def skill_ok(s):
     if not s: return True
     if s.startswith("superpowers:"): return s.split(":",1)[1] in sp_skills
-    return s in disk or s in BUILTIN
+    return s in disk or s in BUILTIN or s in ORBIT_SKILLS
 used = {v.get("skill") for v in cats.values() if isinstance(v, dict) and v.get("skill")}
 bad = sorted(s for s in used if not skill_ok(s))
 check("every referenced skill resolves", not bad, "" if not bad else "UNRESOLVED: " + ", ".join(bad))
