@@ -199,17 +199,6 @@ run_cycle() {
 
 one_iteration() {
   gates_ready || { echo SKIP; return; }
-  # MCP seam (spec section 3): empty MCP_CONFIG = no mcp: block = flags omitted.
-  # A FAILURE here (malformed mcp: block) must not silently run the cycle blind.
-  if ! MCP_CONFIG="$(python3 "$ENGINE/mcp.py" build "$TARGET" 2>>"$LOGDIR/orbit.log")"; then
-    log "ERROR: mcp.py build failed for $TARGET — see orbit.log; skipping iteration"
-    echo SKIP; return
-  fi
-  if ! CYCLE_SETTINGS="$(python3 "$ENGINE/mcp.py" settings "$TARGET" 2>>"$LOGDIR/orbit.log")"; then
-    log "ERROR: mcp.py settings failed for $TARGET — see orbit.log; skipping iteration"
-    echo SKIP; return
-  fi
-  [ -n "$CYCLE_SETTINGS" ] || CYCLE_SETTINGS="$SETTINGS"
   prepare_worktree || { echo FAIL; return; }
   # Reap entries stuck mid-cycle (claim-then-crash in_progress, commit-then-die
   # committed): no cycle is running at this point, so anything older than the
@@ -225,6 +214,17 @@ one_iteration() {
   # of the base branch) BEFORE regenerating the queue, so they never re-inject or
   # re-escalate into the operator inbox.
   python3 "$ENGINE/autoclose.py" >>"$LOGDIR/orbit.log" 2>&1 || log "WARN: autoclose failed"
+  # MCP seam (spec section 3): empty MCP_CONFIG = no mcp: block = flags omitted.
+  # A FAILURE here (malformed mcp: block) must not silently run the cycle blind.
+  if ! MCP_CONFIG="$(python3 "$ENGINE/mcp.py" build "$TARGET" 2>>"$LOGDIR/orbit.log")"; then
+    log "ERROR: mcp.py build failed for $TARGET — see orbit.log; skipping iteration"
+    echo SKIP; return
+  fi
+  if ! CYCLE_SETTINGS="$(python3 "$ENGINE/mcp.py" settings "$TARGET" 2>>"$LOGDIR/orbit.log")"; then
+    log "ERROR: mcp.py settings failed for $TARGET — see orbit.log; skipping iteration"
+    echo SKIP; return
+  fi
+  [ -n "$CYCLE_SETTINGS" ] || CYCLE_SETTINGS="$SETTINGS"
   python3 "$ENGINE/knowledge.py" "$TARGET" autorefresh --quiet >>"$LOGDIR/orbit.log" 2>&1 || log "WARN: knowledge autorefresh failed"
   # Regression sweep (Task 27): cursor-triggered replay of every approved taught
   # flow (steps.json-bearing). qa_run.py's own --regression --if-changed posture
