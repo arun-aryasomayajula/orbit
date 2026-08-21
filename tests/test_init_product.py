@@ -32,6 +32,19 @@ def test_product_scaffold_installs_commands_and_agents(tmp_path):
     assert (tmp_path / ".claude" / "commands" / "orbit-insight.md").exists()
     assert (tmp_path / ".claude" / "agents" / "analyst.md").exists()
 
+def test_product_scaffold_installs_prd_skills(tmp_path):
+    _init_product(tmp_path)
+    prd_skills = [
+        "orbit-prd-intake.md",
+        "orbit-prd-research.md",
+        "orbit-prd-synthesis.md",
+        "orbit-prd-writer.md",
+        "orbit-prd-review.md",
+    ]
+    cmd_dir = tmp_path / ".claude" / "commands"
+    for skill in prd_skills:
+        assert (cmd_dir / skill).exists(), f"Missing PRD skill: {skill}"
+
 def test_code_scaffold_is_unchanged_without_flag(tmp_path):
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     subprocess.run([sys.executable, str(ORBIT / "install" / "init.py"),
