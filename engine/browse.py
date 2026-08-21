@@ -40,8 +40,11 @@ ALLOWED_SCHEMES = ("http", "https")
 SCRAPERS_DIRNAME = os.path.join(".autopilot", "scrapers")
 # Same shape as prd_flow.RUN_RE: lowercase letters/digits/hyphens, must start
 # alphanumeric. A scraper name becomes a JSON file name under scrapers/, so
-# the same restraint on what can land on disk applies here.
+# the same restraint on what can land on disk applies here. fullmatch (not
+# match) so a trailing newline - "$" matches just before a final "\n" - is
+# rejected rather than silently accepted as part of the anchored slug.
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+USER_AGENT = "orbit-browse/1.0 (+https://github.com/arun-aryasomayajula/orbit)"
 
 BLOCK_TAGS = {"p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6",
               "tr", "br", "section", "article"}
@@ -145,7 +148,13 @@ def fetch(url, timeout=30):
                 return page.inner_text("body")
             finally:
                 browser.close()
-    with urllib.request.urlopen(url, timeout=timeout) as resp:
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        # CPython's redirect handler follows a 3xx to non-http(s) targets
+        # (e.g. ftp://) even though _check_url above only guarded the
+        # ORIGINAL url - close that residual by re-checking the scheme the
+        # response actually landed on before trusting its bytes.
+        _check_url(resp.url)
         raw = resp.read()
         charset = resp.headers.get_content_charset() or "utf-8"
     return html_to_text(raw.decode(charset, errors="replace"))
@@ -200,7 +209,7 @@ def save(target, name, url, note=""):
     `<target>/.autopilot/scrapers/<name>.json` (atomic write; dir created on
     first save). `name` is slug-validated the same way prd_flow validates a
     run id, since it becomes a file name on disk."""
-    if not NAME_RE.match(name or ""):
+    if not NAME_RE.fullmatch(name or ""):
         raise BrowseError(
             f"invalid scraper name {name!r} - lowercase letters, digits and "
             "hyphens only, must start alphanumeric")

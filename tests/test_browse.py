@@ -12,6 +12,31 @@ ORBIT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ORBIT / "engine"))
 import browse  # noqa: E402
 
+
+class _FakeHeaders:
+    def get_content_charset(self):
+        return None
+
+
+class _FakeResponse:
+    """Stands in for what urllib.request.urlopen() returns: a context
+    manager with .url (the URL actually reached, post-redirect), .headers,
+    and .read()."""
+
+    def __init__(self, url, body):
+        self.url = url
+        self.headers = _FakeHeaders()
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
 FIXTURE_HTML = """<html><head>
 <style>body { color: red; }</style>
 <script>console.log("hi");</script>
@@ -56,6 +81,44 @@ def test_html_to_text_handles_entities_via_convert_charrefs():
 def test_html_to_text_empty_input_is_empty_string():
     assert browse.html_to_text("") == ""
     assert browse.html_to_text("<script>only script</script>") == ""
+
+
+# --- urllib fallback: user-agent + post-redirect scheme check --------------
+
+def test_fetch_urllib_fallback_sends_custom_user_agent(monkeypatch):
+    monkeypatch.setattr(browse, "_sync_playwright",
+                         lambda: (_ for _ in ()).throw(ImportError("no playwright")))
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["req"] = req
+        return _FakeResponse("https://example.com/x", b"<p>hi</p>")
+
+    monkeypatch.setattr(browse.urllib.request, "urlopen", fake_urlopen)
+    text = browse.fetch("https://example.com/x")
+    assert isinstance(captured["req"], browse.urllib.request.Request)
+    # Request.add_header() stores the key as key.capitalize() ("User-agent",
+    # not "User-Agent") and get_header() does no case-normalization of its
+    # own, so the lookup has to use the stored casing.
+    assert captured["req"].get_header("User-agent") == browse.USER_AGENT
+    assert text == "hi"
+
+
+def test_fetch_rejects_redirect_to_non_http_scheme(monkeypatch):
+    # CPython's redirect handler will itself follow a 3xx to ftp:// - the
+    # original-url scheme guard cannot catch that, so fetch() must recheck
+    # the scheme the response actually landed on (resp.url) before trusting
+    # its bytes.
+    monkeypatch.setattr(browse, "_sync_playwright",
+                         lambda: (_ for _ in ()).throw(ImportError("no playwright")))
+    monkeypatch.setattr(browse.urllib.request, "urlopen",
+                         lambda req, timeout=None: _FakeResponse(
+                             "ftp://evil.example.com/payload", b"<p>hi</p>"))
+    try:
+        browse.fetch("https://example.com/x")
+        assert False, "expected BrowseError"
+    except browse.BrowseError as e:
+        assert "ftp" in str(e)
 
 
 # --- URL scheme guard -------------------------------------------------------
@@ -110,6 +173,20 @@ def test_save_rejects_invalid_name(tmp_path):
         pass
     try:
         browse.save(str(tmp_path), "-leading-hyphen", "https://example.com")
+        assert False, "expected BrowseError"
+    except browse.BrowseError:
+        pass
+
+
+def test_name_re_rejects_trailing_newline():
+    # .match() would have accepted this ("$" matches just before a
+    # trailing "\n"); fullmatch must not.
+    assert browse.NAME_RE.fullmatch("abc\n") is None
+
+
+def test_save_rejects_name_with_trailing_newline(tmp_path):
+    try:
+        browse.save(str(tmp_path), "abc\n", "https://example.com")
         assert False, "expected BrowseError"
     except browse.BrowseError:
         pass
