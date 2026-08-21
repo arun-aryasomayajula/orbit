@@ -62,10 +62,10 @@ goldens:
     frontend: frontend           # path-triggered (frontend-react track)
     security: code-review        # security fixes use the review-lens card
     insight: always              # no dedicated card yet — verify-before-done applies
-    funnel: always                # no dedicated card yet — verify-before-done applies
-    hypothesis: always            # no dedicated card yet — verify-before-done applies
-    survey_design: always         # Task 5 stub — no dedicated card yet
-    survey_analysis: always       # Task 5 stub — no dedicated card yet
+    funnel: always                # no dedicated card yet - verify-before-done applies
+    hypothesis: always            # no dedicated card yet - verify-before-done applies
+    survey_design: always         # Task 5 stub - no dedicated card yet
+    survey_analysis: always       # Task 5 stub - no dedicated card yet
     # dependencies / developer_experience / observability / infrastructure → `always` card only
 
 # category → routing. `policy`: allow = auto-pickable; human = only if forced:true
@@ -151,7 +151,7 @@ categories:
 
   # ---- Task 5 stubs: category wired now so the template's validate + queue
   # behavior is consistent immediately; the skill files (orbit-survey-design,
-  # orbit-survey-analysis) land in Task 5 — `skill` is left unset until then so
+  # orbit-survey-analysis) land in Task 5 - `skill` is left unset until then so
   # `orbit doctor`'s skill-resolution check doesn't flag a file that doesn't
   # exist yet.
   survey_design:

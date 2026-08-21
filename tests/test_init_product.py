@@ -46,6 +46,21 @@ def test_funnel_and_hypothesis_known_to_lint_and_emitter(monkeypatch, tmp_path):
         assert cat in backlog_lint.KNOWN_CATEGORIES, cat
         assert cat in backlog_to_tasks.SAFE_CATEGORIES, cat
 
+    # Dashboard SAFE set: fresh-import command_center with AP_HOME/AP_STATE
+    # monkeypatched (same pattern as the `cc` fixture in test_prd_dashboard.py)
+    # so the module-level SAFE constant reflects the current source.
+    import importlib
+    ap_home = tmp_path / ".autopilot"
+    ap_state = ap_home / "state"
+    ap_state.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("AP_STATE", str(ap_state))
+    (ap_home / "config.yaml").write_text('repo: "."\nbase_branch: "main"\ngates:\n  t: {cmd: "true"}\n')
+    sys.modules.pop("command_center", None)
+    cc_mod = importlib.import_module("command_center")
+    importlib.reload(cc_mod)
+    for cat in ("funnel", "hypothesis", "survey_design", "survey_analysis"):
+        assert cat in cc_mod.SAFE, cat
+
 def test_product_scaffold_installs_prd_skills(tmp_path):
     _init_product(tmp_path)
     prd_skills = [

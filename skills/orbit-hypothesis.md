@@ -1,6 +1,6 @@
 ---
 description: Methodology for triangulating one specific hypothesis to a VALIDATED/NEGATED/INCONCLUSIVE verdict with quantified impact and a recommended fix. Invoked by the orchestrator to brief the analyst maker.
-argument-hint: "(no args — the task contract arrives via the cycle brief)"
+argument-hint: "(no args - the task contract arrives via the cycle brief)"
 allowed-tools: Read, Grep, Glob, Write, Edit, mcp__*
 model: opus
 ---

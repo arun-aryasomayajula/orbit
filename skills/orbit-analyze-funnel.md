@@ -1,6 +1,6 @@
 ---
 description: Methodology for a funnel-drop analysis - discovery-phase pull across a cohort's full funnel, stages ranked by biggest absolute drop, with hypotheses for the top drop. Invoked by the orchestrator to brief the analyst maker.
-argument-hint: "(no args — the task contract arrives via the cycle brief)"
+argument-hint: "(no args - the task contract arrives via the cycle brief)"
 allowed-tools: Read, Grep, Glob, Write, Edit, mcp__*
 model: opus
 ---
