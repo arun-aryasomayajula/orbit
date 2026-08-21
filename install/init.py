@@ -169,8 +169,19 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
     # documented fallback locations for notify's webhook and the jira token)
     api = os.path.join(AP, ".gitignore")
     if not os.path.exists(api):
-        open(api, "w").write("# Orbit secrets — never commit\n.jira_token\n.slack_webhook\n")
+        open(api, "w").write("# Orbit secrets — never commit\n.jira_token\n.slack_webhook\n.secrets.env\n")
+    # secrets example (product workspaces only) — template for manual secret config
     if PRODUCT:
+        ex = os.path.join(AP, ".secrets.env.example")
+        if not os.path.exists(ex):
+            open(ex, "w").write(
+                "# .autopilot/.secrets.env — PM tokens live here (0600, gitignored).\n"
+                "# For product workspaces, add token values here. The dashboard's\n"
+                "# Settings > Secrets panel can write this file — OR edit manually.\n"
+                "# Source: engine/run.sh sources this when present so interactive runs\n"
+                "# and launchd services see the same environment.\n"
+                "#\n"
+                "# METAQL_TOKEN=<your-metaql-token-here>\n")
         for d in ("knowledge", "insights", "research", "surveys"):
             os.makedirs(os.path.join(TARGET, d), exist_ok=True)
         cm = os.path.join(TARGET, "CLAUDE.md")

@@ -22,6 +22,13 @@ TARGET="$(cd "$TARGET" && pwd)"
 # Load the target's profile → ORBIT_* + AP_HOME/AP_STATE exports.
 eval "$(python3 "$ENGINE/config.py" shellenv "$TARGET")" || { echo "config load failed"; exit 2; }
 
+# Secrets (spec decision 10): PM tokens live in $AP_HOME/.secrets.env (0600,
+# gitignored). Sourced here so interactive runs and launchd services see the
+# same environment.
+if [ -f "$AP_HOME/.secrets.env" ]; then
+  set -a; . "$AP_HOME/.secrets.env"; set +a
+fi
+
 REPO="$ORBIT_REPO"
 WT="${AP_WORKTREE:-${REPO}-orbit-worktree}"
 STATE="$AP_STATE"
