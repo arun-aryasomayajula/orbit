@@ -1,7 +1,7 @@
 ---
 description: Ground findings in real systems via MetaQL, Jira, Confluence, code reads, and docs. Write 02-research.json - sourced findings per the grounding contract.
 argument-hint: "<run-id>"
-allowed-tools: Read, Grep, Glob, Bash
+allowed-tools: Read, Grep, Glob, Write, Edit, mcp__*
 model: opus
 ---
 

@@ -1,7 +1,7 @@
 ---
 description: Extract scope, stakeholders, and targets from a PRD's title and brief. Write 01-intake.json - the intake stage artifact per the grounding contract.
 argument-hint: "<run-id>"
-allowed-tools: Read, Grep, Glob
+allowed-tools: Read, Grep, Glob, Write, Edit
 model: opus
 ---
 

@@ -1,7 +1,7 @@
 ---
 description: Transform research findings into numbered requirements. Write 03-synthesis.json - requirements grounded in sources per the grounding contract.
 argument-hint: "<run-id>"
-allowed-tools: Read, Grep, Glob
+allowed-tools: Read, Grep, Glob, Write, Edit
 model: opus
 ---
 

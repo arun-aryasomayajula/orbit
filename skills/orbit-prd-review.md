@@ -1,7 +1,7 @@
 ---
 description: Review the PRD across two lenses (CEO scope + feasibility). Write 05-review.json only.
 argument-hint: "<run-id>"
-allowed-tools: Read, Grep, Glob
+allowed-tools: Read, Grep, Glob, Write, Edit
 model: opus
 ---
 

@@ -1,7 +1,7 @@
 ---
 description: Draft the PRD markdown from synthesis and research. Write 04-prd.md with inline source citations per the grounding contract.
 argument-hint: "<run-id>"
-allowed-tools: Read, Grep, Glob
+allowed-tools: Read, Grep, Glob, Write, Edit
 model: opus
 ---
 
