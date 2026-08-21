@@ -37,6 +37,8 @@ def test_product_scaffold_installs_funnel_and_hypothesis_skills(tmp_path):
     cmd_dir = tmp_path / ".claude" / "commands"
     assert (cmd_dir / "orbit-analyze-funnel.md").exists()
     assert (cmd_dir / "orbit-hypothesis.md").exists()
+    assert (cmd_dir / "orbit-survey-design.md").exists()
+    assert (cmd_dir / "orbit-survey-analyze.md").exists()
 
 def test_funnel_and_hypothesis_known_to_lint_and_emitter(monkeypatch, tmp_path):
     monkeypatch.setenv("AP_HOME", str(tmp_path / ".autopilot"))

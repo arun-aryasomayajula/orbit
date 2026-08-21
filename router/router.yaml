@@ -34,6 +34,8 @@ skills:
   orbit-insight:                orbit-insight                          # grounded product-data insight (built-in, skills/orbit-insight.md)
   orbit-analyze-funnel:          orbit-analyze-funnel                   # funnel-drop analysis (built-in, skills/orbit-analyze-funnel.md)
   orbit-hypothesis:              orbit-hypothesis                       # single-hypothesis triangulation (built-in, skills/orbit-hypothesis.md)
+  orbit-survey-design:           orbit-survey-design                    # falsifiable-hypothesis survey design (built-in, skills/orbit-survey-design.md)
+  orbit-survey-analyze:          orbit-survey-analyze                   # grounded survey response analysis (built-in, skills/orbit-survey-analyze.md)
 
 defaults:
   checker: { agent: checker, model: sonnet }      # the gate — always runs
@@ -149,22 +151,17 @@ categories:
     tracks: []
     discipline: triangulate to a VALIDATED/NEGATED/INCONCLUSIVE verdict; doc must pass insight_lint
 
-  # ---- Task 5 stubs: category wired now so the template's validate + queue
-  # behavior is consistent immediately; the skill files (orbit-survey-design,
-  # orbit-survey-analysis) land in Task 5 - `skill` is left unset until then so
-  # `orbit doctor`'s skill-resolution check doesn't flag a file that doesn't
-  # exist yet.
   survey_design:
     policy: allow
     maker: { agent: analyst, model: opus, effort: high }
-    skill: ""                        # set to orbit-survey-design once Task 5 lands
+    skill: orbit-survey-design      # methodology brief (skills/orbit-survey-design.md)
     tracks: []
     discipline: design a grounded survey instrument; doc must pass insight_lint
 
   survey_analysis:
     policy: allow
     maker: { agent: analyst, model: opus, effort: high }
-    skill: ""                        # set to orbit-survey-analysis once Task 5 lands
+    skill: orbit-survey-analyze     # methodology brief (skills/orbit-survey-analyze.md)
     tracks: []
     discipline: analyze survey responses with no fact without a source; doc must pass insight_lint
 
