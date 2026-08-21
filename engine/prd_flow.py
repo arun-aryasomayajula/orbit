@@ -18,6 +18,13 @@ or "done". A stage whose Tier-A eval fails still gets stamped (evals.ok:
 false, errors recorded) but status does NOT advance - the run stays put
 until a human or a later agent fixes the artifact and re-records.
 
+run_stage() (Task 4) does the actual work: one headless `claude` call per
+stage (MCP wiring via engine/mcp.py, same idiom as intake.py/qa_check.py),
+then record_stage() on what it wrote. `ORBIT_PRD_CMD` (shlex-split) swaps
+the whole command out for a test double; `chain=True` keeps driving
+successive stages while each one's eval passes and the marker hasn't hit a
+gate (awaiting-*) or "done".
+
 CLI:
   prd_flow.py new <target> <run> <title> [--brief <text>]
   prd_flow.py status <target> <run>
@@ -25,16 +32,32 @@ CLI:
   prd_flow.py approve-scope <target> <run>
   prd_flow.py approve-prd <target> <run>
   prd_flow.py revise <target> <run> <stage>
+  prd_flow.py run <target> <run> <stage> [--chain]
 """
 import hashlib
 import json
 import os
+import shlex
+import shutil
+import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import mcp
 import prd_evals
+
+ORBIT_HOME = os.environ.get("ORBIT_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_MODEL = "claude-opus-4-8"
+DEFAULT_TIMEOUT = 3600
+SKILLS = {
+    "intake": "orbit-prd-intake",
+    "research": "orbit-prd-research",
+    "synthesis": "orbit-prd-synthesis",
+    "draft": "orbit-prd-writer",
+    "review": "orbit-prd-review",
+}
 
 
 class GateError(RuntimeError):
@@ -247,10 +270,102 @@ def revise(target, run, stage):
     return marker
 
 
+def _load_prd_cfg(target):
+    """Read the `prd:` block from the target's .autopilot/config.yaml (model,
+    timeout_seconds). No config file or no `prd:` block -> {} (defaults
+    apply). Mirrors engine/mcp.py's _load_mcp idiom."""
+    cfg_path = os.path.join(target, ".autopilot", "config.yaml")
+    if not os.path.exists(cfg_path):
+        return {}
+    import yaml
+    raw = yaml.safe_load(open(cfg_path)) or {}
+    return raw.get("prd") or {}
+
+
+def _build_cmd(target, run, stage, prd_cfg):
+    claude = shutil.which("claude")
+    if not claude:
+        raise GateError("claude not found on PATH")
+    model = prd_cfg.get("model") or DEFAULT_MODEL
+    cmd = [claude, "--print", f"/{SKILLS[stage]} {run}",
+           "--permission-mode", "acceptEdits",
+           "--settings", mcp.write_settings(target),
+           "--model", model,
+           "--add-dir", ORBIT_HOME]
+    build_path = mcp.write_build(target)
+    if build_path:
+        cmd += ["--mcp-config", build_path, "--strict-mcp-config"]
+    return cmd
+
+
+def _invoke_claude(target, run, stage):
+    """Run the headless claude call for `stage` (or its ORBIT_PRD_CMD test
+    double). Raises GateError on nonzero exit or timeout; the exception
+    carries the tail of what the process printed. Does NOT touch the
+    marker - the caller records what got written to disk."""
+    prd_cfg = _load_prd_cfg(target)
+    timeout = prd_cfg.get("timeout_seconds") or DEFAULT_TIMEOUT
+    override = os.environ.get("ORBIT_PRD_CMD")
+    cmd = shlex.split(override) if override else _build_cmd(target, run, stage, prd_cfg)
+    ap = os.path.join(target, ".autopilot")
+    env = dict(os.environ, PRD_STAGE=stage, PRD_RUN=run, PRD_TARGET=target,
+               AP_HOME=ap, AP_STATE=os.path.join(ap, "state"), ORBIT_HOME=ORBIT_HOME)
+    try:
+        p = subprocess.run(cmd, cwd=target, env=env, timeout=timeout,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           stdin=subprocess.DEVNULL, text=True)
+    except subprocess.TimeoutExpired:
+        raise GateError(f"stage '{stage}' timed out after {timeout}s")
+    except OSError as e:
+        raise GateError(f"stage '{stage}' failed to start: {e}")
+    if p.returncode != 0:
+        tail = (p.stdout or "")[-2000:]
+        raise GateError(f"stage '{stage}' exited {p.returncode}:\n{tail}")
+
+
+def _run_one_stage(target, run, stage):
+    if stage not in STAGES:
+        raise GateError(f"unknown stage '{stage}' (one of: {', '.join(STAGES)})")
+    marker = load_marker(target, run)
+    if marker["status"] != stage:
+        raise GateError(
+            f"cannot run '{stage}': current status is '{marker['status']}'")
+    _invoke_claude(target, run, stage)
+    return record_stage(target, run, stage)
+
+
+def run_stage(target, run, stage, chain=False):
+    """Invoke the headless claude call that drives `stage` forward, then
+    record_stage() its artifact. With chain=False, runs exactly one stage
+    and returns whatever record_stage returns (evals.ok may be false;
+    status won't have advanced past `stage` in that case).
+
+    With chain=True, keeps going: after a stage's eval passes, if the
+    marker's new status names another stage (not a gate like
+    "awaiting-scope-approval"/"awaiting-signoff", and not "done"), that
+    stage is run next in the same call. Stops the moment a stage's eval
+    fails (evals.ok: false - status doesn't advance) or the marker lands on
+    a gate/"done"."""
+    while True:
+        marker = _run_one_stage(target, run, stage)
+        stamp = marker["stages"].get(stage) or {}
+        if not chain or not stamp.get("evals", {}).get("ok"):
+            return marker
+        status = marker["status"]
+        if status not in STAGES:
+            return marker  # hit a gate (awaiting-*) or reached "done"
+        stage = status
+
+
 def _cli_new(rest):
     target, run, title = rest[0], rest[1], rest[2]
     brief = rest[rest.index("--brief") + 1] if "--brief" in rest else ""
     return new(target, run, title, brief=brief)
+
+
+def _cli_run(rest):
+    target, run, stage = rest[0], rest[1], rest[2]
+    return run_stage(target, run, stage, chain="--chain" in rest[3:])
 
 
 CMDS = {
@@ -260,6 +375,7 @@ CMDS = {
     "approve-scope": lambda rest: approve_scope(rest[0], rest[1]),
     "approve-prd": lambda rest: approve_prd(rest[0], rest[1]),
     "revise": lambda rest: revise(rest[0], rest[1], rest[2]),
+    "run": _cli_run,
 }
 
 
