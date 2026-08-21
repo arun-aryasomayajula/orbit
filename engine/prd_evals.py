@@ -9,6 +9,7 @@ CITE = re.compile(r"\(S(\d+)\)")
 TESTABLE = re.compile(r"\d|%|>=|<=|\bpass\b|\bfail\b")
 PRD_HEADINGS = ["## Problem", "## Goals", "## Non-goals", "## Requirements",
                 "## Acceptance criteria", "## Open questions", "## Basis"]
+KINDS = {"metaql", "jira", "confluence", "scrape", "doc", "code"}
 
 
 def _need(d, key, typ, errs, where):
@@ -17,7 +18,7 @@ def _need(d, key, typ, errs, where):
         errs.append(f"{where}: '{key}' missing/empty/wrong type")
     return v
 
-OPTIONAL_EMPTY = {"scope_out", "data_targets", "code_targets", "coverage_gaps", "gaps", "open_questions"}
+OPTIONAL_EMPTY = {"scope_out", "data_targets", "code_targets"}
 
 
 def check_intake(d: dict) -> list:
@@ -36,6 +37,8 @@ def _source_ids(research: dict) -> set:
 
 def check_research(d: dict) -> list:
     errs = []
+    if not isinstance(d.get("run_id"), str) or not d.get("run_id"):
+        errs.append("research: 'run_id' missing/empty/wrong type")
     srcs = d.get("sources") or []
     if not srcs:
         errs.append("research: no sources — grounding contract requires at least one typed source")
@@ -45,13 +48,20 @@ def check_research(d: dict) -> list:
         if not SID.match(sid):
             errs.append(f"research: source id {sid!r} must match S<n>")
         ids.append(sid)
+        kind = s.get("kind", "")
+        if kind and kind not in KINDS:
+            errs.append(f"research: source {sid} kind {kind!r} not in {sorted(KINDS)}")
         for k in ("kind", "ref", "date", "summary"):
             if not s.get(k):
                 errs.append(f"research: source {sid} missing '{k}'")
     if len(ids) != len(set(ids)):
         errs.append("research: duplicate source ids")
+    if not isinstance(d.get("coverage_gaps"), (type(None), list)):
+        errs.append("research: 'coverage_gaps' must be a list when present")
     known = set(ids)
     for f in d.get("findings") or []:
+        if not isinstance(f, dict) or not f.get("claim"):
+            errs.append("research: finding must have non-empty 'claim'")
         for sid in f.get("source_ids") or []:
             if sid not in known:
                 errs.append(f"research: finding cites unknown source {sid}")
@@ -60,9 +70,15 @@ def check_research(d: dict) -> list:
 
 def check_synthesis(d: dict, research: dict) -> list:
     errs = []
+    if not isinstance(d.get("run_id"), str) or not d.get("run_id"):
+        errs.append("synthesis: 'run_id' missing/empty/wrong type")
     reqs = d.get("requirements") or []
     if not reqs:
         errs.append("synthesis: no requirements")
+    if not isinstance(d.get("gaps"), (type(None), list)):
+        errs.append("synthesis: 'gaps' must be a list when present")
+    if not isinstance(d.get("open_questions"), (type(None), list)):
+        errs.append("synthesis: 'open_questions' must be a list when present")
     known = _source_ids(research)
     for r in reqs:
         if not re.match(r"R\d+$", r.get("id", "")):

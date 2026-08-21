@@ -36,3 +36,31 @@ def test_prd_md_headings_citations_testable_criteria():
     assert any("testable" in e.lower() for e in prd_evals.check_prd_md(woolly, GOOD_RESEARCH))
     assert any("Non-goals" in e for e in prd_evals.check_prd_md(GOOD_PRD.replace("## Non-goals\nn\n\n", ""), GOOD_RESEARCH))
     assert any("TODO" in e for e in prd_evals.check_prd_md(GOOD_PRD + "\nTODO x\n", GOOD_RESEARCH))
+
+def test_research_findings_require_nonempty_claim():
+    bad = dict(GOOD_RESEARCH, findings=[{"claim": "", "source_ids": ["S1"]}])
+    assert any("claim" in e for e in prd_evals.check_research(bad))
+    bad = dict(GOOD_RESEARCH, findings=[{"source_ids": ["S1"]}])
+    assert any("claim" in e for e in prd_evals.check_research(bad))
+
+def test_research_and_synthesis_require_run_id():
+    bad_research = dict(GOOD_RESEARCH, run_id="")
+    assert any("run_id" in e for e in prd_evals.check_research(bad_research))
+    bad_synthesis = {"requirements": [{"id": "R1", "text": "x", "source_ids": ["S1"]}], "gaps": [], "open_questions": []}
+    assert any("run_id" in e for e in prd_evals.check_synthesis(bad_synthesis, GOOD_RESEARCH))
+
+def test_research_source_kind_must_be_known():
+    bad = dict(GOOD_RESEARCH, sources=[{"id": "S1", "kind": "unknown_kind", "ref": "q", "date": "2026-08-21", "summary": "x"}])
+    assert any("kind" in e for e in prd_evals.check_research(bad))
+
+def test_research_coverage_gaps_must_be_list():
+    bad = dict(GOOD_RESEARCH, coverage_gaps="not a list")
+    assert any("coverage_gaps" in e for e in prd_evals.check_research(bad))
+
+def test_synthesis_gaps_and_open_questions_must_be_lists():
+    good = {"run_id": "r1", "requirements": [{"id": "R1", "text": "x", "source_ids": ["S1"]}], "gaps": [], "open_questions": []}
+    assert prd_evals.check_synthesis(good, GOOD_RESEARCH) == []
+    bad = dict(good, gaps="not a list")
+    assert any("gaps" in e for e in prd_evals.check_synthesis(bad, GOOD_RESEARCH))
+    bad = dict(good, open_questions="not a list")
+    assert any("open_questions" in e for e in prd_evals.check_synthesis(bad, GOOD_RESEARCH))
