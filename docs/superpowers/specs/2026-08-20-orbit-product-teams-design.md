@@ -83,8 +83,8 @@ Mechanisms ported from dwh-suite, reimplemented natively:
 - **Tier-B LLM judge**: for example "is synthesis a genuine advance on research, not a paraphrase". Advisory by default, blockable by config.
 - **Grounding contract** briefed into every stage as a track: no fact without a source, abstain over guess (record coverage gaps instead of fabricating), each stage stays in its lane, and a `pii_touch` flag defers compliance judgments to a human.
 - **Research grounds against real systems**: MetaQL queries, Confluence and Jira via MCP, competitor scrapes, all cited as typed sources.
-- Each stage is a loop task. Stages of different PRDs run in parallel; stages of one PRD are serial by construction of the stamp chain.
-- Human gates surface as dashboard escalations and as the PR merge itself.
+- Stages are dashboard/CLI-driven detached runs with `--chain` covering unattended multi-stage execution (amended 2026-08-21 during M2: PRD runs have their own state machine and gates, so the loop's repo-task queue is the wrong dispatcher for them; this is now the permanent design, not a deferral).
+- Human gates surface as dashboard buttons on the PRD pipeline view; a `pii_touch` run additionally requires explicit PII acknowledgement at scope approval.
 
 **Review gate**: an auto-decide review pass replicating gstack's autoplan pattern natively.
 Two lenses run over the draft: a CEO lens (scope challenge, completeness scoring) and a feasibility lens (dependencies, rollout, instrumentation).
@@ -99,7 +99,9 @@ New skills, agents, and router categories encoding PREMIUM's methodology under d
 - `orbit-insight`: ad-hoc data questions producing a grounded insight doc, optionally a MetaQL canvas.
 - Agents: `analyst` and `researcher` as drop-in `agents/*.md` files with router entries.
 - Findings may auto-file follow-up tasks at `status: proposed` only, e.g. a validated hypothesis proposes a create-jira task. The human promotes.
-- **Scheduled watches**: a `metric_watch` signal adapter runs configured MetaQL checks on the loop's cadence and files anomaly tasks into the backlog.
+- **Scheduled watches**: a `metric_watch` signal adapter reads a `watches:` profile block (name, question, cadence_hours) and files an insight task per watch per cadence at `status: proposed` — the adapter contract's only permitted write.
+Unattended execution rides the existing `AUTO_PROMOTE` mechanism; without it, the PM promotes from the dashboard.
+Anomaly detection lives inside the filed insight task's question, not in the adapter (amended 2026-08-21: the adapter is engine-side code with no data access; the analyst agent is where data judgment happens).
 
 ### 6. Surveys
 
@@ -117,10 +119,10 @@ Write-side design generation is deferred to v1.5: it is the least-proven MCP sur
 
 ### 8. Native browser layer
 
-`engine/browse.py`: a thin Python Playwright driver with a persistent context, snapshot/click/fill/screenshot primitives, and `state save/load` for durable authenticated sessions across task runs.
-It replaces the per-run Playwright-MCP wiring for QA, scrape, and design-review.
-`orbit-scrape` is read-only by contract (refuses mutating intents, returns JSON), and a skillify-equivalent persists a proven scrape as a repeatable extractor under `.autopilot/scrapers/`.
-This adds `playwright` as the one new Python dependency, required only by product and QA profiles.
+`engine/browse.py`: a minimal fetch/screenshot driver (amended 2026-08-21: the M3 workflows need page text for research grounding and competitive scrapes, not a full interaction driver; the persistent-context click/fill/state layer is deferred until QA migrates off Playwright-MCP).
+CLI: `fetch <url>` prints readable page text (Playwright-rendered when the optional dependency is installed, urllib fallback otherwise) and `screenshot <url> <out.png>` (Playwright only).
+`orbit-scrape` is read-only by contract (refuses mutating intents, returns typed JSON for citation as a `scrape` source), and proven scrapes persist as repeatable extractor configs under `.autopilot/scrapers/`.
+`playwright` is an optional Python dependency; nothing hard-requires it.
 gstack's browse/scrape/skillify designs are the acknowledged reference.
 
 ### 9. Parallelism
