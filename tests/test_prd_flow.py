@@ -120,8 +120,6 @@ elif stage == "draft":
 elif stage == "review":
     with open(os.path.join(d, "05-review.json"), "w") as f:
         json.dump({"verdicts": [], "ok": True}, f)
-    with open(os.path.join(d, "04-prd.md"), "a") as f:
-        f.write("\n## Review audit trail\n- none\n")
 sys.exit(0)
 '''
 
@@ -180,3 +178,21 @@ def test_run_stage_eval_failure_stops_chain(tmp_path, monkeypatch):
     m = prd_flow.run_stage(str(ws), "r1", "intake", chain=True)
     assert m["stages"]["intake"]["evals"]["ok"] is False
     assert m["status"] == "intake"  # not advanced, chain stopped here
+
+
+def test_verify_clean_on_full_done_run(tmp_path, monkeypatch):
+    # Regression: the review stage must never mutate 04-prd.md (or any
+    # other already-stamped artifact) after the fact - stamped artifacts
+    # are immutable. A full chain through to "done" must leave verify()
+    # reporting no tamper at all.
+    ws = _ws(tmp_path)
+    fake = _write_fake(tmp_path, "fake_full.py", FAKE_PRD_SCRIPT)
+    monkeypatch.setenv("ORBIT_PRD_CMD", f"{sys.executable} {fake}")
+    prd_flow.new(str(ws), "r1", "T")
+    prd_flow.run_stage(str(ws), "r1", "intake")
+    prd_flow.approve_scope(str(ws), "r1")
+    m = prd_flow.run_stage(str(ws), "r1", "research", chain=True)
+    assert m["status"] == "awaiting-signoff"
+    m = prd_flow.approve_prd(str(ws), "r1")
+    assert m["status"] == "done"
+    assert prd_flow.verify(str(ws), "r1") == []

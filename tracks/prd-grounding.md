@@ -14,6 +14,7 @@ The grounding contract for Orbit's five-stage PRD flow. Every artifact and stage
   - Review: two lenses only (CEO + feasibility), auto-decides, logs every verdict.
 - **Controller owns the verdict** - prd_flow.py and prd_evals.py are the sole authority on whether a stage passes. Self-reporting is never trusted.
 - **PII touch defers to human** - If intake.pii_touch is true, a human must review and approve before the flow continues. The skill records the flag; compliance is not the skill's job.
+- **A stamped artifact is immutable** - later stages never edit earlier artifacts.
 
 ## Stage-specific lanes
 
@@ -65,14 +66,14 @@ The grounding contract for Orbit's five-stage PRD flow. Every artifact and stage
 ### Review (05-review.json)
 
 **Input:** 04-prd.md, 02-research.json  
-**Output:** {verdicts: [{lens, finding, decision, rationale}...], ok: bool}; APPENDS ## Review audit trail to 04-prd.md
+**Output:** {verdicts: [{lens, finding, decision, rationale}...], ok: bool}
 
 - Two lenses only:
   1. **CEO (scope + completeness)**: Does the PRD address the stated goal? Is it complete (0-10 completeness score)? Does scope match the initial brief?
   2. **Feasibility**: What dependencies, rollout risks, or instrumentation gaps must the team own?
 - Every verdict logged as a structure: {lens, finding, decision, rationale}.
 - ok: false only if a contradiction exists that the PM must resolve (e.g., two requirements that cannot both be met). Otherwise true.
-- ## Review audit trail: append this section to 04-prd.md listing every verdict and the decision rationale.
+- The verdicts list IS the audit trail. The review stage never modifies 04-prd.md or any other stamped artifact.
 
 ## Design references
 
