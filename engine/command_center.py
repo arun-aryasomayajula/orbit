@@ -2884,7 +2884,7 @@ def prd_pipeline_state() -> list | None:
 
 
 def do_prd_action(run: str, action: str, title: str = "", brief: str = "",
-                  ack_pii: bool = False) -> str:
+                  ack_pii: bool = False, pm: str = "") -> str:
     """Drive the PRD pipeline from the dashboard. `new` validates the run id
     itself (no marker exists yet to check legality against); every other
     action is checked against the CURRENT marker's status via
@@ -2898,7 +2898,10 @@ def do_prd_action(run: str, action: str, title: str = "", brief: str = "",
         if (_prd_research_root() / run / prd_flow.MARKER_NAME).exists():
             return f"a PRD run named '{run}' already exists"
         try:
-            prd_flow.new(str(REPO), run, title.strip(), brief=brief)
+            # pm is optional on the wire: left out, prd_flow resolves it from
+            # the workspace's git identity. That default is better UX than a
+            # fourth prompt on the New PRD form, so the form doesn't ask.
+            prd_flow.new(str(REPO), run, title.strip(), brief=brief, pm=pm.strip())
         except (OSError, prd_flow.GateError) as e:
             return f"could not create PRD run '{run}': {e}"
         return f"Created PRD run '{run}' - intake is next."
@@ -4102,7 +4105,8 @@ class Handler(BaseHTTPRequestHandler):
                 msg = do_prd_action(run, (data.get("action", [""])[0]).strip(),
                                     (data.get("title", [""])[0]).strip(),
                                     data.get("brief", [""])[0],
-                                    ack_pii=(data.get("ack_pii", [""])[0] == "1"))
+                                    ack_pii=(data.get("ack_pii", [""])[0] == "1"),
+                                    pm=data.get("pm", [""])[0])
             elif path == "/calibration-action":
                 if not tid:
                     self._send(b'{"ok":false,"msg":"missing candidate id"}', "application/json", 400); return

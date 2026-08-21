@@ -1,4 +1,5 @@
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -391,6 +392,90 @@ def test_non_pii_run_needs_no_acknowledgement(tmp_path):
     m = prd_flow.approve_scope(str(ws), "r1")
     assert m["status"] == "research"
     assert m["approvals"]["scope"]["ack_pii"] is False
+
+
+# --- pm identity: the marker is intake's only source for it ---------------
+# Nothing else carried the PM's name into a run, so intake could not satisfy
+# the `pm` field its own contract requires and every real run stalled with an
+# empty one. The marker now carries it and the skill copies it verbatim.
+
+def _git(ws, *args):
+    subprocess.run(["git", "-C", str(ws), *args], check=True, capture_output=True)
+
+
+def _no_git_identity_env(monkeypatch, tmp_path):
+    """Hide the developer's own git identity so the fallback path is reachable."""
+    empty = tmp_path / "empty-gitconfig"
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty))
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(empty))
+    r = subprocess.run(["git", "config", "user.name"], capture_output=True, text=True)
+    if (r.stdout or "").strip():
+        pytest.skip("this git ignores GIT_CONFIG_GLOBAL/SYSTEM; cannot isolate the identity")
+
+
+def test_new_defaults_pm_to_the_workspace_git_identity(tmp_path):
+    ws = _ws(tmp_path)
+    _git(ws, "init", "-q")
+    _git(ws, "config", "user.name", "Ada Lovelace")
+    assert prd_flow.new(str(ws), "r1", "T")["pm"] == "Ada Lovelace"
+
+
+def test_new_defaults_pm_to_the_login_name_without_a_git_identity(tmp_path, monkeypatch):
+    ws = _ws(tmp_path)
+    _no_git_identity_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("USER", "testpm")
+    assert prd_flow.new(str(ws), "r1", "T")["pm"] == "testpm"
+
+
+def test_new_never_records_an_empty_pm(tmp_path, monkeypatch):
+    """An empty pm is the exact failure this fixes: intake's eval rejects it and
+    the error tells the PM nothing they can act on."""
+    ws = _ws(tmp_path)
+    _no_git_identity_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("USER", raising=False)
+    assert prd_flow.new(str(ws), "r1", "T")["pm"] == "unknown"
+    for blank in ("", "   "):
+        m = prd_flow.new(str(ws), "r2", "T", pm=blank)
+        assert m["pm"], f"blank pm {blank!r} must fall back, not persist"
+
+
+def test_explicit_pm_wins_and_round_trips_through_the_marker(tmp_path):
+    ws = _ws(tmp_path)
+    _git(ws, "init", "-q")
+    _git(ws, "config", "user.name", "Ada Lovelace")
+    prd_flow.new(str(ws), "r1", "T", pm="  Grace Hopper  ")
+    assert prd_flow.load_marker(str(ws), "r1")["pm"] == "Grace Hopper"
+
+
+def test_cli_new_honours_the_pm_flag(tmp_path):
+    ws = _ws(tmp_path)
+    r = subprocess.run([sys.executable, str(ORBIT / "engine" / "prd_flow.py"), "new",
+                        str(ws), "r1", "My PRD", "--brief", "ctx", "--pm", "Grace Hopper"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    m = prd_flow.load_marker(str(ws), "r1")
+    assert m["pm"] == "Grace Hopper" and m["brief"] == "ctx"
+
+
+def test_recorded_intake_carrying_the_markers_pm_passes_its_eval(tmp_path):
+    """End to end on the contract that broke: the skill copies the marker's pm,
+    and that artifact stamps clean."""
+    ws = _ws(tmp_path)
+    marker = prd_flow.new(str(ws), "r1", "T", pm="Grace Hopper")
+    (ws / "research" / "r1" / "01-intake.json").write_text(
+        json.dumps(dict(GOOD_INTAKE, pm=marker["pm"])))
+    m = prd_flow.record_stage(str(ws), "r1", "intake")
+    assert m["stages"]["intake"]["evals"]["ok"] is True
+    assert m["status"] == "awaiting-scope-approval"
+
+
+def test_intake_skill_takes_pm_from_the_marker():
+    """The skill must not mine a name out of the brief or leave it empty - the
+    marker is the only source of truth for who owns the run."""
+    text = (ORBIT / "skills" / f"{prd_flow.SKILLS['intake']}.md").read_text()
+    assert "verbatim" in text
+    assert "marker's `pm`" in text
+    assert "else empty string" not in text
 
 
 def test_revising_intake_clears_a_stale_pii_flag(tmp_path):

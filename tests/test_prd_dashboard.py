@@ -287,6 +287,20 @@ def test_prd_pipeline_state_shape_and_next_actions(cc):
     assert "prd" in s and s["prd"][0]["run_id"] == "r1"
 
 
+def test_prd_action_new_records_a_pm_without_asking_for_one(cc):
+    """The New PRD form deliberately does not prompt for a PM - the server
+    resolves it from the workspace's git identity. What it must never do is
+    leave it empty, which is what stalled intake's eval on the first real run."""
+    msg = cc.do_prd_action("r1", "new", "My PRD", "ctx")
+    assert msg.startswith("Created")
+    assert cc.prd_flow.load_marker(str(cc.REPO), "r1")["pm"]
+
+
+def test_prd_action_new_passes_an_explicit_pm_through(cc):
+    cc.do_prd_action("r1", "new", "My PRD", "ctx", pm="Grace Hopper")
+    assert cc.prd_flow.load_marker(str(cc.REPO), "r1")["pm"] == "Grace Hopper"
+
+
 def test_prd_action_approve_scope_flips_marker_status(cc):
     cc.prd_flow.new(str(cc.REPO), "r1", "My PRD")
     (Path(cc.REPO) / "research" / "r1" / "01-intake.json").write_text(json.dumps(GOOD_INTAKE))

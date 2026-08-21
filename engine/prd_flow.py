@@ -26,7 +26,7 @@ successive stages while each one's eval passes and the marker hasn't hit a
 gate (awaiting-*) or "done".
 
 CLI:
-  prd_flow.py new <target> <run> <title> [--brief <text>]
+  prd_flow.py new <target> <run> <title> [--brief <text>] [--pm <name>]
   prd_flow.py status <target> <run>
   prd_flow.py record <target> <run> <stage>
   prd_flow.py approve-scope <target> <run> [--ack-pii]
@@ -124,8 +124,30 @@ def _atomic_write_json(path, data):
         raise
 
 
-def new(target, run_id, title, brief=""):
-    """Create research/<run>/ and its marker at status 'intake'."""
+def _default_pm(target):
+    """Who is running this PRD, when nobody said. The workspace's git identity
+    is the closest thing to the PM's name that is already on the machine; the
+    login name is the last resort. Never empty - `pm` is a required intake
+    field, and an empty one fails intake's eval for a reason no PM can act on."""
+    try:
+        r = subprocess.run(["git", "-C", target, "config", "user.name"],
+                           capture_output=True, text=True, timeout=10)
+        name = (r.stdout or "").strip()
+        if r.returncode == 0 and name:
+            return name
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return os.environ.get("USER") or "unknown"
+
+
+def new(target, run_id, title, brief="", pm=""):
+    """Create research/<run>/ and its marker at status 'intake'.
+
+    `pm` is the run's owner. Nothing else carries the PM's identity into a run,
+    so intake had no source for the `pm` field its own contract requires and
+    every real run stalled with an empty one. Left blank, it resolves from the
+    workspace's git identity (see _default_pm) - the intake skill copies this
+    value verbatim rather than inventing a name."""
     if not RUN_RE.match(run_id or ""):
         raise GateError(
             f"invalid run id {run_id!r} - lowercase letters, digits and hyphens only, "
@@ -135,6 +157,7 @@ def new(target, run_id, title, brief=""):
         "run_id": run_id,
         "title": title,
         "brief": brief,
+        "pm": (pm or "").strip() or _default_pm(target),
         "created": _now(),
         "status": "intake",
         "pii_touch": False,   # set from 01-intake.json when intake is recorded
@@ -433,7 +456,8 @@ def run_stage(target, run, stage, chain=False):
 def _cli_new(rest):
     target, run, title = rest[0], rest[1], rest[2]
     brief = rest[rest.index("--brief") + 1] if "--brief" in rest else ""
-    return new(target, run, title, brief=brief)
+    pm = rest[rest.index("--pm") + 1] if "--pm" in rest else ""
+    return new(target, run, title, brief=brief, pm=pm)
 
 
 def _cli_run(rest):

@@ -18,7 +18,7 @@ Write `research/$ARGUMENTS/01-intake.json`:
 {
   "run_id": "<run-id>",
   "title": "<title from marker>",
-  "pm": "<stakeholder/PM name if brief names one, else empty string>",
+  "pm": "<copied verbatim from the marker's `pm` field>",
   "goal": "<short, testable goal extracted from title and brief>",
   "scope_in": ["<feature/area explicitly in scope>", "..."],
   "scope_out": ["<explicitly out of scope>", "..."],
@@ -28,6 +28,7 @@ Write `research/$ARGUMENTS/01-intake.json`:
 }
 ```
 
+- pm is NOT yours to invent or to mine out of the brief. The controller records the run's owner in the marker's `pm` field; copy that string into the artifact exactly as written. It is never empty, so neither is yours.
 - scope_in is required and non-empty; if the brief is silent, infer from title conservatively.
 - scope_out: name non-obvious exclusions (e.g., if PRD is "user auth", explicitly exclude "logout flow" if the brief doesn't cover it).
 - data_targets: educated guess from scope_in; research will refine.
@@ -36,12 +37,12 @@ Write `research/$ARGUMENTS/01-intake.json`:
 
 ## Steps
 
-1. Load the marker: `research/$ARGUMENTS/prd-run.json` - read `title` and `brief` fields.
+1. Load the marker: `research/$ARGUMENTS/prd-run.json` - read `title`, `brief` and `pm`.
 2. Extract:
    - goal: one sentence, testable.
    - scope_in: 2-5 items; what's explicitly in the brief or clearly implied by title.
    - scope_out: 2-5 items; non-obvious things out (ask: if title is X, what is explicitly NOT X?).
-   - pm: a name if brief says "requested by Jane Doe" or similar; else empty string.
+   - pm: copy the marker's `pm` string verbatim. Do not substitute a name the brief mentions, and do not leave it empty.
    - data_targets: 1-3 system names + explore/table hints if title hints at data areas.
    - code_targets: 1-2 repo/module hints from scope.
    - pii_touch: true/false only.
