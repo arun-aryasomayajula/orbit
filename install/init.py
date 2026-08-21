@@ -103,7 +103,7 @@ gates:
     cwd: "."
     needs: []
 
-workable_categories: [insight, documentation]
+workable_categories: [insight, funnel, hypothesis, survey_design, survey_analysis, documentation]
 sources: [backlog]
 
 # MCP servers this workspace's cycles may reach (see schema.yaml `mcp:` docs).

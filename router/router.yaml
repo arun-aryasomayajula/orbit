@@ -32,6 +32,8 @@ skills:
   security-review:              security-review                        # audit the pending diff (built-in)
   write-docs:                   write-docs                             # doc = glossary of principles, not a code mirror
   orbit-insight:                orbit-insight                          # grounded product-data insight (built-in, skills/orbit-insight.md)
+  orbit-analyze-funnel:          orbit-analyze-funnel                   # funnel-drop analysis (built-in, skills/orbit-analyze-funnel.md)
+  orbit-hypothesis:              orbit-hypothesis                       # single-hypothesis triangulation (built-in, skills/orbit-hypothesis.md)
 
 defaults:
   checker: { agent: checker, model: sonnet }      # the gate — always runs
@@ -60,6 +62,10 @@ goldens:
     frontend: frontend           # path-triggered (frontend-react track)
     security: code-review        # security fixes use the review-lens card
     insight: always              # no dedicated card yet — verify-before-done applies
+    funnel: always                # no dedicated card yet — verify-before-done applies
+    hypothesis: always            # no dedicated card yet — verify-before-done applies
+    survey_design: always         # Task 5 stub — no dedicated card yet
+    survey_analysis: always       # Task 5 stub — no dedicated card yet
     # dependencies / developer_experience / observability / infrastructure → `always` card only
 
 # category → routing. `policy`: allow = auto-pickable; human = only if forced:true
@@ -128,6 +134,39 @@ categories:
     skill: orbit-insight            # methodology brief (skills/orbit-insight.md)
     tracks: []
     discipline: no fact without a tool call; abstain over guess; doc must pass insight_lint
+
+  funnel:
+    policy: allow
+    maker: { agent: analyst, model: opus, effort: high }
+    skill: orbit-analyze-funnel     # methodology brief (skills/orbit-analyze-funnel.md)
+    tracks: []
+    discipline: rank stage drops by absolute count, not percentage; doc must pass insight_lint
+
+  hypothesis:
+    policy: allow
+    maker: { agent: analyst, model: opus, effort: high }
+    skill: orbit-hypothesis         # methodology brief (skills/orbit-hypothesis.md)
+    tracks: []
+    discipline: triangulate to a VALIDATED/NEGATED/INCONCLUSIVE verdict; doc must pass insight_lint
+
+  # ---- Task 5 stubs: category wired now so the template's validate + queue
+  # behavior is consistent immediately; the skill files (orbit-survey-design,
+  # orbit-survey-analysis) land in Task 5 — `skill` is left unset until then so
+  # `orbit doctor`'s skill-resolution check doesn't flag a file that doesn't
+  # exist yet.
+  survey_design:
+    policy: allow
+    maker: { agent: analyst, model: opus, effort: high }
+    skill: ""                        # set to orbit-survey-design once Task 5 lands
+    tracks: []
+    discipline: design a grounded survey instrument; doc must pass insight_lint
+
+  survey_analysis:
+    policy: allow
+    maker: { agent: analyst, model: opus, effort: high }
+    skill: ""                        # set to orbit-survey-analysis once Task 5 lands
+    tracks: []
+    discipline: analyze survey responses with no fact without a source; doc must pass insight_lint
 
   # ---- escalate-unless-forced (operator-excluded from auto-pick) ----
   observability:

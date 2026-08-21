@@ -29,6 +29,10 @@ KNOWN_CATEGORIES = {
     "observability",   # in real use in backlog.yaml; human-only for the emit gate
     "epic",            # planning-tier container: planned/decomposed via epic_plan.py, never loop-worked
     "insight",         # product workspace analysis (safe; gated by insight_lint)
+    "funnel",          # funnel-drop analysis (safe; gated by insight_lint)
+    "hypothesis",      # single-hypothesis triangulation (safe; gated by insight_lint)
+    "survey_design",   # survey design workflow (Task 5; safe; gated by insight_lint)
+    "survey_analysis", # survey analysis workflow (Task 5; safe; gated by insight_lint)
 }
 
 

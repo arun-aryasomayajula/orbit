@@ -22,7 +22,7 @@ def test_product_config_validates_and_carries_insight_gate(tmp_path):
     _init_product(tmp_path)
     cfg = (tmp_path / ".autopilot" / "config.yaml").read_text()
     assert "insight_lint" in cfg
-    assert "workable_categories: [insight, documentation]" in cfg
+    assert "workable_categories: [insight, funnel, hypothesis, survey_design, survey_analysis, documentation]" in cfg
     r = subprocess.run([sys.executable, str(ORBIT / "engine" / "config.py"),
                         "validate", str(tmp_path)], capture_output=True, text=True)
     assert r.returncode == 0, r.stdout
@@ -31,6 +31,20 @@ def test_product_scaffold_installs_commands_and_agents(tmp_path):
     _init_product(tmp_path)
     assert (tmp_path / ".claude" / "commands" / "orbit-insight.md").exists()
     assert (tmp_path / ".claude" / "agents" / "analyst.md").exists()
+
+def test_product_scaffold_installs_funnel_and_hypothesis_skills(tmp_path):
+    _init_product(tmp_path)
+    cmd_dir = tmp_path / ".claude" / "commands"
+    assert (cmd_dir / "orbit-analyze-funnel.md").exists()
+    assert (cmd_dir / "orbit-hypothesis.md").exists()
+
+def test_funnel_and_hypothesis_known_to_lint_and_emitter(monkeypatch, tmp_path):
+    monkeypatch.setenv("AP_HOME", str(tmp_path / ".autopilot"))
+    sys.path.insert(0, str(ORBIT / "engine"))
+    import backlog_lint, backlog_to_tasks
+    for cat in ("funnel", "hypothesis", "survey_design", "survey_analysis"):
+        assert cat in backlog_lint.KNOWN_CATEGORIES, cat
+        assert cat in backlog_to_tasks.SAFE_CATEGORIES, cat
 
 def test_product_scaffold_installs_prd_skills(tmp_path):
     _init_product(tmp_path)
@@ -113,6 +127,15 @@ def test_reinit_preserves_unrelated_gitignore_lines(tmp_path):
     lines = gi.read_text().splitlines()
     assert lines[0] == "scratch/"
     assert set(lines) >= {"scratch/", ".jira_token", ".slack_webhook", ".secrets.env"}
+
+def test_router_yaml_parses_and_has_funnel_hypothesis_categories():
+    import yaml
+    router = yaml.safe_load((ORBIT / "router" / "router.yaml").read_text())
+    cats = router.get("categories", {})
+    for cat in ("funnel", "hypothesis", "survey_design", "survey_analysis"):
+        assert cat in cats, cat
+        assert cats[cat].get("maker", {}).get("agent") == "analyst"
+        assert cats[cat].get("maker", {}).get("model") == "opus"
 
 def test_doctor_warns_on_missing_mcp_token_env(tmp_path):
     _init_product(tmp_path)
