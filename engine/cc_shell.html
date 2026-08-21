@@ -438,6 +438,14 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
   background:linear-gradient(0deg,var(--void) 55%,transparent);padding:14px 0 6px;margin-top:4px}
 .set-meta{font:500 11px/1.7 var(--mono);color:var(--faint)}
 .set-meta code{color:var(--dim)}
+.secrets-list{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}
+.secret-row{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--line2);
+  border-radius:8px;padding:7px 11px;font:500 12px var(--mono)}
+.secret-row code{color:var(--ink);font-weight:600}
+.secret-row .mut{color:var(--faint);flex:1}
+#secretName,#secretValue{width:100%;background:var(--void);border:1px solid var(--line2);
+  border-radius:8px;padding:8px 11px;color:var(--ink);font:500 12.5px var(--mono)}
+#secretName:focus,#secretValue:focus{outline:2px solid var(--blue);outline-offset:1px}
 @media(max-width:700px){.grid2{grid-template-columns:1fr}}
 
 /* ── project switcher (launcher proxy — hidden when no launcher is in front) */
@@ -2586,6 +2594,14 @@ function loadSettings(){
         <div class=field><label>knowledge — JSON: refresh ("manual"|"auto"), stale_after_merges, timeout_seconds</label>
           <textarea id="set-knowledge" spellcheck="false">${esc(JSON.stringify(c.knowledge||{},null,2))}</textarea>
           <div class=hint>leave as {} to opt out — controls the every-cycle knowledge-base staleness check</div></div></div>
+      <div class=setcard><h3>Secrets</h3>
+        <div id="secretsList" class=secrets-list>Loading…</div>
+        <div class=grid2>
+          <input id="secretName" placeholder="NAME (e.g. METAQL_TOKEN)" spellcheck="false" autocapitalize="off">
+          <input id="secretValue" placeholder="value" type="password" spellcheck="false" autocapitalize="off">
+        </div>
+        <button class="btn btn-go btn-mini" style="margin-top:8px" onclick="addSecret()">Add</button>
+        <div class=hint>Used for MCP tokens (e.g. METAQL_TOKEN). The loop sources this file; values are never shown again.</div></div>
       <div class=setcard><h3>Advanced</h3>
         ${txt('spec','Standing spec file',c.spec||'','reread by the agent each cycle')}
         ${txt('commit_trailer','Commit trailer',c.commit_trailer||'')}</div>
@@ -2596,7 +2612,32 @@ function loadSettings(){
         <button class="btn btn-amber" onclick="if(confirm('Restart the loop to apply saved config? Any in-flight cycle is aborted.'))post('/restart-loop',{})">Restart loop</button>
         <button class="btn" onclick="if(confirm('Restart the dashboard? The page will blink — hard-refresh after ~2s.'))post('/restart-dashboard',{})">Restart dashboard</button>
         <span class=set-meta>Save writes config.yaml · Restart loop applies it to the running loop</span></div>`;
+    loadSecrets();
   }).catch(e=>{document.getElementById('settingsBody').innerHTML=`<div class=empty>Could not load settings: ${esc(String(e))}</div>`;});
+}
+function loadSecrets(){
+  const list=document.getElementById('secretsList');if(!list)return;
+  fetch('/api/secrets',{headers:{'X-CC-Token':TOKEN}}).then(r=>r.json()).then(function(d){
+    const secrets=d.secrets||[];
+    list.innerHTML=secrets.length?secrets.map(s=>
+      `<div class=secret-row><code>${esc(s.name)}</code><span class=mut>${esc(s.preview)}</span>`+
+      `<button class="btn btn-stop btn-mini" onclick="deleteSecret('${escJsAttr(s.name)}')">Delete</button></div>`
+    ).join(''):'<div class=empty>No secrets set.</div>';
+  }).catch(e=>{list.innerHTML=`<div class=empty>Could not load secrets: ${esc(String(e))}</div>`;});
+}
+function addSecret(){
+  const nameEl=document.getElementById('secretName'),valEl=document.getElementById('secretValue');
+  const name=nameEl.value.trim(),value=valEl.value;
+  if(!name){toast('Name required');return;}
+  postJSON('/api/secrets',{set:{[name]:value}}).then(j=>{
+    toast(j.msg||'saved');
+    nameEl.value='';valEl.value='';
+    loadSecrets();
+  }).catch(e=>toast('Save failed: '+e));
+}
+function deleteSecret(name){
+  if(!confirm(`Delete secret ${name}?`))return;
+  postJSON('/api/secrets',{delete:[name]}).then(j=>{toast(j.msg||'deleted');loadSecrets();}).catch(e=>toast('Delete failed: '+e));
 }
 function saveSettings(){
   const blocks={};

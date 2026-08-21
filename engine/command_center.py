@@ -3054,6 +3054,98 @@ def do_save_config(raw: str) -> str:
     return "✓ Saved config.yaml. Use 'Restart loop' to apply it to the running loop."
 
 
+# ── secrets (.autopilot/.secrets.env) ─────────────────────────────────────
+# MCP tokens the loop needs at runtime (e.g. METAQL_TOKEN) but that must never
+# round-trip through config.yaml (committed) or the dashboard's state poll.
+# File format is a contract shared with two other readers: engine/doctor.py's
+# _secrets_env (bare KEY=VALUE, no quotes, no export) and the loop's own shell
+# sourcing of this file — so the writer below must emit exactly that.
+_SECRETS_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_SECRETS_LOCK = threading.Lock()  # ThreadingHTTPServer: guards concurrent writers
+
+
+def _secrets_path() -> Path:
+    return AP_HOME / ".secrets.env"
+
+
+def _read_secrets_env() -> dict:
+    """Parse .autopilot/.secrets.env as KEY=VALUE lines — same tolerant format
+    doctor.py's _secrets_env reads (ignore blanks/comments, split on first '=')."""
+    out = {}
+    path = _secrets_path()
+    if path.exists():
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
+def _atomic_write_secrets(secrets_map: dict) -> None:
+    """Write secrets_map as bare KEY=VALUE lines to .secrets.env, atomically and
+    at mode 0600 throughout (the temp file too — a crash between os.open and
+    os.replace must never leave a world-readable temp copy of these values
+    lying next to the real file)."""
+    path = _secrets_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    body = "".join(f"{k}={v}\n" for k, v in sorted(secrets_map.items()))
+    fd = os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    try:
+        os.chmod(str(tmp), 0o600)  # belt-and-suspenders against an umask widening the open() mode
+        with os.fdopen(fd, "w") as f:
+            f.write(body)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+    os.replace(str(tmp), str(path))  # same-dir rename — atomic, no partial-file window
+
+
+def secrets_payload() -> dict:
+    """GET /api/secrets — name + short preview only. Full values are NEVER
+    returned once saved (that's the whole point of a secrets store)."""
+    out = []
+    for name, value in sorted(_read_secrets_env().items()):
+        preview = f"{value[:2]}...{value[-2:]}" if len(value) >= 6 else "set"
+        out.append({"name": name, "preview": preview})
+    return {"secrets": out}
+
+
+def do_save_secrets(payload: dict) -> str:
+    """POST /api/secrets {"set": {NAME: value, ...}, "delete": [NAME, ...]}.
+    Validates everything BEFORE writing anything (a rejected payload leaves
+    the file untouched, never partially applied). Values are never logged —
+    only names appear in returned/raised messages."""
+    if not isinstance(payload, dict):
+        return "Rejected — payload must be an object"
+    to_set = payload.get("set") or {}
+    to_delete = payload.get("delete") or []
+    if not isinstance(to_set, dict):
+        return "Rejected — 'set' must be an object of NAME -> value"
+    if not isinstance(to_delete, list):
+        return "Rejected — 'delete' must be a list of names"
+    names = list(to_set.keys()) + [str(n) for n in to_delete]
+    bad = sorted({str(n) for n in names if not _SECRETS_NAME_RE.match(str(n))})
+    if bad:
+        return "Rejected — invalid secret name(s): " + ", ".join(bad) + " (must match ^[A-Z][A-Z0-9_]*$)"
+    for name, value in to_set.items():
+        if not isinstance(value, str) or "\n" in value or "\r" in value:
+            return f"Rejected — value for {name} must be a single line"
+    with _SECRETS_LOCK:
+        current = _read_secrets_env()
+        for name in to_delete:
+            current.pop(str(name), None)
+        for name, value in to_set.items():
+            current[name] = value
+        _atomic_write_secrets(current)
+    return f"Saved {len(to_set) + len(to_delete)} secret(s)"
+
+
 def do_restart(label: str, delay: float = 0) -> str:
     """Restart an orbit launchd service via kickstart. Guarded to com.orbit.* labels.
     A delay lets the HTTP response return before the dashboard restarts itself."""
@@ -3597,6 +3689,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(json.dumps(build_state()).encode(), "application/json")
         elif path == "/api/config":
             self._send(json.dumps(config_payload()).encode(), "application/json")
+        elif path == "/api/secrets":
+            # Read-only like /api/config — host-checked above, token-less, and
+            # MUST NEVER return a full value (see secrets_payload's masking).
+            self._send(json.dumps(secrets_payload()).encode(), "application/json")
         elif path == "/api/cycletail":
             self._send(json.dumps(cycletail()).encode(), "application/json")
         elif path == "/api/cmdlog":
@@ -3816,6 +3912,14 @@ class Handler(BaseHTTPRequestHandler):
                 msg = do_delete_branches_bulk((data.get("kind", [""])[0]).strip())
             elif path == "/api/config":
                 msg = do_save_config(raw)
+            elif path == "/api/secrets":
+                # JSON body (postJSON), same posture as /api/config's raw-body
+                # JSON parsing — {"set": {...}, "delete": [...]}.
+                try:
+                    payload = json.loads(raw) if raw else {}
+                except Exception:
+                    payload = {}
+                msg = do_save_secrets(payload)
             elif path == "/restart-loop":
                 msg = do_restart(LAUNCHD_LABEL)
             elif path == "/restart-dashboard":
