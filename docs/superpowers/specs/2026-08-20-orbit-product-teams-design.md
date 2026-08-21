@@ -25,6 +25,8 @@ Three references shaped it:
 6. **gstack**: reference only. Replicate needed skills natively in Orbit.
 7. **Parallelism**: multiple products in parallel via a Chrome-style tab UI in the launcher, and concurrent tasks within one workspace.
 8. **Tabs are dashboard-only in v1**. Interactive chat stays in the terminal. An embedded web chat is a v2 candidate.
+9. **The dashboard is the PM's control surface** (added 2026-08-21): everything a PM needs to operate Orbit is configurable in the UI — workspace creation from the launcher, MCP servers and tokens, backlog/task entry, PRD gates, metric watches, publish settings. The CLI remains the power path; no feature may be UI-only for the operator, and no PM flow may require the terminal after initial install.
+10. **Token delivery** (added 2026-08-21, supersedes the M1 "Keychain is M2" placeholder): secrets live in `<target>/.autopilot/.secrets.env` (0600, gitignored alongside `.jira_token`), written by the dashboard's settings UI or by hand. `run.sh` sources it at each iteration start, so interactive runs and launchd/systemd services get the same environment. Doctor validates presence of every `token_env` named in `mcp:`. Keychain integration stays optional-later.
 
 ## Design
 
@@ -147,12 +149,23 @@ Publish adapters run engine-side, gated on recorded human approval (PR merged or
 - `jira_publish`: validated finding to a formatted ticket with evidence and INR impact.
 - Optional Slack summary.
 
-### 12. Dashboard additions
+### 12. Dashboard as the PM control surface
 
-In the existing `command_center.py` single-file pattern:
-a PRD pipeline view (stage progress, stamps, eval verdicts, gate buttons),
-an artifact browser (rendered markdown of insights and PRDs with diffs),
-and survey and metric-watch status.
+In the existing `command_center.py` single-file pattern, per decision 9.
+
+Configuration (PM gives details in the UI; Orbit works automatically):
+
+- A product settings panel: structured form over the profile's product fields (MCP servers with transport/url/tools allowlist, workable categories, interval, concurrency) that round-trips through `config.py validate` before saving.
+- A secrets panel writing `.autopilot/.secrets.env` (values masked in the UI, never echoed back in full).
+- Insight/task quick-add: a PM-friendly form (question, cohort, time window, acceptance criteria template) that appends via `backlog_append.py`.
+- Workspace creation from the launcher: name a product, pick a folder, and the launcher runs `init --product` and registers the project.
+
+Views:
+
+- PRD pipeline view: stage progress, stamps, eval verdicts, gate buttons (approve scope, request revision), per-run audit trail.
+- Artifact browser: rendered markdown of insights, PRDs, and survey reports, with diffs.
+- Metric-watch status and survey run status.
+- Per-tab loop start/stop/pause with status badges (section 10).
 
 ### 13. Testing and rollout
 
@@ -160,11 +173,11 @@ Every engine piece gets pytest coverage in the existing hermetic style, with env
 
 Build order:
 
-- **M1**: MCP seam, workspace template, `orbit-insight`. First PM value.
-- **M2**: PRD pipeline and review gate.
-- **M3**: funnel and hypothesis skills, metric watches, surveys.
-- **M4**: parallelism and tabs.
-- **M5**: Figma read-side, publish adapters, `orbit doctor --product` installer hardening (no bun, Playwright install, Keychain checks).
+- **M1**: MCP seam, workspace template, `orbit-insight`. First PM value. (Shipped 2026-08-21, merge c6e67c5.)
+- **M2**: PRD pipeline and review gate; secrets file + `run.sh` sourcing (decision 10); dashboard: PRD pipeline view, product settings panel, secrets panel, insight quick-add.
+- **M3**: funnel and hypothesis skills, metric watches, surveys; native browse/scrape layer (section 8); dashboard: watch and survey status, artifact browser.
+- **M4**: parallelism and tabs (launcher becomes the process manager, workspace creation from the launcher).
+- **M5**: Figma read-side, publish adapters, `orbit doctor --product` installer hardening (Playwright install checks, secrets checks).
 
 Pilot: Arun plus one PM on one real product.
 
