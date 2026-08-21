@@ -101,3 +101,77 @@ def test_delete_removes_key_and_preserves_others(cc):
     content = _secrets_file(cc).read_text()
     assert "DROP_ME" not in content
     assert "KEEP_ME=keepvalue" in content
+
+
+def test_reserved_name_path_rejected(cc):
+    # A metacharacter-free VALUE isn't enough — run.sh's parse loop exports
+    # whatever name/value it reads, so PATH=/tmp/evil poisons every bare
+    # python3/git/gh call the loop makes on its next restart. No shell
+    # metacharacters required: this is RCE via name alone.
+    msg = cc.do_save_secrets({"set": {"PATH": "/tmp/evil"}})
+    assert "reserved" in msg.lower()
+    assert "PATH" in msg
+    assert not _secrets_file(cc).exists()
+
+
+def test_reserved_prefix_ld_preload_rejected(cc):
+    msg = cc.do_save_secrets({"set": {"LD_PRELOAD": "/tmp/evil.so"}})
+    assert "reserved" in msg.lower()
+    assert not _secrets_file(cc).exists()
+
+    # The prefix block also applies on the delete side (deleting a reserved
+    # name is harmless in practice, but the guard should not need to
+    # distinguish set vs delete to stay simple and obviously correct).
+    msg2 = cc.do_save_secrets({"delete": ["DYLD_INSERT_LIBRARIES"]})
+    assert "reserved" in msg2.lower()
+
+
+def test_metaql_token_still_accepted_alongside_reserved_name_guard(cc):
+    msg = cc.do_save_secrets({"set": {"METAQL_TOKEN": "sk-abc123"}})
+    assert msg == "Saved 1 secret(s)"
+    assert _secrets_file(cc).read_text() == "METAQL_TOKEN=sk-abc123\n"
+
+
+# ── mcp config card (Task 8) ──────────────────────────────────────────────
+# mcp joins the gates/qa JSON-textarea family in the Admin panel:
+# _validate_config only checks shape (must be a dict) — deep validation
+# (transport, url/command, tools) stays in config.py's own `validate`, which
+# do_save_config already shells out to post-write, rolling the file back to
+# its exact prior bytes on failure.
+
+def test_do_save_config_accepts_valid_mcp_block(cc):
+    payload = {"mcp": {"metaql": {"transport": "http", "url": "http://localhost:9999", "tools": "*"}}}
+    msg = cc.do_save_config(json.dumps(payload))
+    assert msg.startswith("✓ Saved")
+    saved = cc._load_cfg()
+    assert saved["mcp"] == payload["mcp"]
+
+
+def test_do_save_config_rejects_http_mcp_server_without_url_and_rolls_back(cc):
+    cfg_path = Path(cc.AP_HOME) / "config.yaml"
+    before = cfg_path.read_text()
+    payload = {"mcp": {"metaql": {"transport": "http", "tools": "*"}}}
+    msg = cc.do_save_config(json.dumps(payload))
+    assert msg.startswith("Rejected")
+    assert "mcp.metaql.url is required for http transport" in msg
+    assert cfg_path.read_text() == before   # byte-identical rollback
+
+
+# ── insight quick-add (Task 8) ────────────────────────────────────────────
+# The quick-add button is pure JS prefill in the browser — the server side
+# is exactly do_task_new. category=insight is in KNOWN_CATEGORIES and SAFE
+# (via EMITTABLE), so queue=1 lands autopilot: allow the same way any other
+# SAFE category does.
+
+def test_task_new_insight_with_queue_lands_queued_and_allow(cc):
+    (Path(cc.AP_HOME) / "backlog.yaml").write_text("tasks:\n")
+    msg = cc.do_task_new(
+        "insight-q3-churn", "Q3 churn drivers", "insight", "medium", "",
+        "insights/ doc passes insight_lint (Answer + Basis, every number cited)",
+        queue_now=True,
+    )
+    assert msg.startswith("Created insight-q3-churn")
+    text = (Path(cc.AP_HOME) / "backlog.yaml").read_text()
+    assert "category: insight" in text
+    assert "status: queued" in text
+    assert "autopilot: allow" in text

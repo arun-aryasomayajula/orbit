@@ -595,6 +595,7 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
     <button class="btn" id="loopBtn" onclick="toggleLoop()">…</button>
     <button class="btn btn-ghost" id="feedBtn" onclick="toggleFeed()" title="When on, the loop promotes the next safe task itself whenever the queue runs dry.">Auto-feed</button>
     <button class="btn btn-ghost" onclick="newTaskForm()" title="create a backlog task right here — no YAML editing">＋ New task</button>
+    <button class="btn btn-ghost" onclick="newInsightForm()" title="quick-add an insights/ task — category, acceptance criteria, and queueing pre-filled">💡 New insight</button>
     <button class="btn btn-ghost" onclick="reapStalled()" title="escalate tasks stuck mid-cycle (claimed/committed by a dead cycle) onto the gates — the loop does this each iteration, but a paused loop can't">🧹 Reap stalled</button>
     <div class="meter" id="budgetMeter"></div>
   </div>
@@ -842,8 +843,8 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
   <h3 id="m5title"></h3>
   <div class="m3ctx" id="m5hint"></div>
   <div style="display:flex;flex-direction:column;gap:6px">
-    <input id="tfId" class="tfin" placeholder="id — lowercase slug, e.g. fix-login-timeout" autocomplete="off">
-    <input id="tfTitle" class="tfin" placeholder="title — what done looks like, in one line" autocomplete="off">
+    <input id="tfId" class="tfin" placeholder="id — lowercase slug, e.g. fix-login-timeout" autocomplete="off" oninput="tfIdAuto=false">
+    <input id="tfTitle" class="tfin" placeholder="title — what done looks like, in one line" autocomplete="off" oninput="_tfAutoSlug()">
     <div style="display:flex;gap:6px">
       <select id="tfCat" class="tfin" style="flex:1"></select>
       <select id="tfPri" class="tfin" style="width:130px">
@@ -2387,12 +2388,23 @@ function closeModal4(){document.getElementById('modal4').style.display='none';}
 
 /* ── task create/edit form (modal5) ─────────────────────────────────────── */
 let tfMode='new';
+// True while the id field still holds whatever _tfAutoSlug derived from the
+// title — i.e. the user hasn't typed into #tfId themselves. Any keystroke in
+// #tfId (see its oninput) turns this off for the rest of the form's life, so
+// autopilot slug suggestions never clobber a manually-chosen id.
+let tfIdAuto=true;
+function _slugify(s){
+  return String(s||'').toLowerCase().trim().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,80);
+}
+function _tfAutoSlug(){
+  if(tfMode==='new'&&tfIdAuto)document.getElementById('tfId').value=_slugify(document.getElementById('tfTitle').value);
+}
 function _catOptions(sel){
   return ((S&&S.categories)||['bug','feature','refactor','testing','documentation']).map(c=>
     `<option${c===sel?' selected':''}>${esc(c)}</option>`).join('');
 }
 function newTaskForm(){
-  tfMode='new';
+  tfMode='new'; tfIdAuto=true;
   document.getElementById('m5title').textContent='＋ New task';
   document.getElementById('m5hint').textContent='Same bar as the lint gate: a known category and at least one acceptance criterion — a task the verifier can actually grade.';
   document.getElementById('tfId').value=''; document.getElementById('tfId').disabled=false;
@@ -2403,6 +2415,20 @@ function newTaskForm(){
   document.getElementById('tfQueueRow').style.display='';
   document.getElementById('modal5').style.display='flex';
   document.getElementById('tfId').focus();
+}
+function newInsightForm(){
+  // Same modal, pre-filled for the insights/ workflow: category insight, one
+  // acceptance-criteria template line matching insight_lint's own bar
+  // (Answer + Basis, every number cited), and queued on by default since an
+  // insight write-up is safe/human-reviewed-after-the-fact (category is in
+  // SAFE — see command_center.py) rather than something that needs triage.
+  newTaskForm();
+  document.getElementById('m5title').textContent='💡 New insight';
+  document.getElementById('m5hint').textContent='Pre-filled for insights/ — pick a category, then edit the title; id follows the title until you edit it yourself.';
+  document.getElementById('tfCat').innerHTML=_catOptions('insight');
+  document.getElementById('tfAcc').value='insights/ doc passes insight_lint (Answer + Basis, every number cited)';
+  document.getElementById('tfQueue').checked=true;
+  document.getElementById('tfTitle').focus();
 }
 function editTaskForm(id){
   const t=findTask(id); if(!t||!t.title||t.title===id&&!t.category){toast('task not found');return;}
@@ -2594,6 +2620,10 @@ function loadSettings(){
         <div class=field><label>knowledge — JSON: refresh ("manual"|"auto"), stale_after_merges, timeout_seconds</label>
           <textarea id="set-knowledge" spellcheck="false">${esc(JSON.stringify(c.knowledge||{},null,2))}</textarea>
           <div class=hint>leave as {} to opt out — controls the every-cycle knowledge-base staleness check</div></div></div>
+      <div class=setcard><h3>MCP <span style="font-weight:500;text-transform:none;letter-spacing:0">(optional)</span></h3>
+        <div class=field><label>mcp — JSON: server name → { transport, url|command, token_env, tools }</label>
+          <textarea id="set-mcp" spellcheck="false">${esc(JSON.stringify(c.mcp||{},null,2))}</textarea>
+          <div class=hint>leave as {} to opt out — transport is "http" (needs url) or "stdio" (needs command); tools is "*" or a list of names; token_env names a secret set below. Deep validation runs on save.</div></div></div>
       <div class=setcard><h3>Secrets</h3>
         <div id="secretsList" class=secrets-list>Loading…</div>
         <div class=grid2>
@@ -2601,7 +2631,7 @@ function loadSettings(){
           <input id="secretValue" placeholder="value" type="password" spellcheck="false" autocapitalize="off">
         </div>
         <button class="btn btn-go btn-mini" style="margin-top:8px" onclick="addSecret()">Add</button>
-        <div class=hint>Used for MCP tokens (e.g. METAQL_TOKEN). Values may contain only letters, digits, and _-./:+=@,~ (no spaces or shell metacharacters). The loop parses this file — it is never executed as shell — and values are never shown again.</div></div>
+        <div class=hint>Used for MCP tokens (e.g. METAQL_TOKEN). Values may contain only letters, digits, and _-./:+=@,~ (no spaces or shell metacharacters). Names like PATH/LD_* are reserved. The loop parses this file — it is never executed as shell — and values are never shown again.</div></div>
       <div class=setcard><h3>Advanced</h3>
         ${txt('spec','Standing spec file',c.spec||'','reread by the agent each cycle')}
         ${txt('commit_trailer','Commit trailer',c.commit_trailer||'')}</div>
@@ -2641,9 +2671,10 @@ function deleteSecret(name){
 }
 function saveSettings(){
   const blocks={};
-  for(const id of ['gates','qa','plan','knowledge']){
+  const labels={gates:'Gates',qa:'QA',plan:'Plan',knowledge:'Knowledge',mcp:'MCP'};
+  for(const id of ['gates','qa','plan','knowledge','mcp']){
     try{blocks[id]=JSON.parse(document.getElementById('set-'+id).value||'{}');}
-    catch(e){toast((id==='gates'?'Gates':id[0].toUpperCase()+id.slice(1))+' is not valid JSON: '+e.message);return;}
+    catch(e){toast(labels[id]+' is not valid JSON: '+e.message);return;}
   }
   const v=id=>document.getElementById('set-'+id).value.trim();
   const n=id=>parseInt(document.getElementById('set-'+id).value,10);
@@ -2653,7 +2684,7 @@ function saveSettings(){
     interval_seconds:n('interval_seconds'),max_tasks_per_day:n('max_tasks_per_day'),cycle_timeout_seconds:n('cycle_timeout_seconds'),
     sources:collectChecks('sources'),workable_categories:collectChecks('workable_categories'),
     spec:v('spec'),commit_trailer:v('commit_trailer'),gates:blocks.gates,qa:blocks.qa,plan:blocks.plan,knowledge:blocks.knowledge,
-    pull_requests:v('pull_requests')
+    mcp:blocks.mcp,pull_requests:v('pull_requests')
   };
   postJSON('/api/config',payload).then(j=>toast(j.msg||'saved')).catch(e=>toast('Save failed: '+e));
 }

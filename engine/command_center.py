@@ -2968,6 +2968,8 @@ def _validate_config(d: dict) -> list:
             for name, spec in g.items():
                 if not isinstance(spec, dict) or not str(spec.get("cmd", "")).strip():
                     errs.append(f"gate '{name}' needs a non-empty cmd")
+    if "mcp" in d and d["mcp"] is not None and not isinstance(d["mcp"], dict):
+        errs.append("mcp must be an object of server-name -> {transport, url/command, tools}")
     return errs
 
 
@@ -3071,6 +3073,17 @@ _SECRETS_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 # (dots/dashes/underscores), URLs, and file paths — nothing that a shell would
 # treat specially ($, `, ;, |, &, quotes, whitespace, newlines are all out).
 _SECRETS_VALUE_RE = re.compile(r"^[A-Za-z0-9_\-./:+=@,~]+$")
+# A metacharacter-free VALUE isn't enough: a crafted NAME can be just as
+# dangerous with no metacharacters at all. run.sh's parse loop `export`s
+# whatever name/value pair it reads, so a saved PATH=/tmp/evil silently
+# poisons every bare `python3`/`git`/`gh` call the loop makes on its next
+# restart — that's RCE via name alone, no shell metacharacters required.
+# Block the interpreter/shell variables an attacker would reach for, plus
+# this process's own AP_HOME/AP_STATE/ORBIT_HOME (overriding those would let
+# a "secret" redirect the loop at a different config/state tree entirely).
+_SECRETS_NAME_DENY = {"PATH", "IFS", "ENV", "BASH_ENV", "SHELL", "HOME", "PS4", "CDPATH",
+                      "PYTHONPATH", "PYTHONSTARTUP", "AP_HOME", "AP_STATE", "ORBIT_HOME"}
+_SECRETS_PREFIX_DENY = ("LD_", "DYLD_", "BASH_")
 _SECRETS_LOCK = threading.Lock()  # ThreadingHTTPServer: guards concurrent writers
 
 
@@ -3143,6 +3156,9 @@ def do_save_secrets(payload: dict) -> str:
     bad = sorted({str(n) for n in names if not _SECRETS_NAME_RE.match(str(n))})
     if bad:
         return "Rejected — invalid secret name(s): " + ", ".join(bad) + " (must match ^[A-Z][A-Z0-9_]*$)"
+    reserved = sorted({n for n in names if n in _SECRETS_NAME_DENY or n.startswith(_SECRETS_PREFIX_DENY)})
+    if reserved:
+        return "Rejected — reserved variable name: " + ", ".join(reserved)
     for name, value in to_set.items():
         if not isinstance(value, str) or not _SECRETS_VALUE_RE.match(value):
             # Never echo the value back — name only. This also rejects
