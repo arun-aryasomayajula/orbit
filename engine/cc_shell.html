@@ -651,6 +651,8 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
   <section class="view" id="view-deepspace">
     <div id="epicsBand"></div>
     <div id="prdBand"></div>
+    <div id="artifactsBand"></div>
+    <div id="watchesBand"></div>
     <div id="calibrationBand"></div>
     <div class="chips" id="filterbar"></div>
     <div class="ds-wrap">
@@ -1380,6 +1382,49 @@ function renderPrd(){
     <span class=bandsum>intake → approve scope → research → synthesis → draft → review → approve PRD → done</span>
     <button class="btn btn-mini" style="margin-left:auto" onclick="newPrd()">+ New PRD</button></div>
     <div class=grid>${rs.length?rs.map(prdCard).join(''):'<div class=meta style="padding:8px 0">No PRD runs yet - start one above.</div>'}</div></div>`;
+}
+
+/* ── product artifact browser (Task 7): insights/*.md, signed PRD drafts, survey reports ─ */
+function artifactRow(label,url,name){
+  return `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0">
+    <span>${esc(name)}</span>
+    <button class="btn btn-mini" onclick="openText('${escJsAttr(label)}','${url}',false)">View</button></div>`;
+}
+function artifactGroup(title,rowsHtml){
+  return rowsHtml?`<div class=meta style="margin-top:10px"><b>${esc(title)}</b></div>${rowsHtml}`:'';
+}
+function renderArtifacts(){
+  const band=document.getElementById('artifactsBand');if(!band)return;
+  if(!S||(!('insight_docs' in S)&&!('prd' in S)&&!('surveys' in S))){band.innerHTML='';return;}
+  const insights=(S.insight_docs)||[];
+  const prds=((S.prd)||[]).filter(r=>(r.stages||[]).some(s=>s.name==='draft'&&s.stamped_at));
+  const surveys=((S.surveys)||[]).filter(s=>s.has_report);
+  const insightRows=insights.map(n=>artifactRow(n,`/product-artifact?kind=insight&name=${encodeURIComponent(n)}`,n)).join('');
+  const prdRows=prds.map(r=>artifactRow(`PRD draft - ${r.run_id}`,`/prd-artifact?run=${encodeURIComponent(r.run_id)}&file=04-prd.md`,r.title||r.run_id)).join('');
+  const surveyRows=surveys.map(s=>artifactRow(`Survey report - ${s.name}`,`/product-artifact?kind=survey&name=${encodeURIComponent(s.name)}`,s.name)).join('');
+  const body=artifactGroup('Insights',insightRows)+artifactGroup('PRDs',prdRows)+artifactGroup('Survey reports',surveyRows);
+  band.innerHTML=`<div class=band><div class=bandhead><h3>Product artifacts</h3>
+    <span class=bandsum>insights, signed-off PRD drafts, and survey reports - one click to read</span></div>
+    <div>${body||'<div class=meta style="padding:8px 0">Nothing to show yet.</div>'}</div></div>`;
+}
+
+/* ── watches band: standing metric questions re-filed on a cadence ──────── */
+function watchCard(w){
+  const lastFiled=w.last_filed?esc(w.last_filed):'never filed';
+  const task=w.task_id?`<span class=meta>${esc(w.task_id)} - ${esc(w.task_status||'')}</span>`
+                       :'<span class=meta>no task filed yet</span>';
+  return `<div class=card><div class="card-h"><span class=tid>${esc(w.name)}</span> ${badge(w.category||'insight','muted')}</div>
+    <div class=title>${esc(w.question)}</div>
+    <div class=meta>cadence: every ${esc(String(w.cadence_hours))}h - last filed: ${lastFiled}</div>
+    <div class=meta>${task}</div></div>`;
+}
+function renderWatches(){
+  const band=document.getElementById('watchesBand');if(!band)return;
+  if(!S||!('watches' in S)){band.innerHTML='';return;}
+  const ws=S.watches||[];
+  band.innerHTML=`<div class=band><div class=bandhead><h3>Watches - standing metric questions</h3>
+    <span class=bandsum>re-filed into a fresh insight past cadence - see .autopilot/config.yaml watches:</span></div>
+    <div class=grid>${ws.length?ws.map(watchCard).join(''):'<div class=meta style="padding:8px 0">No watches configured.</div>'}</div></div>`;
 }
 
 /* ── calibration strip: the goldens learning loop's human gate ───────────── */
@@ -2814,12 +2859,12 @@ document.addEventListener('click',e=>{
 });
 
 /* ── render pipeline ────────────────────────────────────────────────────── */
-function sig(r){return JSON.stringify([r.running,r.next_up,r.done,r.board,r.skipped,r.escalated,r.runlog,r.history,r.funnel,r.feature_builds,r.spend_history,r.branches,r.epics,r.qa_flows,r.qa_services,r.onboarding,r.prd]);}
+function sig(r){return JSON.stringify([r.running,r.next_up,r.done,r.board,r.skipped,r.escalated,r.runlog,r.history,r.funnel,r.feature_builds,r.spend_history,r.branches,r.epics,r.qa_flows,r.qa_services,r.onboarding,r.prd,r.watches,r.surveys,r.insight_docs]);}
 function renderViews(){
   // Preserve column scroll positions across rebuilds.
   const colsEl=document.getElementById('queueCols');
   const scrolls=[...colsEl.querySelectorAll('.col')].map(c=>c.scrollTop);
-  renderStats();renderInboxAll();renderFilters();renderEpics();renderPrd();renderCalibration();renderDeepspace();renderQueue();renderShips();renderBranches();renderAgents();renderQa();
+  renderStats();renderInboxAll();renderFilters();renderEpics();renderPrd();renderArtifacts();renderWatches();renderCalibration();renderDeepspace();renderQueue();renderShips();renderBranches();renderAgents();renderQa();
   renderKpis();renderSpend();renderHistory();renderFunnel();renderRunlog();renderOnboarding();renderKnowledge();
   [...colsEl.querySelectorAll('.col')].forEach((c,i)=>{if(scrolls[i])c.scrollTop=scrolls[i];});
 }

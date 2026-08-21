@@ -466,6 +466,130 @@ def test_shell_asks_a_second_question_before_approving_a_pii_scope(cc):
     assert "r.pii_touch" in shell
 
 
+# ── watches / surveys / insight_docs (Task 7) ──────────────────────────────
+# build_state's absent-unless-configured trio: watches_state (config
+# `watches:` + $AP_STATE/watches.json + the newest watch-<name>-* backlog
+# task), surveys_state (surveys/*/ subdirs), insight_docs_state
+# (insights/*.md), plus the confined /product-artifact GET for the two
+# families /prd-artifact doesn't cover.
+
+def test_watches_surveys_insight_docs_absent_when_unconfigured(cc):
+    s = cc.build_state()
+    assert "watches" not in s
+    assert "surveys" not in s
+    assert "insight_docs" not in s
+    assert cc.watches_state([]) is None
+    assert cc.surveys_state() is None
+    assert cc.insight_docs_state() is None
+
+
+def _write_watches_config(cc, watches):
+    import yaml
+    cfg_path = Path(cc.AP_HOME) / "config.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text()) or {}
+    cfg["watches"] = watches
+    cfg_path.write_text(yaml.safe_dump(cfg))
+
+
+def test_watches_state_shape_no_task_filed_yet(cc):
+    _write_watches_config(cc, [{"name": "wow-signup", "question": "What changed WoW?",
+                                "cadence_hours": 168, "category": "insight"}])
+    ws = cc.watches_state([])
+    assert ws == [{"name": "wow-signup", "question": "What changed WoW?",
+                   "cadence_hours": 168, "category": "insight", "last_filed": None}]
+    s = cc.build_state()
+    assert s["watches"] == ws
+
+
+def test_watches_state_joins_last_filed_and_latest_backlog_task(cc):
+    _write_watches_config(cc, [{"name": "wow-signup", "question": "What changed WoW?"}])
+    (Path(cc.AP_STATE) / "watches.json").write_text(
+        json.dumps({"wow-signup": "2026-08-10T00:00:00+00:00"}))
+    backlog = [
+        {"id": "watch-wow-signup-20260803", "status": "proposed"},
+        {"id": "watch-wow-signup-20260810", "status": "queued"},   # newest by id - wins
+        {"id": "watch-other-watch-20260811", "status": "proposed"},   # different watch - ignored
+    ]
+    ws = cc.watches_state(backlog)
+    assert len(ws) == 1
+    w = ws[0]
+    assert w["last_filed"] == "2026-08-10T00:00:00+00:00"
+    assert w["task_id"] == "watch-wow-signup-20260810"
+    assert w["task_status"] == "queued"
+    # defaults applied when the config omits them
+    assert w["cadence_hours"] == 168
+    assert w["category"] == "insight"
+
+
+def test_watches_state_tolerates_corrupt_state_file(cc):
+    _write_watches_config(cc, [{"name": "wow-signup", "question": "q"}])
+    (Path(cc.AP_STATE) / "watches.json").write_text("not json{")
+    ws = cc.watches_state([])
+    assert ws[0]["last_filed"] is None
+    s = cc.build_state()   # must not raise
+    assert "watches" in s
+
+
+def test_surveys_state_absent_without_surveys_dir_present_with_shape(cc):
+    root = Path(cc.REPO) / "surveys" / "pilot"
+    (root / "raw").mkdir(parents=True)
+    (root / "raw" / "responses.csv").write_text("q1,q2\n")
+    (root / "raw" / "responses2.csv").write_text("q1,q2\n")
+    (root / "questionnaire.md").write_text("# Pilot\n")
+
+    surveys = cc.surveys_state()
+    assert surveys == [{"name": "pilot", "has_questionnaire": True,
+                        "raw_count": 2, "has_report": False}]
+    s = cc.build_state()
+    assert s["surveys"] == surveys
+
+    (root / "report.md").write_text("# Pilot\n## Answer\n## Basis\n")
+    assert cc.surveys_state()[0]["has_report"] is True
+
+
+def test_insight_docs_state_absent_without_insights_dir_present_with_stems(cc):
+    root = Path(cc.REPO) / "insights"
+    root.mkdir()
+    (root / "wow-signup.md").write_text("# WoW signup\n")
+    (root / "funnel-drop.md").write_text("# Funnel drop\n")
+
+    docs = cc.insight_docs_state()
+    assert docs == ["funnel-drop", "wow-signup"]
+    s = cc.build_state()
+    assert s["insight_docs"] == docs
+
+
+def test_product_artifact_serves_seeded_insight_and_survey_report(cc):
+    ir = Path(cc.REPO) / "insights"
+    ir.mkdir()
+    (ir / "wow-signup.md").write_text("# WoW signup\n## Answer\nit went up\n## Basis\n- S1: data\n")
+
+    sr = Path(cc.REPO) / "surveys" / "pilot"
+    sr.mkdir(parents=True)
+    (sr / "report.md").write_text("# Pilot\n## Answer\nfound X\n## Basis\n- S1: data\n")
+
+    body = cc.read_product_artifact("insight", "wow-signup")
+    assert body is not None and "WoW signup" in body
+
+    body2 = cc.read_product_artifact("survey", "pilot")
+    assert body2 is not None and "Pilot" in body2
+
+
+def test_product_artifact_rejects_traversal_unknown_kind_and_missing(cc):
+    ir = Path(cc.REPO) / "insights"
+    ir.mkdir()
+    (ir / "real.md").write_text("# Real\n")
+
+    assert cc.read_product_artifact("insight", "../secret") is None
+    assert cc.read_product_artifact("insight", "../../etc/passwd") is None
+    assert cc.read_product_artifact("insight", "..") is None
+    assert cc.read_product_artifact("bogus", "real") is None
+    assert cc.read_product_artifact("survey", "nope") is None
+    assert cc.read_product_artifact("insight", "not-real") is None
+    # a real name still resolves
+    assert cc.read_product_artifact("insight", "real") is not None
+
+
 def test_category_fallback_lists_insight(cc):
     """The pre-first-poll fallback must list `insight`: product workspaces run on
     it, and the insight quick-add preselects it - a missing option silently

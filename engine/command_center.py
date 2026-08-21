@@ -2960,6 +2960,147 @@ def read_prd_artifact(run: str, file: str) -> str | None:
     return resolved.read_text(errors="ignore")
 
 
+# ── Watches + surveys (Deep space bands) + product artifact browser ────────
+# Watches is config-schema-first: config.py validates the `watches:` block,
+# and adapters/metric_watch_to_backlog.py is the ONLY writer of both
+# $AP_STATE/watches.json and watch-<name>-<YYYYMMDD> backlog tasks - this
+# dashboard layer only reads all three, the same read-only relationship
+# prd_pipeline_state has with prd_flow. Surveys and the insight-doc listing
+# are filesystem-first: surveys/<name>/ and insights/*.md are written by the
+# orbit-survey-design/-analyze and orbit-analyze-funnel/-hypothesis skills.
+# All three helpers share the absent-unless-configured, corrupt-tolerant
+# discipline prd_pipeline_state set: a target with none of this configured
+# sees a byte-identical /api/state.
+_WATCH_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")   # config.py's own watch-name shape
+# Governs both what the artifact browser LISTS (insight_docs_state,
+# surveys_state's directory names) and what read_product_artifact will SERVE
+# - same "the allowlist is a live listing, not just a shape check" discipline
+# as _knowledge_docs()/read_knowledge_doc(). Deliberately wider than
+# _WATCH_NAME_RE (mixed case, dots) since these names come from human/agent
+# free text, not a validated config slug; the leading-alnum + no-"/" shape
+# still rejects a `..`/traversal name outright (`..` and `../x` both start
+# with "." and are never a full match).
+_ARTIFACT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _insights_root() -> Path:
+    return REPO / "insights"
+
+
+def _surveys_root() -> Path:
+    return REPO / "surveys"
+
+
+def watches_state(backlog: list) -> list | None:
+    """Deep space's Watches band: one entry per config `watches:` entry,
+    joined with $AP_STATE/watches.json's last_filed and the newest
+    watch-<name>-* backlog task (if the adapter has ever filed one for that
+    watch - `backlog` is build_state's already-loaded list, not reread here).
+    None (key omitted from build_state) unless the profile actually has a
+    watches: block."""
+    cfg = _load_cfg()
+    watches = cfg.get("watches")
+    if not isinstance(watches, list) or not watches:
+        return None
+    try:
+        raw = json.loads((AP_STATE / "watches.json").read_text())
+        last_filed = raw if isinstance(raw, dict) else {}
+    except (OSError, ValueError):
+        last_filed = {}   # missing/corrupt state - every watch just reads as never-filed
+
+    out = []
+    for w in watches:
+        if not isinstance(w, dict):
+            continue
+        name = w.get("name")
+        if not isinstance(name, str) or not _WATCH_NAME_RE.match(name):
+            continue
+        entry = {"name": name, "question": w.get("question", ""),
+                 "cadence_hours": w.get("cadence_hours") or 168,
+                 "category": w.get("category") or "insight",
+                 "last_filed": last_filed.get(name)}
+        # Latest (by id - the YYYYMMDD suffix sorts chronologically as a
+        # string) watch-<name>-* task on the backlog, if the adapter has ever
+        # filed one - the exact id shape build_proposal() writes.
+        task_re = re.compile(rf"^watch-{re.escape(name)}-\d{{8}}$")
+        latest = None
+        for t in backlog:
+            tid = str(t.get("id", ""))
+            if task_re.match(tid) and (latest is None or tid > latest["id"]):
+                latest = {"id": tid, "status": t.get("status", "")}
+        if latest:
+            entry["task_id"] = latest["id"]
+            entry["task_status"] = latest["status"]
+        out.append(entry)
+    return out
+
+
+def surveys_state() -> list | None:
+    """Deep space's Surveys band: one entry per surveys/<name>/ subdirectory.
+    None (key omitted from build_state) unless <repo>/surveys/ exists.
+    Directory names are filtered to _ARTIFACT_NAME_RE - the same "list only
+    what you'd also serve" discipline read_knowledge_doc uses - so a listed
+    name is always one /product-artifact?kind=survey can actually open."""
+    root = _surveys_root()
+    if not root.is_dir():
+        return None
+    try:
+        names = sorted(p.name for p in root.iterdir() if p.is_dir() and _ARTIFACT_NAME_RE.match(p.name))
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        d = root / name
+        raw_dir = d / "raw"
+        try:
+            raw_count = sum(1 for f in raw_dir.iterdir() if f.is_file()) if raw_dir.is_dir() else 0
+        except OSError:
+            raw_count = 0
+        out.append({"name": name,
+                    "has_questionnaire": (d / "questionnaire.md").is_file(),
+                    "raw_count": raw_count,
+                    "has_report": (d / "report.md").is_file()})
+    return out
+
+
+def insight_docs_state() -> list | None:
+    """Deep space artifact browser's Insights group: stems of insights/*.md,
+    filtered to _ARTIFACT_NAME_RE for the same list-what-you-serve reason
+    surveys_state filters directory names. None (key omitted from
+    build_state) unless <repo>/insights/ exists."""
+    root = _insights_root()
+    if not root.is_dir():
+        return None
+    try:
+        return sorted(p.stem for p in root.glob("*.md") if _ARTIFACT_NAME_RE.match(p.stem))
+    except OSError:
+        return []
+
+
+# kind -> (root dir, relative-path template) for read_product_artifact. The
+# two families /prd-artifact doesn't already cover.
+_ARTIFACT_KINDS = {"insight": (_insights_root, "{}.md"),
+                   "survey": (_surveys_root, "{}/report.md")}
+
+
+def read_product_artifact(kind: str, name: str) -> str | None:
+    """Confined GET for the product artifact browser - insights/<name>.md or
+    surveys/<name>/report.md. Same template as read_prd_artifact/
+    read_knowledge_doc: shape-check `kind` (fixed allowlist) and `name`
+    (_ARTIFACT_NAME_RE), then resolve -> assert the RESOLVED path stays under
+    the RESOLVED kind-scoped root -> is_file() (catches a symlink escape)."""
+    spec = _ARTIFACT_KINDS.get(kind)
+    if spec is None or not isinstance(name, str) or not _ARTIFACT_NAME_RE.match(name):
+        return None
+    root_fn, rel_tmpl = spec
+    root = root_fn()
+    resolved_root = root.resolve()
+    resolved = (root / rel_tmpl.format(name)).resolve()
+    if not str(resolved).startswith(str(resolved_root) + os.sep) or not resolved.is_file():
+        return None
+    return resolved.read_text(errors="ignore")
+
+
 def load_calibration_candidates() -> list:
     """Pending calibration-miner candidates for the dashboard's strip."""
     out = []
@@ -3837,6 +3978,18 @@ def build_state() -> dict:
     prd = prd_pipeline_state()
     if prd is not None:
         rt["prd"] = prd
+    # Same discipline again: watches/surveys/insight_docs are each present
+    # only when their own story is configured, so a target with none of
+    # M3's product workflows yet sees a byte-identical /api/state.
+    watches = watches_state(backlog)
+    if watches is not None:
+        rt["watches"] = watches
+    surveys = surveys_state()
+    if surveys is not None:
+        rt["surveys"] = surveys
+    insight_docs = insight_docs_state()
+    if insight_docs is not None:
+        rt["insight_docs"] = insight_docs
     rt["onboarding"] = onboarding_state()
     return rt
 
@@ -3975,6 +4128,17 @@ class Handler(BaseHTTPRequestHandler):
             run = (qs.get("run", [""])[0]).strip()
             file = (qs.get("file", [""])[0]).strip()
             body = read_prd_artifact(run, file)
+            if body is None:
+                self._send(b"not found", "text/plain", 404); return
+            self._send(body.encode(), "text/plain; charset=utf-8")
+        elif path == "/product-artifact":
+            # Confined GET for the product artifact browser - the two
+            # families /prd-artifact doesn't cover (insights/*.md,
+            # surveys/*/report.md). See read_product_artifact for the
+            # kind-scoped root + name-shape + realpath confinement.
+            kind = (qs.get("kind", [""])[0]).strip()
+            name = (qs.get("name", [""])[0]).strip()
+            body = read_product_artifact(kind, name)
             if body is None:
                 self._send(b"not found", "text/plain", 404); return
             self._send(body.encode(), "text/plain; charset=utf-8")
