@@ -47,6 +47,7 @@ from qa_teach import _bad_flows_dir_reason
 import qa_env
 import qa_teach
 import prd_flow
+import secrets_env
 
 # ── path model ───────────────────────────────────────────────────────────────
 # ENGINE       : this repo's engine dir (ships command_center.py, its converter,
@@ -2819,12 +2820,14 @@ def do_epic_action(tid: str, action: str) -> str:
 # drives it the same two ways do_epic_action drives epic_plan: synchronous
 # calls for pure human acts (new/approve-*/revise), a detached CLI Popen for
 # the agent stages (run-intake/run-chain).
-_PRD_RUN_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+_PRD_RUN_RE = prd_flow.RUN_RE   # the controller owns the run-id shape; no second copy
 _PRD_ARTIFACT_NAMES = {"01-intake.json", "02-research.json", "03-synthesis.json",
                        "04-prd.md", "05-review.json", prd_flow.MARKER_NAME}
 # Legal next_actions per marker status. "revise-intake" (full reset) is ALSO
-# legal from every status except "done" (nothing left to revise into) and
-# "intake" itself (already there) - appended below, not listed per-entry.
+# legal from every status except "intake" itself (already there) - appended
+# below, not listed per-entry. A "done" run keeps it explicitly: signing off is
+# not the end of a PRD's life, and reopening one was otherwise a dead end that
+# forced the PM to hand-edit the marker.
 _PRD_STATUS_ACTIONS = {
     "intake": ["run-intake"],
     "awaiting-scope-approval": ["approve-scope", "revise-intake"],
@@ -2833,13 +2836,13 @@ _PRD_STATUS_ACTIONS = {
     "draft": ["run-chain"],
     "review": ["run-chain"],
     "awaiting-signoff": ["approve-prd", "revise-draft", "revise-research"],
-    "done": [],
+    "done": ["revise-intake"],
 }
 
 
 def _prd_next_actions(status: str) -> list:
     actions = list(_PRD_STATUS_ACTIONS.get(status, []))
-    if status not in ("done", "intake") and "revise-intake" not in actions:
+    if status != "intake" and "revise-intake" not in actions:
         actions.append("revise-intake")
     return actions
 
@@ -2875,11 +2878,13 @@ def prd_pipeline_state() -> list | None:
                  for name in prd_flow.STAGES]
         runs.append({"run_id": marker.get("run_id", d.name), "title": marker.get("title", ""),
                     "status": status, "stages": stages, "tamper": tamper,
+                    "pii_touch": bool(marker.get("pii_touch")),
                     "next_actions": _prd_next_actions(status)})
     return runs
 
 
-def do_prd_action(run: str, action: str, title: str = "", brief: str = "") -> str:
+def do_prd_action(run: str, action: str, title: str = "", brief: str = "",
+                  ack_pii: bool = False) -> str:
     """Drive the PRD pipeline from the dashboard. `new` validates the run id
     itself (no marker exists yet to check legality against); every other
     action is checked against the CURRENT marker's status via
@@ -2894,7 +2899,7 @@ def do_prd_action(run: str, action: str, title: str = "", brief: str = "") -> st
             return f"a PRD run named '{run}' already exists"
         try:
             prd_flow.new(str(REPO), run, title.strip(), brief=brief)
-        except OSError as e:
+        except (OSError, prd_flow.GateError) as e:
             return f"could not create PRD run '{run}': {e}"
         return f"Created PRD run '{run}' - intake is next."
 
@@ -2907,7 +2912,10 @@ def do_prd_action(run: str, action: str, title: str = "", brief: str = "") -> st
         return f"cannot '{action}' from status '{status}'"
 
     if action == "approve-scope":
-        prd_flow.approve_scope(str(REPO), run)
+        try:
+            prd_flow.approve_scope(str(REPO), run, ack_pii=ack_pii)
+        except prd_flow.GateError as e:
+            return f"cannot approve scope: {e}"
         return f"Scope approved for '{run}' - research is next."
     if action == "approve-prd":
         prd_flow.approve_prd(str(REPO), run)
@@ -3218,8 +3226,13 @@ _SECRETS_VALUE_RE = re.compile(r"^[A-Za-z0-9_\-./:+=@,~]+$")
 # Block the interpreter/shell variables an attacker would reach for, plus
 # this process's own AP_HOME/AP_STATE/ORBIT_HOME (overriding those would let
 # a "secret" redirect the loop at a different config/state tree entirely).
+# PYTHONPATH is not the only loader hook: node, perl, ruby and java each read
+# their own, and a cycle or stage child reaches at least node (mcp stdio
+# servers run via npx). Keep this list and run.sh's `case` guard identical.
 _SECRETS_NAME_DENY = {"PATH", "IFS", "ENV", "BASH_ENV", "SHELL", "HOME", "PS4", "CDPATH",
-                      "PYTHONPATH", "PYTHONSTARTUP", "AP_HOME", "AP_STATE", "ORBIT_HOME"}
+                      "PYTHONPATH", "PYTHONSTARTUP", "AP_HOME", "AP_STATE", "ORBIT_HOME",
+                      "NODE_OPTIONS", "NODE_PATH", "PERL5LIB", "RUBYOPT", "GEM_PATH",
+                      "CLASSPATH"}
 _SECRETS_PREFIX_DENY = ("LD_", "DYLD_", "BASH_")
 _SECRETS_LOCK = threading.Lock()  # ThreadingHTTPServer: guards concurrent writers
 
@@ -3229,18 +3242,31 @@ def _secrets_path() -> Path:
 
 
 def _read_secrets_env() -> dict:
-    """Parse .autopilot/.secrets.env as KEY=VALUE lines — same tolerant format
-    doctor.py's _secrets_env reads (ignore blanks/comments, split on first '=')."""
-    out = {}
-    path = _secrets_path()
-    if path.exists():
-        for line in path.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            out[k.strip()] = v.strip()
-    return out
+    """Parse .autopilot/.secrets.env as KEY=VALUE lines. Thin wrapper over the
+    shared parser (engine/secrets_env.py) - one definition of the format for
+    this panel, doctor.py, run.sh's loop and prd_flow's stage children."""
+    return secrets_env.read_path(str(_secrets_path()))
+
+
+def _ensure_secrets_gitignored() -> None:
+    """Make sure .autopilot/.gitignore lists .secrets.env before we create that
+    file. A workspace scaffolded before .secrets.env existed has a .gitignore
+    without the entry (init.py used to write it once and never top it up), and
+    this panel must not be the thing that drops a token into a tracked path.
+    Appends only what is missing; never rewrites what is already there."""
+    gi = AP_HOME / ".gitignore"
+    entry = ".secrets.env"
+    try:
+        body = gi.read_text()
+    except OSError:
+        gi.parent.mkdir(parents=True, exist_ok=True)
+        gi.write_text(f"# Orbit secrets - never commit\n{entry}\n")
+        return
+    if entry in {ln.strip() for ln in body.splitlines()}:
+        return
+    sep = "" if (not body or body.endswith("\n")) else "\n"
+    with gi.open("a") as f:
+        f.write(f"{sep}{entry}\n")
 
 
 def _atomic_write_secrets(secrets_map: dict) -> None:
@@ -3250,6 +3276,7 @@ def _atomic_write_secrets(secrets_map: dict) -> None:
     lying next to the real file)."""
     path = _secrets_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_secrets_gitignored()
     tmp = path.with_name(path.name + ".tmp")
     body = "".join(f"{k}={v}\n" for k, v in sorted(secrets_map.items()))
     fd = os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
@@ -4074,7 +4101,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(b'{"ok":false,"msg":"missing run id"}', "application/json", 400); return
                 msg = do_prd_action(run, (data.get("action", [""])[0]).strip(),
                                     (data.get("title", [""])[0]).strip(),
-                                    data.get("brief", [""])[0])
+                                    data.get("brief", [""])[0],
+                                    ack_pii=(data.get("ack_pii", [""])[0] == "1"))
             elif path == "/calibration-action":
                 if not tid:
                     self._send(b'{"ok":false,"msg":"missing candidate id"}', "application/json", 400); return

@@ -132,6 +132,76 @@ def test_metaql_token_still_accepted_alongside_reserved_name_guard(cc):
     assert _secrets_file(cc).read_text() == "METAQL_TOKEN=sk-abc123\n"
 
 
+@pytest.mark.parametrize("name,value", [
+    ("NODE_OPTIONS", "--require=/tmp/evil.js"),
+    ("NODE_PATH", "/tmp/evil"),
+    ("PERL5LIB", "/tmp/evil"),
+    ("RUBYOPT", "-r/tmp/evil"),
+    ("GEM_PATH", "/tmp/evil"),
+    ("CLASSPATH", "/tmp/evil.jar"),
+])
+def test_other_interpreter_loader_names_rejected(cc, name, value):
+    """PYTHONPATH was never the only loader hook. A cycle reaches node (mcp
+    stdio servers run via npx), and NODE_OPTIONS=--require=... is code
+    execution with no shell metacharacters in sight."""
+    msg = cc.do_save_secrets({"set": {name: value}})
+    assert "reserved" in msg.lower()
+    assert name in msg
+    assert not _secrets_file(cc).exists()
+
+
+def test_panel_delegates_to_the_shared_secrets_parser(cc):
+    """One parser, four callers (run.sh's loop, this panel, doctor, prd_flow's
+    stage children). This wrapper must stay thin - three re-implementations are
+    how the format drifted the first time."""
+    src = (Path(cc.ENGINE) / "command_center.py").read_text()
+    body = src.split("def _read_secrets_env()", 1)[1].split("\ndef ", 1)[0]
+    assert "secrets_env.read_path" in body
+    assert "split(" not in body, "the panel re-implements the parse instead of delegating"
+
+
+def test_name_deny_list_matches_run_sh_case_guard(cc):
+    """The dashboard writer and run.sh's parse loop must refuse the same names -
+    a name only one of them blocks is a hole in whichever end forgot it."""
+    run_sh = (Path(cc.ENGINE) / "run.sh").read_text()
+    guard = [ln for ln in run_sh.splitlines() if ") continue ;;" in ln and "PATH|" in ln]
+    assert len(guard) == 1, "run.sh's secrets name guard moved; fix this parser, not the assert"
+    patterns = guard[0].strip().split(")")[0].split("|")
+    exact = {p for p in patterns if not p.endswith("*")}
+    prefixes = tuple(p[:-1] for p in patterns if p.endswith("*"))
+    assert exact == cc._SECRETS_NAME_DENY
+    assert prefixes == cc._SECRETS_PREFIX_DENY
+
+
+# ── .gitignore upkeep (the panel must never be the thing that leaks) ───────
+
+def test_save_adds_the_gitignore_entry_when_it_is_missing(cc):
+    gi = Path(cc.AP_HOME) / ".gitignore"
+    gi.write_text("# Orbit secrets\n.jira_token\n.slack_webhook\n")   # pre-M2 shape
+    cc.do_save_secrets({"set": {"METAQL_TOKEN": "sk-abc123"}})
+    lines = gi.read_text().splitlines()
+    assert ".secrets.env" in lines
+    assert lines.count(".secrets.env") == 1
+    assert ".jira_token" in lines   # nothing existing was rewritten away
+
+
+def test_save_creates_the_gitignore_when_absent_and_never_duplicates(cc):
+    gi = Path(cc.AP_HOME) / ".gitignore"
+    assert not gi.exists()
+    cc.do_save_secrets({"set": {"METAQL_TOKEN": "sk-abc123"}})
+    assert ".secrets.env" in gi.read_text().splitlines()
+    cc.do_save_secrets({"set": {"OTHER_TOKEN": "sk-def456"}})
+    assert gi.read_text().splitlines().count(".secrets.env") == 1
+
+
+def test_save_tolerates_a_gitignore_with_no_trailing_newline(cc):
+    gi = Path(cc.AP_HOME) / ".gitignore"
+    gi.write_text(".jira_token")   # no trailing newline
+    cc.do_save_secrets({"set": {"METAQL_TOKEN": "sk-abc123"}})
+    lines = gi.read_text().splitlines()
+    assert lines == [".jira_token", ".secrets.env"]
+
+
 # ── mcp config card (Task 8) ──────────────────────────────────────────────
 # mcp joins the gates/qa JSON-textarea family in the Admin panel:
 # _validate_config only checks shape (must be a dict) — deep validation
@@ -303,3 +373,89 @@ def test_corrupt_marker_does_not_freeze_the_state_poll(cc):
 
     s = cc.build_state()   # the actual /api/state path - must not raise
     assert [r["run_id"] for r in s["prd"]] == ["r1"]
+
+
+# ── status machine hygiene ────────────────────────────────────────────────
+
+def test_status_actions_cover_exactly_the_controllers_statuses(cc):
+    """The dashboard mirrors prd_flow's status machine so illegal buttons never
+    render. A status the controller can reach but this table has never heard of
+    renders a card with no way forward; an entry for a status that no longer
+    exists is dead code nobody notices."""
+    assert set(cc._PRD_STATUS_ACTIONS) == set(cc.prd_flow.STAGES) | {
+        "awaiting-scope-approval", "awaiting-signoff", "done"}
+
+
+def test_run_id_shape_is_the_controllers(cc):
+    assert cc._PRD_RUN_RE is cc.prd_flow.RUN_RE
+
+
+def test_done_run_can_be_reopened(cc):
+    """Sign-off is not the end of a PRD's life. Without revise-intake on `done`
+    the only way to reopen a shipped run was hand-editing the marker."""
+    cc.prd_flow.new(str(cc.REPO), "r1", "My PRD")
+    (Path(cc.REPO) / "research" / "r1" / "01-intake.json").write_text(json.dumps(GOOD_INTAKE))
+    cc.prd_flow.record_stage(str(cc.REPO), "r1", "intake")
+    cc.prd_flow.approve_scope(str(cc.REPO), "r1")
+    marker = cc.prd_flow.load_marker(str(cc.REPO), "r1")
+    marker["status"] = "awaiting-signoff"
+    cc.prd_flow._write_marker(str(cc.REPO), "r1", marker)
+    cc.prd_flow.approve_prd(str(cc.REPO), "r1")
+
+    run = cc.prd_pipeline_state()[0]
+    assert run["status"] == "done"
+    assert run["next_actions"] == ["revise-intake"]
+
+    msg = cc.do_prd_action("r1", "revise-intake")
+    assert "revising" in msg.lower()
+    reopened = cc.prd_flow.load_marker(str(cc.REPO), "r1")
+    assert reopened["status"] == "intake"
+    assert reopened["approvals"] == {"scope": None, "prd": None}
+    assert reopened["stages"] == {}
+
+
+# ── pii_touch scope gate (dashboard end) ──────────────────────────────────
+
+PII_INTAKE = dict(GOOD_INTAKE, pii_touch=True)
+
+
+def _pii_run_at_gate(cc):
+    cc.prd_flow.new(str(cc.REPO), "r1", "Sensitive PRD")
+    (Path(cc.REPO) / "research" / "r1" / "01-intake.json").write_text(json.dumps(PII_INTAKE))
+    cc.prd_flow.record_stage(str(cc.REPO), "r1", "intake")
+
+
+def test_pii_flag_reaches_the_card(cc):
+    _pii_run_at_gate(cc)
+    assert cc.prd_pipeline_state()[0]["pii_touch"] is True
+
+
+def test_approve_scope_on_a_pii_run_needs_ack_pii(cc):
+    _pii_run_at_gate(cc)
+    msg = cc.do_prd_action("r1", "approve-scope")
+    assert "cannot approve scope" in msg.lower()
+    assert "PII acknowledgement" in msg
+    assert cc.prd_flow.load_marker(str(cc.REPO), "r1")["status"] == "awaiting-scope-approval"
+
+    msg = cc.do_prd_action("r1", "approve-scope", ack_pii=True)
+    assert "approved" in msg.lower()
+    assert cc.prd_flow.load_marker(str(cc.REPO), "r1")["status"] == "research"
+
+
+def test_shell_asks_a_second_question_before_approving_a_pii_scope(cc):
+    """The grounding contract defers PII compliance to a human. One click on the
+    same button every other run uses is not that human saying yes to PII."""
+    shell = (Path(cc.ENGINE) / "cc_shell.html").read_text()
+    assert "PRD_PII_CONFIRM" in shell
+    assert "PII/sensitive data" in shell
+    assert "ack_pii:'1'" in shell
+    assert "r.pii_touch" in shell
+
+
+def test_category_fallback_lists_insight(cc):
+    """The pre-first-poll fallback must list `insight`: product workspaces run on
+    it, and the insight quick-add preselects it - a missing option silently
+    falls back to `bug`."""
+    shell = (Path(cc.ENGINE) / "cc_shell.html").read_text()
+    fallback = shell.split("function _catOptions", 1)[1].split("\n}", 1)[0]
+    assert "'insight'" in fallback

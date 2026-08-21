@@ -1339,17 +1339,25 @@ function prdArtifactLinks(r){
   });
   return links;
 }
+/* A pii_touch run's scope gate takes a SECOND, explicit question. The grounding
+   contract defers PII compliance to a human, and one click on the same button
+   every other run uses is not that human saying yes to PII. Answering it sends
+   ack_pii=1, which is what prd_flow.approve_scope requires on such a run. */
+const PRD_PII_CONFIRM="This PRD touches PII/sensitive data. Approving scope releases it to the research stage, which queries real systems. Confirm you have reviewed the data handling and take responsibility for it?";
 function prdActionBtn(r,a){
   const cls=a.startsWith('approve')?'btn-go':a.startsWith('revise')?'btn-stop':'btn-vio';
   const label=PRD_ACTION_LABEL[a]||a;
   const fn=PRD_ACTION_CONFIRM[a];
   const msg=fn?fn(r.run_id,r.status):`${label} for '${r.run_id}'?`;
-  return `<button class="btn ${cls} btn-mini" onclick="if(confirm('${escJsAttr(msg)}'))post('/prd-action',{run:'${escJsAttr(r.run_id)}',action:'${a}'})">${esc(label)}</button>`;
+  const pii=(a==='approve-scope'&&!!r.pii_touch);
+  const gate=pii?`&&confirm('${escJsAttr(PRD_PII_CONFIRM)}')`:'';
+  const body=`{run:'${escJsAttr(r.run_id)}',action:'${a}'${pii?",ack_pii:'1'":''}}`;
+  return `<button class="btn ${cls} btn-mini" onclick="if(confirm('${escJsAttr(msg)}')${gate})post('/prd-action',${body})">${esc(label)}</button>`;
 }
 function prdCard(r){
   const tamper=(r.tamper&&r.tamper.length)?`<div class=meta style="color:var(--red)">⚠ tamper: ${esc(r.tamper.join('; '))}</div>`:'';
   const btns=(r.next_actions||[]).map(a=>prdActionBtn(r,a)).join('');
-  return `<div class=card><div class="card-h"><span class=tid>${esc(r.run_id)}</span> ${prdStatusBadge(r.status)}</div>
+  return `<div class=card><div class="card-h"><span class=tid>${esc(r.run_id)}</span> ${prdStatusBadge(r.status)}${r.pii_touch?' '+badge('PII','warn'):''}</div>
     <div class=title>${esc(r.title)}</div>
     <div class=meta>${prdStageDots(r.stages)}</div>${tamper}
     <div class=btns>${btns}${prdArtifactLinks(r)}</div></div>`;
@@ -2475,7 +2483,10 @@ function _tfAutoSlug(){
   if(tfMode==='new'&&tfIdAuto)document.getElementById('tfId').value=_slugify(document.getElementById('tfTitle').value);
 }
 function _catOptions(sel){
-  return ((S&&S.categories)||['bug','feature','refactor','testing','documentation']).map(c=>
+  /* Fallback only fires before the first /api/state lands. It must still list
+     `insight` - product workspaces run on it, and the quick-add form preselects
+     it, which would silently fall back to `bug` if it were missing here. */
+  return ((S&&S.categories)||['bug','feature','refactor','testing','documentation','insight']).map(c=>
     `<option${c===sel?' selected':''}>${esc(c)}</option>`).join('');
 }
 function newTaskForm(){
