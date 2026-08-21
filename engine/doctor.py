@@ -107,8 +107,8 @@ secrets_path = os.path.join(AP, ".secrets.env")
 if os.path.exists(secrets_path):
     st = os.stat(secrets_path)
     mode = st.st_mode & 0o777
-    if mode != 0o600:
-        print(f"  · .secrets.env exists with mode {oct(mode)} — should be 0600 (readable only by you) for security")
+    if mode & 0o077:
+        print(f"  · .secrets.env exists with mode {oct(mode)} — group/other bits are readable; should be 0600 or stricter for security")
 
 # 3. router — target's .autopilot/router.yaml overrides the engine default at router/router.yaml
 router_path = find("router.yaml") or (

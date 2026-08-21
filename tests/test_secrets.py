@@ -43,21 +43,27 @@ def test_doctor_quiet_when_token_env_in_secrets_file(tmp_path):
 
 
 def test_doctor_warns_on_loose_secrets_permissions(tmp_path):
-    """Doctor should warn if .secrets.env exists with mode looser than 0600."""
+    """Doctor should warn if .secrets.env exists with group/other bits readable."""
     _init_product(tmp_path)
-
-    # Create .secrets.env with loose permissions (0644)
     secrets = tmp_path / ".autopilot" / ".secrets.env"
+    env = dict(os.environ, ORBIT_HOME=str(ORBIT))
+
+    # Test 1: 0644 (group-readable) should warn
     secrets.write_text("METAQL_TOKEN=test-token-value\n")
     os.chmod(str(secrets), 0o644)
-
-    env = dict(os.environ, ORBIT_HOME=str(ORBIT))
     r = subprocess.run([sys.executable, str(ORBIT / "engine" / "doctor.py"), str(tmp_path)],
                        capture_output=True, text=True, env=env)
-
-    # Doctor should warn about loose permissions
     assert ".secrets.env" in r.stdout and "mode" in r.stdout.lower(), \
-        f"doctor should warn about loose permissions: {r.stdout}"
+        f"doctor should warn about 0644 permissions: {r.stdout}"
+
+    # Test 2: 0400 (owner read-only, stricter) should NOT warn
+    os.chmod(str(secrets), 0o400)
+    r = subprocess.run([sys.executable, str(ORBIT / "engine" / "doctor.py"), str(tmp_path)],
+                       capture_output=True, text=True, env=env)
+    assert ".secrets.env" not in r.stdout or "mode" not in r.stdout.lower(), \
+        f"doctor should not warn about 0400 permissions: {r.stdout}"
+    assert "ALL CHECKS PASSED" in r.stdout, \
+        f"doctor should pass with 0400 permissions: {r.stdout}"
 
 
 def test_product_scaffold_gitignore_covers_secrets_env(tmp_path):
