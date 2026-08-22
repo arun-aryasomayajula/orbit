@@ -103,8 +103,18 @@ gates:
     cwd: "."
     needs: []
 
-workable_categories: [insight, documentation]
-sources: [backlog]
+workable_categories: [insight, funnel, hypothesis, survey_design, survey_analysis, documentation]
+sources: [backlog, metric_watch]
+
+# Standing metric watches (optional): each names a question that gets re-asked
+# into a fresh insights/ doc on a cadence, via the metric_watch adapter above.
+# Uncomment and fill in (see config/schema.yaml `watches:` for the full field
+# reference).
+# watches:
+#   - name: wow-signup-conversion
+#     question: "What's the week-over-week change in signup conversion, and why?"
+#     cadence_hours: 168        # default: weekly
+#     category: insight         # insight | funnel | hypothesis (default: insight)
 
 # MCP servers this workspace's cycles may reach (see schema.yaml `mcp:` docs).
 # Uncomment and fill in.
@@ -192,6 +202,14 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
     ensure_gitignore_entries(os.path.join(AP, ".gitignore"), SECRET_GITIGNORE_ENTRIES)
     # secrets example (product workspaces only) — template for manual secret config
     if PRODUCT:
+        # Grounding track: the only engine file the PRD stage agents need.
+        # Copied into the workspace (not add-dir'd from the engine) so the
+        # stage command no longer has to hand the agents the whole engine
+        # dir. Engine-owned - overwrite on every init/re-init is intentional,
+        # not a workspace-editable file.
+        os.makedirs(os.path.join(AP, "tracks"), exist_ok=True)
+        shutil.copy(os.path.join(ORBIT_HOME, "tracks", "prd-grounding.md"),
+                    os.path.join(AP, "tracks", "prd-grounding.md"))
         ex = os.path.join(AP, ".secrets.env.example")
         if not os.path.exists(ex):
             open(ex, "w").write(

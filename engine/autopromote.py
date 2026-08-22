@@ -7,10 +7,17 @@ set of categories to `status: queued` + `autopilot: allow`, then rebuilds the
 queue. One task per call, so the loop drains the backlog steadily instead of
 flooding. Skips anything already worked (ledger) or skipped.
 
-Deliberately conservative: auto-promotes only low-risk, well-contained work
-(testing/documentation/dependencies/bug/feature). It does NOT auto-promote
-`code_quality`/`refactor` (which can include risky core rewrites) or any
-human-only category — promote those by hand from the dashboard.
+Deliberately conservative: auto-promotes only low-risk, well-contained work -
+the chore categories (testing/documentation/dependencies/bug) plus the
+read-only product-analysis ones (insight/funnel/hypothesis), whose output is a
+doc the insight_lint gate grades. It does NOT auto-promote `code_quality`/
+`refactor` (which can include risky core rewrites) or any human-only category -
+promote those by hand from the dashboard.
+
+Eligibility (see _eligible): a machine-filed task counts even though
+backlog_append writes every proposal as `autopilot: human`, because the
+AUTO_PROMOTE flag IS the operator's standing opt-in for that. Hand-written
+tasks never do.
 """
 from __future__ import annotations
 import json
@@ -46,8 +53,52 @@ LEDGER = AP_STATE / "ledger.json"
 SKIPS = AP_STATE / "skips.txt"
 CONVERTER = ENGINE / "backlog_to_tasks.py"
 
-AUTOPROMOTE_CATEGORIES = {"testing", "documentation", "dependencies", "bug"}
+AUTOPROMOTE_CATEGORIES = {"testing", "documentation", "dependencies", "bug",
+                          # Product analysis: read-only data pulls into a doc the
+                          # insight_lint gate grades. Nothing ships uncited, and
+                          # nothing outside insights//surveys/ is touched.
+                          "insight", "funnel", "hypothesis"}
+
+# Sources that mean "an unattended signal adapter filed this".
+#
+# backlog_append.render_proposed_task stamps `source: <name>` on every proposal
+# it renders, and the raw-block adapters render the same field by hand - but
+# PRESENCE of the field is NOT a machine/human discriminator: the dashboard's
+# New-task form writes `source: dashboard` and the escalation-answer path writes
+# `source: escalation-answer`, both of them human acts. Hence an allowlist of
+# the adapters that file with nobody watching, not a presence check.
+#
+# Deliberately fails closed - a filer not named here is never auto-promoted, so
+# the worst a missing name can do is leave a task waiting for a human. Left out
+# on purpose: `dashboard` / `escalation-answer` (typed by the operator),
+# `intake` / `epic:<id>` (a human ran the decomposition and can queue its
+# children right there).
+UNATTENDED_SOURCES = {"metric_watch", "logwatch", "ui-test", "maturity-score", "jira"}
+
 PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}
+
+
+def _eligible(t: dict) -> bool:
+    """Is this proposed task one the AUTO_PROMOTE flag may feed the loop?
+
+    Category must be in the conservative set, AND one of:
+      - `autopilot` is not `human` - the operator already un-gated this task; or
+      - an unattended signal adapter filed it (see UNATTENDED_SOURCES).
+
+    The second arm is what makes the unattended product path exist at all:
+    backlog_append writes EVERY machine proposal as `autopilot: human`, so a
+    metric watch's weekly insight task could never be auto-fed under the first
+    arm alone - the operator would have to click Promote every week for work
+    they already asked to happen on a cadence. AUTO_PROMOTE is that standing
+    opt-in: the operator turned the flag on, the category is gated by
+    insight_lint, and the filer is a machine. A hand-written human task is
+    never covered by it - the person typing it is right there to queue it.
+    """
+    if t.get("category") not in AUTOPROMOTE_CATEGORIES:
+        return False
+    if t.get("autopilot") != "human":
+        return True
+    return str(t.get("source") or "").strip() in UNATTENDED_SOURCES
 
 
 def _worked() -> set[str]:
@@ -68,8 +119,7 @@ def main() -> int:
     worked, skips = _worked(), _skips()
     cands = [t for t in backlog
              if t.get("status") == "proposed"
-             and t.get("category") in AUTOPROMOTE_CATEGORIES
-             and t.get("autopilot") != "human"   # operator-gated tasks are never auto-fed
+             and _eligible(t)
              and str(t.get("id")) not in worked
              and str(t.get("id")) not in skips]
     if not cands:

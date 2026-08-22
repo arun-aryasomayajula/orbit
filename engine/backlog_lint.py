@@ -29,6 +29,12 @@ KNOWN_CATEGORIES = {
     "observability",   # in real use in backlog.yaml; human-only for the emit gate
     "epic",            # planning-tier container: planned/decomposed via epic_plan.py, never loop-worked
     "insight",         # product workspace analysis (safe; gated by insight_lint)
+    "funnel",          # funnel-drop analysis (safe; gated by insight_lint)
+    "hypothesis",      # single-hypothesis triangulation (safe; gated by insight_lint)
+    "survey_design",   # survey questionnaire authoring (safe; NOT insight_lint-gated -
+                       # it writes questionnaire.md, and the lint reads only
+                       # insights/*.md and surveys/*/report.md)
+    "survey_analysis", # survey analysis (safe; its report.md IS insight_lint-gated)
 }
 
 

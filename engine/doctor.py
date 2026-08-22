@@ -260,6 +260,19 @@ if qa_cfg is not None:
     if cfg.get("runtime_check"):
         print("  · qa: supersedes runtime_check: as the post-commit gate")
 
+# 5f. product workspace (optional - presence of research/ or the insight_lint
+# gate is the switch). The PRD skills all open by reading
+# .autopilot/tracks/prd-grounding.md, so a product workspace missing it runs
+# every PRD stage ungrounded - and the failure is silent: the skill just does
+# not find its lane rules. Advisory only, never a check(): a workspace can be
+# mid-setup, and doctor's exit code is about wiring that is BROKEN, not
+# incomplete.
+_gates = cfg.get("gates") if isinstance(cfg.get("gates"), dict) else {}
+if os.path.isdir(os.path.join(TARGET, "research")) or "insight_lint" in _gates:
+    if not os.path.exists(os.path.join(AP, "tracks", "prd-grounding.md")):
+        print("  · product workspace has no .autopilot/tracks/prd-grounding.md - "
+              f"the PRD skills read it for their lane rules; re-run `orbit init {TARGET} --product`")
+
 # 6. dry-run routing over the queue (if present)
 qf = os.path.join(AP, "state", "queue.json")
 if os.path.exists(qf):

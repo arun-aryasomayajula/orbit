@@ -191,7 +191,8 @@ CYCLE_TIMEOUT = int(os.environ.get("ORBIT_CYCLE_TIMEOUT") or os.environ.get("AP_
 
 PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}
 PRIORITY_LADDER = ["low", "medium", "high"]
-SAFE = {"testing", "documentation", "dependencies", "code_quality", "developer_experience", "insight"}
+SAFE = {"testing", "documentation", "dependencies", "code_quality", "developer_experience",
+        "insight", "funnel", "hypothesis", "survey_design", "survey_analysis"}
 # What the loop CAN work when promoted (autopilot:allow). Must match
 # backlog_to_tasks.EMITTABLE_CATEGORIES. HUMAN_ONLY is never loop-pickable.
 EMITTABLE = SAFE | {"bug", "feature", "refactor"}
@@ -2835,7 +2836,7 @@ _PRD_STATUS_ACTIONS = {
     "synthesis": ["run-chain"],
     "draft": ["run-chain"],
     "review": ["run-chain"],
-    "awaiting-signoff": ["approve-prd", "revise-draft", "revise-research"],
+    "awaiting-signoff": ["approve-prd", "revise-draft", "revise-research", "revise-synthesis"],
     "done": ["revise-intake"],
 }
 
@@ -2959,6 +2960,157 @@ def read_prd_artifact(run: str, file: str) -> str | None:
     return resolved.read_text(errors="ignore")
 
 
+# ── Watches + surveys (Deep space bands) + product artifact browser ────────
+# Watches is config-schema-first: config.py validates the `watches:` block,
+# and adapters/metric_watch_to_backlog.py is the ONLY writer of both
+# $AP_STATE/watches.json and watch-<name>-<YYYYMMDD> backlog tasks - this
+# dashboard layer only reads all three, the same read-only relationship
+# prd_pipeline_state has with prd_flow. Surveys and the insight-doc listing
+# are filesystem-first: surveys/<name>/ and insights/*.md are written by the
+# orbit-survey-design/-analyze and orbit-analyze-funnel/-hypothesis skills.
+# All three helpers share the absent-unless-configured, corrupt-tolerant
+# discipline prd_pipeline_state set: a target with none of this configured
+# sees a byte-identical /api/state.
+_WATCH_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")   # config.py's own watch-name shape
+# Governs both what the artifact browser LISTS (insight_docs_state,
+# surveys_state's directory names) and what read_product_artifact will SERVE
+# - same "the allowlist is a live listing, not just a shape check" discipline
+# as _knowledge_docs()/read_knowledge_doc(). Deliberately wider than
+# _WATCH_NAME_RE (mixed case, dots) since these names come from human/agent
+# free text, not a validated config slug; the leading-alnum + no-"/" shape
+# still rejects a `..`/traversal name outright (`..` and `../x` both start
+# with "." and are never a full match).
+_ARTIFACT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _insights_root() -> Path:
+    return REPO / "insights"
+
+
+def _surveys_root() -> Path:
+    return REPO / "surveys"
+
+
+def watches_state(backlog: list) -> list | None:
+    """Deep space's Watches band: one entry per config `watches:` entry,
+    joined with $AP_STATE/watches.json's last_filed and the newest
+    watch-<name>-* backlog task (if the adapter has ever filed one for that
+    watch - `backlog` is build_state's already-loaded list, not reread here).
+
+    None (key omitted from build_state) when the profile has no watches:
+    block at all - a target that never configured watches sees a
+    byte-identical /api/state. A block that IS there but empty returns [],
+    which is a different fact and worth showing: the band can say "No
+    watches configured." instead of vanishing, which is what an operator who
+    just added the block and is looking for it needs to see. (`watches:` with
+    nothing after it parses as None, indistinguishable from absent by value -
+    hence the key test.) A malformed block (not a list) is omitted, same
+    corrupt-tolerant discipline as the state file below."""
+    cfg = _load_cfg()
+    if "watches" not in cfg:
+        return None
+    watches = cfg.get("watches") or []
+    if not isinstance(watches, list):
+        return None
+    try:
+        raw = json.loads((AP_STATE / "watches.json").read_text())
+        last_filed = raw if isinstance(raw, dict) else {}
+    except (OSError, ValueError):
+        last_filed = {}   # missing/corrupt state - every watch just reads as never-filed
+
+    out = []
+    for w in watches:
+        if not isinstance(w, dict):
+            continue
+        name = w.get("name")
+        if not isinstance(name, str) or not _WATCH_NAME_RE.match(name):
+            continue
+        entry = {"name": name, "question": w.get("question", ""),
+                 "cadence_hours": w.get("cadence_hours") or 168,
+                 "category": w.get("category") or "insight",
+                 "last_filed": last_filed.get(name)}
+        # Latest (by id - the YYYYMMDD suffix sorts chronologically as a
+        # string) watch-<name>-* task on the backlog, if the adapter has ever
+        # filed one - the exact id shape build_proposal() writes.
+        task_re = re.compile(rf"^watch-{re.escape(name)}-\d{{8}}$")
+        latest = None
+        for t in backlog:
+            tid = str(t.get("id", ""))
+            if task_re.match(tid) and (latest is None or tid > latest["id"]):
+                latest = {"id": tid, "status": t.get("status", "")}
+        if latest:
+            entry["task_id"] = latest["id"]
+            entry["task_status"] = latest["status"]
+        out.append(entry)
+    return out
+
+
+def surveys_state() -> list | None:
+    """Deep space's Surveys band: one entry per surveys/<name>/ subdirectory.
+    None (key omitted from build_state) unless <repo>/surveys/ exists.
+    Directory names are filtered to _ARTIFACT_NAME_RE - the same "list only
+    what you'd also serve" discipline read_knowledge_doc uses - so a listed
+    name is always one /product-artifact?kind=survey can actually open."""
+    root = _surveys_root()
+    if not root.is_dir():
+        return None
+    try:
+        names = sorted(p.name for p in root.iterdir() if p.is_dir() and _ARTIFACT_NAME_RE.match(p.name))
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        d = root / name
+        raw_dir = d / "raw"
+        try:
+            raw_count = sum(1 for f in raw_dir.iterdir() if f.is_file()) if raw_dir.is_dir() else 0
+        except OSError:
+            raw_count = 0
+        out.append({"name": name,
+                    "has_questionnaire": (d / "questionnaire.md").is_file(),
+                    "raw_count": raw_count,
+                    "has_report": (d / "report.md").is_file()})
+    return out
+
+
+def insight_docs_state() -> list | None:
+    """Deep space artifact browser's Insights group: stems of insights/*.md,
+    filtered to _ARTIFACT_NAME_RE for the same list-what-you-serve reason
+    surveys_state filters directory names. None (key omitted from
+    build_state) unless <repo>/insights/ exists."""
+    root = _insights_root()
+    if not root.is_dir():
+        return None
+    try:
+        return sorted(p.stem for p in root.glob("*.md") if _ARTIFACT_NAME_RE.match(p.stem))
+    except OSError:
+        return []
+
+
+# kind -> (root dir, relative-path template) for read_product_artifact. The
+# two families /prd-artifact doesn't already cover.
+_ARTIFACT_KINDS = {"insight": (_insights_root, "{}.md"),
+                   "survey": (_surveys_root, "{}/report.md")}
+
+
+def read_product_artifact(kind: str, name: str) -> str | None:
+    """Confined GET for the product artifact browser - insights/<name>.md or
+    surveys/<name>/report.md. Same template as read_prd_artifact/
+    read_knowledge_doc: shape-check `kind` (fixed allowlist) and `name`
+    (_ARTIFACT_NAME_RE), then resolve -> assert the RESOLVED path stays under
+    the RESOLVED kind-scoped root -> is_file() (catches a symlink escape)."""
+    spec = _ARTIFACT_KINDS.get(kind)
+    if spec is None or not isinstance(name, str) or not _ARTIFACT_NAME_RE.match(name):
+        return None
+    root_fn, rel_tmpl = spec
+    root = root_fn()
+    resolved_root = root.resolve()
+    resolved = (root / rel_tmpl.format(name)).resolve()
+    if not str(resolved).startswith(str(resolved_root) + os.sep) or not resolved.is_file():
+        return None
+    return resolved.read_text(errors="ignore")
+
+
 def load_calibration_candidates() -> list:
     """Pending calibration-miner candidates for the dashboard's strip."""
     out = []
@@ -3058,9 +3210,10 @@ def do_delete_branches_bulk(kind: str) -> str:
 # ── admin / settings (config.yaml is the portable single source of truth) ─────
 CATEGORIES_ALL = ["bug", "feature", "refactor", "code_quality", "testing", "documentation",
                   "dependencies", "developer_experience", "security", "infrastructure",
-                  "release_management", "git_practices"]
+                  "release_management", "git_practices",
+                  "insight", "funnel", "hypothesis", "survey_design", "survey_analysis"]
 SOURCES_ALL = ["backlog", "backlog-research", "maturity-score", "logwatch", "ui-test",
-               "code-review", "security-review", "network-review"]
+               "code-review", "security-review", "network-review", "metric_watch"]
 HOSTS_ALL = ["bitbucket", "github", "gitlab"]
 _PREFIX_RE = re.compile(r"^[A-Za-z0-9._/-]{1,60}$")
 
@@ -3072,18 +3225,38 @@ def _dashboard_label() -> str:
     return "com.orbit.dashboard-" + REPO.name
 
 
+def _checkbox_options(known: list, current) -> list:
+    """The known options PLUS whatever this config already holds.
+
+    The Admin panel renders ONE checkbox per served option and Save sends back
+    exactly the checked ones, so an option the server omits from the meta is an
+    option the next Save silently deletes from config.yaml. Serving the union
+    makes that structurally impossible: a value already on disk - a category
+    this build predates, one a hand edit added, one a newer profile writes -
+    always renders (checked, since it is in the config) and always survives the
+    round trip. Known options lead in their declared order; extras follow
+    sorted, so the served list is deterministic."""
+    if not isinstance(current, list):
+        return list(known)
+    extra = sorted({v for v in current if isinstance(v, str) and v not in known})
+    return list(known) + extra
+
+
 def config_payload() -> dict:
     """Full config.yaml + resolved runtime meta for the Admin panel."""
     reload_settings()
     src, pr = _git_urls(GIT_HOST, GIT_REPO, BASE_BRANCH)
+    cfg = _load_cfg()
     return {
-        "config": _load_cfg(),
+        "config": cfg,
         "meta": {
             "ap_home": str(AP_HOME), "repo": str(REPO), "port": PORT,
             "loop_label": LAUNCHD_LABEL, "dashboard_label": _dashboard_label(),
             "base_branch": BASE_BRANCH, "git_host": GIT_HOST, "git_repo": GIT_REPO,
             "git_src_url": src, "git_pr_url": pr,
-            "categories_all": CATEGORIES_ALL, "sources_all": SOURCES_ALL, "hosts_all": HOSTS_ALL,
+            "categories_all": _checkbox_options(CATEGORIES_ALL, cfg.get("workable_categories")),
+            "sources_all": _checkbox_options(SOURCES_ALL, cfg.get("sources")),
+            "hosts_all": HOSTS_ALL,
         },
     }
 
@@ -3171,10 +3344,10 @@ def do_save_config(raw: str) -> str:
     permission_mode, interval/max-tasks/timeout, git_host, sources,
     workable_categories). The merged config is then WRITTEN and re-checked
     with config.py's own validate() — the full-schema authority for gates/
-    qa/plan/knowledge/pull_requests/spec/repo. A validate() failure rolls the
-    write back (restoring the prior bytes via the same atomic temp+rename
+    qa/plan/knowledge/mcp/pull_requests/spec/repo. A validate() failure rolls
+    the write back (restoring the prior bytes via the same atomic temp+rename
     _atomic_write_config_text uses, or removing the file if it didn't exist
-    before) so a bad qa/plan/knowledge block is rolled back within seconds —
+    before) so a bad qa/plan/knowledge/mcp block is rolled back within seconds -
     it is genuinely on disk for the brief window the validate() subprocess
     runs, but never stays there, and the restore itself can never leave a
     half-written file even if the process dies mid-rollback."""
@@ -3274,34 +3447,40 @@ def _ensure_secrets_gitignored() -> None:
 
 def _atomic_write_secrets(secrets_map: dict) -> None:
     """Write secrets_map as bare KEY=VALUE lines to .secrets.env, atomically and
-    at mode 0600 throughout (the temp file too — a crash between os.open and
+    at mode 0600 throughout (the temp file too - a crash between mkstemp and
     os.replace must never leave a world-readable temp copy of these values
-    lying next to the real file)."""
+    lying next to the real file). Matches prd_flow._atomic_write_json's
+    mkstemp + unlink-on-failure pattern."""
     path = _secrets_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     _ensure_secrets_gitignored()
-    tmp = path.with_name(path.name + ".tmp")
     body = "".join(f"{k}={v}\n" for k, v in sorted(secrets_map.items()))
-    fd = os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".secrets-", suffix=".tmp")
     try:
-        os.chmod(str(tmp), 0o600)  # belt-and-suspenders against an umask widening the open() mode
+        os.fchmod(fd, 0o600)  # belt-and-suspenders against a umask widening mkstemp's mode
         with os.fdopen(fd, "w") as f:
             f.write(body)
+        os.replace(tmp, str(path))  # same-dir rename - atomic, no partial-file window
     except Exception:
         try:
             os.close(fd)
         except OSError:
             pass
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
         raise
-    os.replace(str(tmp), str(path))  # same-dir rename — atomic, no partial-file window
 
 
 def secrets_payload() -> dict:
-    """GET /api/secrets — name + short preview only. Full values are NEVER
-    returned once saved (that's the whole point of a secrets store)."""
+    """GET /api/secrets - name + length-only preview. Full values are NEVER
+    returned once saved (that's the whole point of a secrets store), and
+    neither are any of its characters - a `first2...last2` preview still
+    leaks real value bytes, so this masks fully and reports only the length."""
     out = []
     for name, value in sorted(_read_secrets_env().items()):
-        preview = f"{value[:2]}...{value[-2:]}" if len(value) >= 6 else "set"
+        preview = f"•••• ({len(value)} chars)"
         out.append({"name": name, "preview": preview})
     return {"secrets": out}
 
@@ -3335,12 +3514,14 @@ def do_save_secrets(payload: dict) -> str:
             return f"Rejected — value for {name} must be non-empty and contain only letters, digits, and _-./:+=@,~ (no shell metacharacters)"
     with _SECRETS_LOCK:
         current = _read_secrets_env()
+        removed = 0
         for name in to_delete:
-            current.pop(str(name), None)
+            if current.pop(str(name), None) is not None:
+                removed += 1
         for name, value in to_set.items():
             current[name] = value
         _atomic_write_secrets(current)
-    return f"Saved {len(to_set) + len(to_delete)} secret(s)"
+    return f"Saved {len(to_set)} secret(s), removed {removed}"
 
 
 def do_restart(label: str, delay: float = 0) -> str:
@@ -3836,6 +4017,18 @@ def build_state() -> dict:
     prd = prd_pipeline_state()
     if prd is not None:
         rt["prd"] = prd
+    # Same discipline again: watches/surveys/insight_docs are each present
+    # only when their own story is configured, so a target with none of
+    # M3's product workflows yet sees a byte-identical /api/state.
+    watches = watches_state(backlog)
+    if watches is not None:
+        rt["watches"] = watches
+    surveys = surveys_state()
+    if surveys is not None:
+        rt["surveys"] = surveys
+    insight_docs = insight_docs_state()
+    if insight_docs is not None:
+        rt["insight_docs"] = insight_docs
     rt["onboarding"] = onboarding_state()
     return rt
 
@@ -3974,6 +4167,17 @@ class Handler(BaseHTTPRequestHandler):
             run = (qs.get("run", [""])[0]).strip()
             file = (qs.get("file", [""])[0]).strip()
             body = read_prd_artifact(run, file)
+            if body is None:
+                self._send(b"not found", "text/plain", 404); return
+            self._send(body.encode(), "text/plain; charset=utf-8")
+        elif path == "/product-artifact":
+            # Confined GET for the product artifact browser - the two
+            # families /prd-artifact doesn't cover (insights/*.md,
+            # surveys/*/report.md). See read_product_artifact for the
+            # kind-scoped root + name-shape + realpath confinement.
+            kind = (qs.get("kind", [""])[0]).strip()
+            name = (qs.get("name", [""])[0]).strip()
+            body = read_product_artifact(kind, name)
             if body is None:
                 self._send(b"not found", "text/plain", 404); return
             self._send(body.encode(), "text/plain; charset=utf-8")

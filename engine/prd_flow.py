@@ -377,8 +377,7 @@ def _build_cmd(target, run, stage, prd_cfg):
     cmd = [claude, "--print", f"/{SKILLS[stage]} {run}",
            "--permission-mode", "acceptEdits",
            "--settings", settings_path,
-           "--model", model,
-           "--add-dir", ORBIT_HOME]
+           "--model", model]
     if build_path:
         cmd += ["--mcp-config", build_path, "--strict-mcp-config"]
     return cmd

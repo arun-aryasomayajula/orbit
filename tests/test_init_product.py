@@ -22,7 +22,7 @@ def test_product_config_validates_and_carries_insight_gate(tmp_path):
     _init_product(tmp_path)
     cfg = (tmp_path / ".autopilot" / "config.yaml").read_text()
     assert "insight_lint" in cfg
-    assert "workable_categories: [insight, documentation]" in cfg
+    assert "workable_categories: [insight, funnel, hypothesis, survey_design, survey_analysis, documentation]" in cfg
     r = subprocess.run([sys.executable, str(ORBIT / "engine" / "config.py"),
                         "validate", str(tmp_path)], capture_output=True, text=True)
     assert r.returncode == 0, r.stdout
@@ -32,6 +32,37 @@ def test_product_scaffold_installs_commands_and_agents(tmp_path):
     assert (tmp_path / ".claude" / "commands" / "orbit-insight.md").exists()
     assert (tmp_path / ".claude" / "agents" / "analyst.md").exists()
 
+def test_product_scaffold_installs_funnel_and_hypothesis_skills(tmp_path):
+    _init_product(tmp_path)
+    cmd_dir = tmp_path / ".claude" / "commands"
+    assert (cmd_dir / "orbit-analyze-funnel.md").exists()
+    assert (cmd_dir / "orbit-hypothesis.md").exists()
+    assert (cmd_dir / "orbit-survey-design.md").exists()
+    assert (cmd_dir / "orbit-survey-analyze.md").exists()
+
+def test_funnel_and_hypothesis_known_to_lint_and_emitter(monkeypatch, tmp_path):
+    monkeypatch.setenv("AP_HOME", str(tmp_path / ".autopilot"))
+    sys.path.insert(0, str(ORBIT / "engine"))
+    import backlog_lint, backlog_to_tasks
+    for cat in ("funnel", "hypothesis", "survey_design", "survey_analysis"):
+        assert cat in backlog_lint.KNOWN_CATEGORIES, cat
+        assert cat in backlog_to_tasks.SAFE_CATEGORIES, cat
+
+    # Dashboard SAFE set: fresh-import command_center with AP_HOME/AP_STATE
+    # monkeypatched (same pattern as the `cc` fixture in test_prd_dashboard.py)
+    # so the module-level SAFE constant reflects the current source.
+    import importlib
+    ap_home = tmp_path / ".autopilot"
+    ap_state = ap_home / "state"
+    ap_state.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("AP_STATE", str(ap_state))
+    (ap_home / "config.yaml").write_text('repo: "."\nbase_branch: "main"\ngates:\n  t: {cmd: "true"}\n')
+    sys.modules.pop("command_center", None)
+    cc_mod = importlib.import_module("command_center")
+    importlib.reload(cc_mod)
+    for cat in ("funnel", "hypothesis", "survey_design", "survey_analysis"):
+        assert cat in cc_mod.SAFE, cat
+
 def test_product_scaffold_installs_prd_skills(tmp_path):
     _init_product(tmp_path)
     prd_skills = [
@@ -40,10 +71,29 @@ def test_product_scaffold_installs_prd_skills(tmp_path):
         "orbit-prd-synthesis.md",
         "orbit-prd-writer.md",
         "orbit-prd-review.md",
+        "orbit-scrape.md",
     ]
     cmd_dir = tmp_path / ".claude" / "commands"
     for skill in prd_skills:
         assert (cmd_dir / skill).exists(), f"Missing PRD skill: {skill}"
+
+def test_product_scaffold_copies_the_grounding_track(tmp_path):
+    """The stage command no longer add-dirs the engine into the workspace, so
+    the grounding track has to ship into .autopilot/tracks/ instead - the
+    only engine file the PRD stage agents need."""
+    _init_product(tmp_path)
+    track = tmp_path / ".autopilot" / "tracks" / "prd-grounding.md"
+    assert track.exists()
+    assert track.read_text() == (ORBIT / "tracks" / "prd-grounding.md").read_text()
+
+def test_reinit_overwrites_the_grounding_track(tmp_path):
+    """Engine-owned: a stale copy from an older Orbit checkout must be
+    replaced on re-init, not preserved."""
+    _init_product(tmp_path)
+    track = tmp_path / ".autopilot" / "tracks" / "prd-grounding.md"
+    track.write_text("# stale copy from an older Orbit checkout\n")
+    _init_product(tmp_path)
+    assert track.read_text() == (ORBIT / "tracks" / "prd-grounding.md").read_text()
 
 def test_code_scaffold_is_unchanged_without_flag(tmp_path):
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
@@ -112,6 +162,15 @@ def test_reinit_preserves_unrelated_gitignore_lines(tmp_path):
     lines = gi.read_text().splitlines()
     assert lines[0] == "scratch/"
     assert set(lines) >= {"scratch/", ".jira_token", ".slack_webhook", ".secrets.env"}
+
+def test_router_yaml_parses_and_has_funnel_hypothesis_categories():
+    import yaml
+    router = yaml.safe_load((ORBIT / "router" / "router.yaml").read_text())
+    cats = router.get("categories", {})
+    for cat in ("funnel", "hypothesis", "survey_design", "survey_analysis"):
+        assert cat in cats, cat
+        assert cats[cat].get("maker", {}).get("agent") == "analyst"
+        assert cats[cat].get("maker", {}).get("model") == "opus"
 
 def test_doctor_warns_on_missing_mcp_token_env(tmp_path):
     _init_product(tmp_path)
