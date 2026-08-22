@@ -2836,7 +2836,7 @@ _PRD_STATUS_ACTIONS = {
     "synthesis": ["run-chain"],
     "draft": ["run-chain"],
     "review": ["run-chain"],
-    "awaiting-signoff": ["approve-prd", "revise-draft", "revise-research"],
+    "awaiting-signoff": ["approve-prd", "revise-draft", "revise-research", "revise-synthesis"],
     "done": ["revise-intake"],
 }
 
@@ -3313,10 +3313,10 @@ def do_save_config(raw: str) -> str:
     permission_mode, interval/max-tasks/timeout, git_host, sources,
     workable_categories). The merged config is then WRITTEN and re-checked
     with config.py's own validate() — the full-schema authority for gates/
-    qa/plan/knowledge/pull_requests/spec/repo. A validate() failure rolls the
-    write back (restoring the prior bytes via the same atomic temp+rename
+    qa/plan/knowledge/mcp/pull_requests/spec/repo. A validate() failure rolls
+    the write back (restoring the prior bytes via the same atomic temp+rename
     _atomic_write_config_text uses, or removing the file if it didn't exist
-    before) so a bad qa/plan/knowledge block is rolled back within seconds —
+    before) so a bad qa/plan/knowledge/mcp block is rolled back within seconds —
     it is genuinely on disk for the brief window the validate() subprocess
     runs, but never stays there, and the restore itself can never leave a
     half-written file even if the process dies mid-rollback."""
@@ -3416,34 +3416,40 @@ def _ensure_secrets_gitignored() -> None:
 
 def _atomic_write_secrets(secrets_map: dict) -> None:
     """Write secrets_map as bare KEY=VALUE lines to .secrets.env, atomically and
-    at mode 0600 throughout (the temp file too — a crash between os.open and
+    at mode 0600 throughout (the temp file too — a crash between mkstemp and
     os.replace must never leave a world-readable temp copy of these values
-    lying next to the real file)."""
+    lying next to the real file). Matches prd_flow._atomic_write_json's
+    mkstemp + unlink-on-failure pattern."""
     path = _secrets_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     _ensure_secrets_gitignored()
-    tmp = path.with_name(path.name + ".tmp")
     body = "".join(f"{k}={v}\n" for k, v in sorted(secrets_map.items()))
-    fd = os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".secrets-", suffix=".tmp")
     try:
-        os.chmod(str(tmp), 0o600)  # belt-and-suspenders against an umask widening the open() mode
+        os.fchmod(fd, 0o600)  # belt-and-suspenders against a umask widening mkstemp's mode
         with os.fdopen(fd, "w") as f:
             f.write(body)
+        os.replace(tmp, str(path))  # same-dir rename — atomic, no partial-file window
     except Exception:
         try:
             os.close(fd)
         except OSError:
             pass
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
         raise
-    os.replace(str(tmp), str(path))  # same-dir rename — atomic, no partial-file window
 
 
 def secrets_payload() -> dict:
-    """GET /api/secrets — name + short preview only. Full values are NEVER
-    returned once saved (that's the whole point of a secrets store)."""
+    """GET /api/secrets — name + length-only preview. Full values are NEVER
+    returned once saved (that's the whole point of a secrets store), and
+    neither are any of its characters — a `first2...last2` preview still
+    leaks real value bytes, so this masks fully and reports only the length."""
     out = []
     for name, value in sorted(_read_secrets_env().items()):
-        preview = f"{value[:2]}...{value[-2:]}" if len(value) >= 6 else "set"
+        preview = f"•••• ({len(value)} chars)"
         out.append({"name": name, "preview": preview})
     return {"secrets": out}
 
@@ -3477,12 +3483,14 @@ def do_save_secrets(payload: dict) -> str:
             return f"Rejected — value for {name} must be non-empty and contain only letters, digits, and _-./:+=@,~ (no shell metacharacters)"
     with _SECRETS_LOCK:
         current = _read_secrets_env()
+        removed = 0
         for name in to_delete:
-            current.pop(str(name), None)
+            if current.pop(str(name), None) is not None:
+                removed += 1
         for name, value in to_set.items():
             current[name] = value
         _atomic_write_secrets(current)
-    return f"Saved {len(to_set) + len(to_delete)} secret(s)"
+    return f"Saved {len(to_set)} secret(s), removed {removed}"
 
 
 def do_restart(label: str, delay: float = 0) -> str:

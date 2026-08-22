@@ -862,6 +862,19 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
     <button class="btn btn-go btn-mini" onclick="submitTaskForm()">Save</button>
     <button class="btn btn-mini" onclick="closeModal5()">Cancel</button></div>
 </div></div>
+<div class="modal" id="modal6" onclick="closeModal6()"><div class="modalbox" onclick="event.stopPropagation()">
+  <h3>＋ New PRD</h3>
+  <div style="display:flex;flex-direction:column;gap:6px">
+    <input id="pfRun" class="tfin" placeholder="run id — lowercase letters, digits, hyphens, e.g. checkout-redesign" autocomplete="off" oninput="_pfValidateRun()">
+    <div class="m3ctx" id="pfRunHint" style="min-height:1.5em"></div>
+    <input id="pfTitle" class="tfin" placeholder="title — required" autocomplete="off">
+    <textarea id="pfBrief" class="tfin" rows="4" placeholder="brief — one paragraph, optional (grounds the intake agent)"></textarea>
+    <input id="pfPm" class="tfin" placeholder="PM override — optional, defaults to your git identity" autocomplete="off">
+  </div>
+  <div style="margin-top:10px;display:flex;gap:8px">
+    <button class="btn btn-go btn-mini" onclick="submitPrdForm()">Create</button>
+    <button class="btn btn-mini" onclick="closeModal6()">Cancel</button></div>
+</div></div>
 <div id="palette" onclick="closePalette()"><div class="palbox" onclick="event.stopPropagation()">
   <input id="palinput" placeholder="Find a task, ship, or escalation… (or type an action)" autocomplete="off">
   <div id="pallist"></div>
@@ -921,7 +934,7 @@ function go(v){
   if(v==='knowledge')kbMaybeLoadGraph();   // now visible — safe to size a cytoscape canvas
 }
 document.addEventListener('keydown',e=>{
-  if(e.key==='Escape'){closePalette();closeModal();closeModal2();closeModal3();closeModal4();closeModal5();return;}
+  if(e.key==='Escape'){closePalette();closeModal();closeModal2();closeModal3();closeModal4();closeModal5();closeModal6();return;}
   if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();openPalette();return;}
   if(e.target.tagName==='TEXTAREA'||e.target.tagName==='INPUT')return;
   if(e.key==='/'){e.preventDefault();openPalette();return;}
@@ -1308,7 +1321,7 @@ const PRD_ARTIFACTS={intake:'01-intake.json',research:'02-research.json',synthes
 const PRD_ACTION_LABEL={'run-intake':'▶ Run intake','run-chain':'▶ Run stage',
                         'approve-scope':'Approve scope','approve-prd':'Approve PRD',
                         'revise-intake':'Revise intake','revise-draft':'Revise draft',
-                        'revise-research':'Revise research'};
+                        'revise-research':'Revise research','revise-synthesis':'Revise synthesis'};
 const PRD_ACTION_CONFIRM={
   'run-intake':r=>`Run intake for '${r}'? A headless agent call writes 01-intake.json.`,
   'run-chain':(r,st)=>`Run '${st}' for '${r}'? It keeps chaining forward while each stage's eval passes.`,
@@ -1317,6 +1330,7 @@ const PRD_ACTION_CONFIRM={
   'revise-intake':r=>`Revise '${r}' back to intake? Every stamp and approval is dropped.`,
   'revise-draft':r=>`Revise '${r}' back to draft? The review stamp is dropped.`,
   'revise-research':r=>`Revise '${r}' back to research? Synthesis, draft and review stamps are dropped.`,
+  'revise-synthesis':r=>`Revise '${r}' back to synthesis? Draft and review stamps are dropped.`,
 };
 function prdStatusBadge(st){
   const m={intake:['intake','muted'],'awaiting-scope-approval':['awaiting scope approval','warn'],
@@ -1365,15 +1379,34 @@ function prdCard(r){
     <div class=btns>${btns}${prdArtifactLinks(r)}</div></div>`;
 }
 function newPrd(){
-  const run=prompt('Run id (lowercase letters, digits, hyphens - e.g. checkout-redesign):');
-  if(run===null)return;
-  if(!/^[a-z0-9][a-z0-9-]*$/.test(run.trim())){toast('Invalid run id.');return;}
-  const title=prompt('PRD title:');
-  if(title===null)return;
-  if(!title.trim()){toast('A title is required.');return;}
-  const brief=prompt('One-paragraph brief (optional - grounds the intake agent):')||'';
-  post('/prd-action',{action:'new',run:run.trim(),title:title.trim(),brief:brief});
+  document.getElementById('pfRun').value=''; document.getElementById('pfTitle').value='';
+  document.getElementById('pfBrief').value=''; document.getElementById('pfPm').value='';
+  document.getElementById('pfRunHint').textContent='';
+  document.getElementById('modal6').style.display='flex';
+  document.getElementById('pfRun').focus();
 }
+function _pfValidateRun(){
+  const v=document.getElementById('pfRun').value.trim();
+  const hint=document.getElementById('pfRunHint');
+  if(!v){hint.textContent='';return;}
+  hint.innerHTML=/^[a-z0-9][a-z0-9-]*$/.test(v)?'':'<span class=rr>lowercase letters, digits, hyphens only - must start alphanumeric</span>';
+}
+function submitPrdForm(){
+  const run=document.getElementById('pfRun').value.trim();
+  const title=document.getElementById('pfTitle').value.trim();
+  if(!/^[a-z0-9][a-z0-9-]*$/.test(run)){toast('Invalid run id.');return;}
+  if(!title){toast('A title is required.');return;}
+  const p={action:'new',run:run,title:title,brief:document.getElementById('pfBrief').value};
+  const pm=document.getElementById('pfPm').value.trim();
+  if(pm)p.pm=pm;
+  fetch('/prd-action',{method:'POST',headers:POST_HDRS,body:new URLSearchParams(p).toString()})
+    .then(r=>r.json()).then(j=>{
+      toast(j.msg||'done');
+      // Validation misses (e.g. duplicate run id) keep the form open with input intact; success closes.
+      if((j.msg||'').startsWith('Created')){ closeModal6(); refresh(); }
+    }).catch(e=>toast('error: '+e));
+}
+function closeModal6(){document.getElementById('modal6').style.display='none';}
 function renderPrd(){
   const band=document.getElementById('prdBand');if(!band)return;
   if(!S||!('prd' in S)){band.innerHTML='';return;}
@@ -1403,9 +1436,16 @@ function renderArtifacts(){
   const prdRows=prds.map(r=>artifactRow(`PRD draft - ${r.run_id}`,`/prd-artifact?run=${encodeURIComponent(r.run_id)}&file=04-prd.md`,r.title||r.run_id)).join('');
   const surveyRows=surveys.map(s=>artifactRow(`Survey report - ${s.name}`,`/product-artifact?kind=survey&name=${encodeURIComponent(s.name)}`,s.name)).join('');
   const body=artifactGroup('Insights',insightRows)+artifactGroup('PRDs',prdRows)+artifactGroup('Survey reports',surveyRows);
+  // Nothing to show is not a state worth a band — no insight docs, no
+  // draft-stamped PRDs, no survey reports means self-hide, same discipline
+  // every other absent-unless-configured band follows (renderWatches is the
+  // one exception: watches is configured infrastructure, so an empty list
+  // is itself informative — "no watches configured" — where an empty
+  // artifact browser is just noise).
+  if(!body){band.innerHTML='';return;}
   band.innerHTML=`<div class=band><div class=bandhead><h3>Product artifacts</h3>
     <span class=bandsum>insights, signed-off PRD drafts, and survey reports - one click to read</span></div>
-    <div>${body||'<div class=meta style="padding:8px 0">Nothing to show yet.</div>'}</div></div>`;
+    <div>${body}</div></div>`;
 }
 
 /* ── watches band: standing metric questions re-filed on a cadence ──────── */

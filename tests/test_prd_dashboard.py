@@ -43,7 +43,7 @@ def _secrets_file(cc):
 
 def test_save_creates_file_mode_0600_with_exact_content(cc):
     msg = cc.do_save_secrets({"set": {"METAQL_TOKEN": "sk-abc123"}})
-    assert msg == "Saved 1 secret(s)"
+    assert msg == "Saved 1 secret(s), removed 0"
     f = _secrets_file(cc)
     assert f.exists()
     assert f.read_text() == "METAQL_TOKEN=sk-abc123\n"
@@ -57,8 +57,10 @@ def test_get_masks_values(cc):
     dumped = json.dumps(payload)
     assert "sk-abc123" not in dumped
     by_name = {s["name"]: s["preview"] for s in payload["secrets"]}
-    assert by_name["METAQL_TOKEN"] == "sk...23"
-    assert by_name["SHORT"] == "set"   # len < 6 -> generic "set", never the value
+    # Fixed mask + length only — no value characters (not even the first/last
+    # two) ever leave the server, regardless of the value's length.
+    assert by_name["METAQL_TOKEN"] == "•••• (9 chars)"
+    assert by_name["SHORT"] == "•••• (2 chars)"
 
 
 def test_bad_name_rejected(cc):
@@ -90,17 +92,26 @@ def test_shell_metacharacter_value_rejected(cc):
 def test_jwt_like_value_with_dots_and_dashes_accepted(cc):
     jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N-XgL0n3I9PlFUP0THsR8U"
     msg = cc.do_save_secrets({"set": {"AUTH_TOKEN": jwt}})
-    assert msg == "Saved 1 secret(s)"
+    assert msg == "Saved 1 secret(s), removed 0"
     assert _secrets_file(cc).read_text() == f"AUTH_TOKEN={jwt}\n"
 
 
 def test_delete_removes_key_and_preserves_others(cc):
     cc.do_save_secrets({"set": {"KEEP_ME": "keepvalue", "DROP_ME": "dropvalue"}})
     msg = cc.do_save_secrets({"delete": ["DROP_ME"]})
-    assert msg == "Saved 1 secret(s)"
+    assert msg == "Saved 0 secret(s), removed 1"
     content = _secrets_file(cc).read_text()
     assert "DROP_ME" not in content
     assert "KEEP_ME=keepvalue" in content
+
+
+def test_delete_of_absent_key_reports_honestly(cc):
+    # A delete for a name that was never set is a no-op, not a lie — the
+    # message must say "removed 0", not claim credit for a key that was
+    # never there to begin with.
+    msg = cc.do_save_secrets({"delete": ["NEVER_SET"]})
+    assert msg == "Saved 0 secret(s), removed 0"
+    assert _secrets_file(cc).read_text() == ""
 
 
 def test_reserved_name_path_rejected(cc):
@@ -128,7 +139,7 @@ def test_reserved_prefix_ld_preload_rejected(cc):
 
 def test_metaql_token_still_accepted_alongside_reserved_name_guard(cc):
     msg = cc.do_save_secrets({"set": {"METAQL_TOKEN": "sk-abc123"}})
-    assert msg == "Saved 1 secret(s)"
+    assert msg == "Saved 1 secret(s), removed 0"
     assert _secrets_file(cc).read_text() == "METAQL_TOKEN=sk-abc123\n"
 
 
@@ -426,6 +437,26 @@ def test_done_run_can_be_reopened(cc):
     assert reopened["status"] == "intake"
     assert reopened["approvals"] == {"scope": None, "prd": None}
     assert reopened["stages"] == {}
+
+
+def test_revise_synthesis_is_legal_from_awaiting_signoff(cc):
+    """awaiting-signoff must offer a way back to synthesis, not just draft/
+    research — a review that finds the SYNTHESIS wrong (not just its writeup)
+    otherwise has no legal action to say so."""
+    cc.prd_flow.new(str(cc.REPO), "r1", "My PRD")
+    marker = cc.prd_flow.load_marker(str(cc.REPO), "r1")
+    marker["status"] = "awaiting-signoff"
+    marker["stages"] = {s: "x" for s in cc.prd_flow.STAGES}
+    cc.prd_flow._write_marker(str(cc.REPO), "r1", marker)
+
+    assert "revise-synthesis" in cc._prd_next_actions("awaiting-signoff")
+
+    msg = cc.do_prd_action("r1", "revise-synthesis")
+    assert "revising" in msg.lower()
+    reopened = cc.prd_flow.load_marker(str(cc.REPO), "r1")
+    assert reopened["status"] == "synthesis"
+    assert reopened["approvals"]["prd"] is None
+    assert set(reopened["stages"]) == {"intake", "research"}
 
 
 # ── pii_touch scope gate (dashboard end) ──────────────────────────────────
