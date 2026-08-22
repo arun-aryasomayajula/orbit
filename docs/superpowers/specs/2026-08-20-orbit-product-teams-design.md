@@ -125,15 +125,21 @@ CLI: `fetch <url>` prints readable page text (Playwright-rendered when the optio
 `playwright` is an optional Python dependency; nothing hard-requires it.
 gstack's browse/scrape/skillify designs are the acknowledged reference.
 
-### 9. Parallelism
+### 9. Parallelism (amended 2026-08-22 after code reconnaissance)
 
-`concurrency: N` in the profile, default 2.
-The loop becomes a small worker pool.
-Workers atomically claim tasks through a lockfile-based claims file; the queue itself stays read-only and regenerated per iteration as today.
-`ledger.py` writes serialize behind a file lock; the lifecycle state machine already rejects illegal transitions.
-Serialization rules: one stage per PRD instance at a time, browser tasks hold a browse-session lock, everything else runs free.
-Spend caps and cycle timeouts apply per worker.
-Worktree-per-task isolation already exists, which is what makes this a contained change.
+The original section assumed worktree-per-task isolation already existed in the loop; it does not (the loop resets ONE shared worktree per iteration), so a bash worker pool inside `run.sh` would be simultaneous surgery on claiming, reaping, spend/count accounting, backlog writes, QA services, and PID scoping.
+
+M4's architecture is **slot loops** instead: `concurrency: N` (profile, default 1 - existing behavior unchanged) runs N independent `run.sh` processes per workspace, each with a slot id that namespaces its worktree (`<repo>-orbit-wt-<slot>`), marker files, and log/patch names.
+Shared state becomes safe once, in Python:
+
+- A small flock library (modeled on qa_run's `.qa-running`, the one correct primitive already in the codebase) guards ledger writes, backlog.yaml writers, and a new locked spend/count helper that enforces the daily cap atomically.
+- Claiming moves from the agent to the wrapper: the slot loop picks and **exclusively claims** the task (flock + lifecycle now rejects claim-over-in_progress without --force), then invokes `/orbit-cycle <task-id>`; the skill uses the given id and skips picking. This closes the minutes-wide double-pick window at its root.
+- Claims carry the worker pid; the reaper escalates only tasks whose worker is dead, so it can run while cycles are live.
+- Housekeeping (reap, autoclose, knowledge autorefresh, regression sweep, queue regeneration, autopromote) runs only in slot 0; autopromote's refill target becomes the slot count.
+- QA gates that bring services up serialize behind one lock per workspace (fixed ports).
+- Serialization rules stand: one stage per PRD instance (already structural via the marker), browser QA single-file.
+
+The launcher's per-tab loop control (section 10) starts and stops these same slot processes, which is what makes tabs and concurrency one mechanism.
 
 ### 10. Tabs
 
