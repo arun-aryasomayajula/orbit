@@ -43,7 +43,15 @@ Distill the following method into the maker brief.
    the questionnaire/meta as the design source. Every inline number cites
    `(S<n>)`. Include either at least 3 verbatim `> "..."` quote lines total
    or a `## Coverage gaps` section - never both absent.
-7. **Definition of done**: `python3 $ORBIT_HOME/engine/insight_lint.py .`
+7. **Basis lines MUST start `- S<n>: `** at column 0 (no leading spaces, no
+   bullet nesting) - the lint gate matches this exact shape. Literally:
+
+   ```
+   ## Basis
+   - S1: metaql query <explore>, 2026-08-21
+   - S2: doc raw/responses.csv
+   ```
+8. **Definition of done**: `python3 $ORBIT_HOME/engine/insight_lint.py .`
    exits 0 on the worktree, and every hypothesis from `meta.json` has a
    verdict in the doc.
 

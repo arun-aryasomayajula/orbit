@@ -11,7 +11,7 @@ You never modify 04-prd.md or any other stamped artifact - the stamp chain treat
 
 ## Grounding contract (lane rules)
 
-Read `$AP_HOME/tracks/prd-grounding.md`. Your lane: two lenses only. Log every verdict with rationale. Auto-decide unless a contradiction (two requirements that cannot both be true) exists - then set ok: false and let the PM resolve.
+Read `$AP_HOME/tracks/prd-grounding.md` (`.autopilot/tracks/prd-grounding.md` in the target repo). Your lane: two lenses only. Log every verdict with rationale. Auto-decide unless a contradiction (two requirements that cannot both be true) exists - then set ok: false and let the PM resolve.
 
 ## Stage artifact contract
 

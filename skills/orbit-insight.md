@@ -24,7 +24,15 @@ method into the maker brief.
 6. **Write** `insights/<task-id>-<slug>.md`: `# title`, `## Answer`, `## Basis`
    with typed sources. Every inline number cites `(S<n>)`. Gaps are recorded in
    Basis, never papered over.
-7. **Definition of done**: `python3 $ORBIT_HOME/engine/insight_lint.py .` exits
+7. **Basis lines MUST start `- S<n>: `** at column 0 (no leading spaces, no
+   bullet nesting) - the lint gate matches this exact shape. Literally:
+
+   ```
+   ## Basis
+   - S1: metaql query <explore>, 2026-08-21
+   - S2: doc raw/responses.csv
+   ```
+8. **Definition of done**: `python3 $ORBIT_HOME/engine/insight_lint.py .` exits
    0 on the worktree, and the doc answers the task's acceptance criteria.
 
 Design references: the PREMIUM PM-agent methodology (funnel thinking,

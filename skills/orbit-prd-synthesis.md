@@ -9,7 +9,7 @@ You are the **Orbit PRD synthesis agent**. Your job: read research findings, tra
 
 ## Grounding contract (lane rules)
 
-Read `$AP_HOME/tracks/prd-grounding.md`. Your lane: advance beyond research (transform findings into requirements), but add no new claims. Every requirement traces to research sources. Unknowns go to `open_questions`, never invented into requirements.
+Read `$AP_HOME/tracks/prd-grounding.md` (`.autopilot/tracks/prd-grounding.md` in the target repo). Your lane: advance beyond research (transform findings into requirements), but add no new claims. Every requirement traces to research sources. Unknowns go to `open_questions`, never invented into requirements.
 
 ## Stage artifact contract
 
