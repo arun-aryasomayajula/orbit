@@ -207,15 +207,30 @@ def _state_dir(path: str) -> Path:
 
 def _pid_alive(pid) -> bool:
     """Local copy of locks.pid_alive (same semantics: EPERM means alive but
-    not ours). Duplicated rather than imported because launcher.py is the one
-    engine file that must run standalone - stdlib only, no engine imports, so
-    it still boots from a half-installed tree."""
+    not ours), plus a zombie guard. Duplicated rather than imported because
+    launcher.py is the one engine file that must run standalone - stdlib only,
+    no engine imports, so it still boots from a half-installed tree.
+
+    The zombie guard is load-bearing here in a way it isn't in locks.py: the
+    launcher is the PARENT of every slot it starts, so a slot it TERMs stays
+    on the process table as <defunct> until someone reaps it - and a zombie
+    still answers kill(pid, 0). Left unhandled, a stopped loop reads as
+    running forever (bad badge) AND its slot can never be restarted (the
+    double-start guard sees a live pid). waitpid(WNOHANG) both reaps our own
+    finished children and reports them dead; for a pid that is not our child
+    it raises and we fall through to the signal probe unchanged."""
     try:
         pid = int(pid)
     except (TypeError, ValueError):
         return False
     if pid <= 0:
         return False
+    try:
+        reaped, _status = os.waitpid(pid, os.WNOHANG)
+        if reaped == pid:
+            return False   # our child, already exited - reaped right here
+    except (ChildProcessError, OSError):
+        pass               # not our child (or already reaped) - probe below
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -227,11 +242,16 @@ def _pid_alive(pid) -> bool:
     return True
 
 
-def _worker_pids(path: str) -> list[int]:
-    """Live pids recorded in $STATE/workers/*.pid (run.sh's write_worker_pid
-    writes the SLOT LOOP's own pid there, so these name loop processes - not
-    just in-flight cycles). This is how loops the launcher didn't start
-    (launchd, systemd, a previous launcher) become visible to it."""
+def _live_workers(path: str) -> list[dict]:
+    """One entry per $STATE/workers/<slot>.pid file that names a LIVE pid:
+    {slot, pid, tid, mtime, file}. run.sh's write_worker_pid records the SLOT
+    LOOP's own pid ($$), so these name loop processes - not just in-flight
+    cycles - which is how loops the launcher didn't start (launchd, systemd, a
+    previous launcher process) become visible to it at all.
+
+    A pid file exists only while its slot HOLDS a claim: run.sh writes it right
+    after a successful claim and removes it when the cycle ends. So this sees a
+    working loop, never an idle one between cycles."""
     out = []
     wd = _state_dir(path) / "workers"
     try:
@@ -241,11 +261,21 @@ def _worker_pids(path: str) -> list[int]:
     for f in files:
         try:
             info = json.loads(f.read_text())
+            mtime = f.stat().st_mtime
         except (OSError, ValueError):
             continue   # torn tmp+rename read - same tolerance as command_center's workers_state
-        if isinstance(info, dict) and _pid_alive(info.get("pid")):
-            out.append(int(info["pid"]))
+        if not isinstance(info, dict) or not _pid_alive(info.get("pid")):
+            continue
+        slot = int(f.stem) if f.stem.isdigit() else None
+        out.append({"slot": slot, "pid": int(info["pid"]), "tid": str(info.get("tid") or ""),
+                    "mtime": mtime, "file": f})
     return out
+
+
+def _worker_pids(path: str) -> list[int]:
+    """Just the live pids from _live_workers, for callers that only need
+    "is anything working here?"."""
+    return [w["pid"] for w in _live_workers(path)]
 
 
 def _tracked_loop_pids(path: str) -> list[int]:
@@ -308,37 +338,50 @@ def launchd_label(path: str) -> str:
     return f"com.orbit.{_slug(path)}"
 
 
-def _concurrency(path: str) -> int:
-    """The project's configured `concurrency` (how many slots its loop runs),
-    default 1. Read straight from its .autopilot/config.yaml: engine/config.py
-    would be the authority, but importing it drags in PyYAML, and the launcher
-    is stdlib-only by contract. So try PyYAML if the interpreter happens to
-    have it, else scan for a top-level `concurrency:` line (a commented-out or
-    indented one is deliberately not a match). Any garbage means 1 - the
-    default that reproduces today's single-loop behavior - and a real number
-    is clamped to 1..32 rather than dropped, so a fat-fingered 99 starts a
-    lot of slots instead of silently starting one."""
+def _cfg_int(path: str, key: str, default: int, lo: int, hi: int) -> int:
+    """One integer out of a project's .autopilot/config.yaml, clamped to
+    lo..hi. engine/config.py would be the authority, but importing it drags in
+    PyYAML and the launcher is stdlib-only by contract - so try PyYAML if the
+    interpreter happens to have it, else scan for a top-level `<key>:` line (a
+    commented-out or indented one is deliberately not a match). Any garbage
+    means `default`; a real number out of range is clamped rather than
+    dropped, so a fat-fingered value behaves like the nearest legal one."""
     cfg = Path(path) / ".autopilot" / "config.yaml"
     try:
         text = cfg.read_text()
     except OSError:
-        return 1
+        return default
     raw = None
     try:
         import yaml   # noqa: PLC0415 - optional, see above
         loaded = yaml.safe_load(text) or {}
         if isinstance(loaded, dict):
-            raw = loaded.get("concurrency")
+            raw = loaded.get(key)
     except Exception:
         raw = None
     if raw is None:
-        m = re.search(r"^concurrency:\s*([0-9]+)\s*$", text, re.MULTILINE)
+        m = re.search(rf"^{re.escape(key)}:\s*([0-9]+)\s*$", text, re.MULTILINE)
         raw = m.group(1) if m else None
     try:
         n = int(raw)
     except (TypeError, ValueError):
-        return 1
-    return min(max(n, 1), 32)
+        return default
+    return min(max(n, lo), hi)
+
+
+def _concurrency(path: str) -> int:
+    """How many slots this project's loop runs. Default 1 - the value that
+    reproduces today's single-loop behavior byte for byte."""
+    return _cfg_int(path, "concurrency", 1, 1, 32)
+
+
+def _stale_after(path: str) -> float:
+    """How old a worker pid file may be before the launcher stops believing it
+    identifies a live loop: 3x the project's cycle timeout, the same "way past
+    any legitimate cycle" backstop shape ledger.py's reap uses. Anything older
+    is treated as a leaked file whose pid has probably been recycled onto an
+    unrelated process."""
+    return 3.0 * _cfg_int(path, "cycle_timeout_seconds", 3600, 60, 86400)
 
 
 def _loop_argv(path: str) -> list[str]:
@@ -504,7 +547,15 @@ def do_open(path: str) -> dict:
 def do_loop_start(path: str) -> dict:
     """Start this project's loop: one detached engine/run.sh process per slot
     (0..concurrency-1). Disarms the STOP file first - a start with STOP still
-    on disk would spawn slots that immediately idle."""
+    on disk would spawn slots that immediately idle.
+
+    Never spawns a slot that is already working. Two slots on one number would
+    share a worktree, a pid file and (at slot 0) the legacy marker filenames,
+    so they would stomp each other's checkout mid-cycle. Own slots are known
+    from LOOPS; slots owned by a loop this launcher did NOT start (launchd, or
+    a previous launcher process - LOOPS is empty after a restart while the
+    loops live on, per the no-kill-on-exit ruling) are known from their
+    $STATE/workers/<slot>.pid files."""
     proj = registry_get(path)
     if not proj:
         return {"ok": False, "msg": "project not registered - import it first"}
@@ -517,21 +568,35 @@ def do_loop_start(path: str) -> dict:
         logs.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         return {"ok": False, "msg": f"could not create {logs}: {e}"}
-    try:
-        (state / "STOP").unlink()
-    except FileNotFoundError:
-        pass
-    except OSError as e:
-        return {"ok": False, "msg": f"could not clear the STOP file: {e}"}
     slots = _concurrency(p)
     label = launchd_label(p)
     _tracked_loop_pids(p)   # reap dead entries so a restart refills their slots
-    started, kept, failed = [], [], []
+    started, kept, skipped, failed = [], [], [], []
     with _LOCK:
+        # Under the lock together with the spawns: a loop-stop racing this
+        # would otherwise arm STOP between the unlink and the last Popen,
+        # leaving slots that come up already stopped (or, the other way
+        # round, a stop whose STOP file this unlink silently undoes).
+        try:
+            (state / "STOP").unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            return {"ok": False, "msg": f"could not clear the STOP file: {e}"}
+        # Slots a foreign loop is working right now, by pid file. Only slots
+        # NOT in this set (and not already ours) are free to spawn.
+        foreign = {w["slot"]: w["pid"] for w in _live_workers(p)
+                   if w["slot"] is not None and w["pid"] not in
+                   {pr.pid for pr in (LOOPS.get(p) or {}).values()}}
         table = LOOPS.setdefault(p, {})
         for slot in range(slots):
             if slot in table:
                 kept.append(slot)   # already ours and alive (just reaped above)
+                continue
+            if slot in foreign:
+                # Someone else's live loop owns this slot - refuse, never
+                # duplicate it. It stops with loop-stop like any other.
+                skipped.append(slot)
                 continue
             env = dict(os.environ)
             env.update({
@@ -564,15 +629,25 @@ def do_loop_start(path: str) -> dict:
             started.append(slot)
         if not table:
             LOOPS.pop(p, None)
+    live = len(kept) + len(skipped)
     if failed and not started:
-        return {"ok": False, "msg": "could not start the loop - " + "; ".join(failed)}
+        return {"ok": False, "msg": "could not start the loop - " + "; ".join(failed),
+                "slots": slots, "started": [], "skipped": skipped}
+    if not started and live:
+        # Nothing to do, and saying "started 0 slots" would read as a failure.
+        return {"ok": True, "slots": slots, "started": [], "skipped": skipped,
+                "msg": f"{proj['name']}: already running ({live} live slot(s) of {slots}"
+                       + (f"; slot(s) {', '.join(str(s) for s in skipped)} started outside this launcher)"
+                          if skipped else ")")}
     bits = [f"started {len(started)} slot(s) of {slots}"]
     if kept:
         bits.append(f"{len(kept)} already running")
+    if skipped:
+        bits.append(f"slot(s) {', '.join(str(s) for s in skipped)} left alone (already live outside this launcher)")
     if failed:
         bits.append("failed: " + "; ".join(failed))
     return {"ok": True, "msg": f"{proj['name']}: " + ", ".join(bits),
-            "slots": slots, "started": started}
+            "slots": slots, "started": started, "skipped": skipped}
 
 
 def do_loop_stop(path: str) -> dict:
@@ -584,24 +659,53 @@ def do_loop_stop(path: str) -> dict:
     systemd Restart, and a STOP-less restart would silently resume the work
     the operator just stopped. Armed, the restarted loop comes back up and
     idles. Resuming is therefore always an explicit loop-start (which clears
-    the file), never an accident."""
+    the file), never an accident.
+
+    What may be signalled is deliberately narrow. Processes this launcher
+    started are signalled outright (it owns them). A pid read out of a
+    $STATE/workers/<slot>.pid file is only signalled once its identity holds
+    up: the file must name a task (`tid`) and have been touched inside 3x the
+    project's cycle timeout. A leaked file (SIGKILLed loop, crashed box) ages
+    out of that window, and the moment it does, the launcher stops believing
+    its pid - because the OS recycles pids, and a stale number can name
+    someone else's process entirely. Residual risk, stated honestly: inside
+    the freshness window a recycled pid IS still signallable, since nothing on
+    disk ties a pid to the process that wrote it. run.sh removes its pid file
+    at the end of every cycle, so the window only stays open for a loop that
+    died hard mid-cycle."""
     proj = registry_get(path)
     if not proj:
         return {"ok": False, "msg": "project not registered - import it first"}
     p = proj["path"]
     state = _state_dir(p)
-    try:
-        state.mkdir(parents=True, exist_ok=True)
-        (state / "STOP").write_text(f"stopped by the launcher at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-    except OSError as e:
-        return {"ok": False, "msg": f"could not write the STOP file: {e}"}
+    with _LOCK:
+        # Same lock as do_loop_start's STOP section: the file must not be
+        # unlinked by a racing start between this write and the signals below.
+        try:
+            state.mkdir(parents=True, exist_ok=True)
+            (state / "STOP").write_text(f"stopped by the launcher at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        except OSError as e:
+            return {"ok": False, "msg": f"could not write the STOP file: {e}"}
     if LOOP_STOP_GRACE > 0:
         time.sleep(LOOP_STOP_GRACE)
+    with _LOCK:
+        # Hold the Popen objects: they are the only way to reap the slots we
+        # are about to kill (see the wait() below), so this must NOT drop them
+        # from LOOPS before then.
+        procs = list((LOOPS.get(p) or {}).values())
     tracked = _tracked_loop_pids(p)
     # Untracked loops (launchd, systemd, a previous launcher) are only ever
     # signalled when THIS project's own workers/*.pid names them - the pid
     # files are the whole allowlist. Nothing here ever pgreps the machine.
-    extra = [pid for pid in _worker_pids(p) if pid not in tracked]
+    extra, stale = [], []
+    cutoff = time.time() - _stale_after(p)
+    for w in _live_workers(p):
+        if w["pid"] in tracked:
+            continue
+        if not w["tid"] or w["mtime"] < cutoff:
+            stale.append(w)
+            continue
+        extra.append(w["pid"])
     signalled, errors = [], []
     for pid in tracked + extra:
         try:
@@ -621,13 +725,33 @@ def do_loop_stop(path: str) -> dict:
             pass   # already gone - STOP stays armed either way
         except OSError as e:
             errors.append(f"pid {pid}: {e}")
-    with _LOCK:
-        LOOPS.pop(p, None)
+    # Reap what we just killed. A slot the launcher started is its CHILD, and
+    # an unreaped child sits on the process table as a zombie that still
+    # answers kill(pid, 0) - which would leave this project reading as running
+    # forever and its slots permanently unstartable. Bounded: a slot that
+    # ignores SIGTERM stays tracked (and honestly reported as running) instead
+    # of blocking the request.
+    for proc in procs:
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        except Exception:
+            pass
+    _tracked_loop_pids(p)   # prunes the reaped slots out of LOOPS
     msg = f"{proj['name']}: STOP armed"
     msg += f", TERMed {len(signalled)} loop process(es)" if signalled else ", no live loop process found"
+    if stale:
+        # Named, not swallowed: an operator who sees a loop that won't die
+        # needs to know which file the launcher refused to trust.
+        msg += (". Ignored unverifiable worker file(s): "
+                + "; ".join(f"{w['file'].name} (pid {w['pid']}, "
+                            + ("no task id" if not w["tid"] else "not touched recently") + ")"
+                            for w in stale))
     if errors:
         msg += " (" + "; ".join(errors) + ")"
-    return {"ok": True, "msg": msg, "signalled": signalled}
+    return {"ok": True, "msg": msg, "signalled": signalled,
+            "ignored": [w["file"].name for w in stale]}
 
 
 def do_create(path: str, name: str = "", product: bool = False) -> dict:
@@ -635,13 +759,25 @@ def do_create(path: str, name: str = "", product: bool = False) -> dict:
     install/init.py (--product for a PM workspace), register it, and bring up
     its dashboard child. Refuses to touch a directory that already has
     anything in it - scaffolding into someone's existing repo is what
-    /_launcher/import + /_launcher/init are for."""
+    /_launcher/import + /_launcher/init are for.
+
+    Not transactional: a create that dies after `git init` (or partway through
+    init.py) leaves a half-built directory behind, and a retry then hits the
+    not-empty refusal. Every such message therefore names the recovery path -
+    import that directory and initialize it, or delete it and create again -
+    instead of leaving the operator staring at a refusal for a directory they
+    only just made."""
     path = (path or "").strip()
     if not path:
         return {"ok": False, "msg": "path is required"}
     p = Path(path).expanduser()
     if not p.is_absolute():
         return {"ok": False, "msg": "path must be absolute"}
+    # A broken symlink answers False to exists() but blows up mkdir with a
+    # bare FileExistsError, so name it before that happens.
+    if p.is_symlink() and not p.exists():
+        return {"ok": False, "msg": f"'{p}' is a broken symlink - remove it (or pick another path) and try again"}
+    recover = "import that directory and initialize it, or delete it and create again"
     if p.exists():
         if not p.is_dir():
             return {"ok": False, "msg": f"'{p}' exists and is not a directory"}
@@ -650,7 +786,9 @@ def do_create(path: str, name: str = "", product: bool = False) -> dict:
         except OSError as e:
             return {"ok": False, "msg": f"could not read '{p}': {e}"}
         if nonempty:
-            return {"ok": False, "msg": f"'{p}' already exists and is not empty - import it instead"}
+            return {"ok": False,
+                    "msg": f"'{p}' already exists and is not empty - use Import for an existing repo. "
+                           f"If a previous create failed here, {recover}."}
     try:
         p.mkdir(parents=True, exist_ok=True)
     except OSError as e:
@@ -660,9 +798,10 @@ def do_create(path: str, name: str = "", product: bool = False) -> dict:
         try:
             r = subprocess.run(["git", "init", "-q", str(p)], capture_output=True, text=True, timeout=60)
         except Exception as e:
-            return {"ok": False, "msg": f"git init failed: {e}"}
+            return {"ok": False, "msg": f"git init failed: {e}. The directory is left in place - {recover}."}
         if r.returncode != 0:
-            return {"ok": False, "msg": f"git init failed: {(r.stderr or r.stdout or '').strip()[-500:]}"}
+            return {"ok": False, "msg": f"git init failed: {(r.stderr or r.stdout or '').strip()[-500:]}. "
+                                        f"The directory is left in place - {recover}."}
     argv = [sys.executable, str(INIT_SCRIPT), str(p), str(ORBIT_HOME)]
     if product:
         argv.append("--product")
@@ -674,7 +813,8 @@ def do_create(path: str, name: str = "", product: bool = False) -> dict:
         return {"ok": False, "msg": f"failed to run init: {e}"}
     if r.returncode != 0:
         out = ((r.stdout or "") + ("\n" + r.stderr if r.stderr else "")).strip()
-        return {"ok": False, "msg": f"init failed (rc={r.returncode}): {out[-2000:]}"}
+        return {"ok": False, "msg": f"init failed (rc={r.returncode}): {out[-2000:]}\n"
+                                    f"The directory is left in place - {recover}."}
     proj = registry_add(str(p), name=name)
     # A workspace with no dashboard is a workspace an operator can't see, so
     # bring the child up now - but a spawn failure is not a create failure:

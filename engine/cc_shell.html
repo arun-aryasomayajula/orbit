@@ -466,11 +466,16 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
 .projsw-car{flex:none;color:var(--faint);font-size:9px}
 .projsw-menu{position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--card2);border:1px solid var(--line2);
   border-radius:8px;box-shadow:0 12px 28px rgba(0,0,0,.5);z-index:30;max-height:280px;overflow-y:auto}
-.projsw-item{padding:8px 10px;font:500 11.5px var(--mono);color:var(--ink);cursor:pointer;border-bottom:1px solid var(--line)}
+.projsw-item{display:flex;align-items:center;gap:6px;padding:8px 10px;font:500 11.5px var(--mono);color:var(--ink);cursor:pointer;border-bottom:1px solid var(--line)}
 .projsw-item:last-child{border-bottom:0}
 .projsw-item:hover{background:var(--card)}
 .projsw-item.mut{color:var(--faint);cursor:default}
 .projsw-item .live-dot{color:var(--green);margin-left:4px}
+.projsw-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.projsw-mini{flex:none;background:transparent;border:1px solid var(--line2);border-radius:5px;color:var(--dim);
+  font:600 10px var(--disp);padding:2px 6px;cursor:pointer}
+.projsw-mini:hover{color:var(--ink);border-color:var(--faint)}
+.projsw-mini:disabled{opacity:.4;cursor:not-allowed}
 .rail-collapsed .projsw{display:none}
 </style></head><body>
 
@@ -3024,17 +3029,53 @@ function initProjectSwitcher(){
     sw.style.display='';
     document.getElementById('projSwName').textContent=j.active_name||'project';
     sw.dataset.projects=JSON.stringify(j.projects||[]);
+    // Keep an OPEN menu in sync (a loop action re-runs this) - a stale menu
+    // would keep offering Start for a loop that is already up.
+    const menu=document.getElementById('projSwMenu');
+    if(menu&&menu.style.display!=='none')renderProjMenu();
   }).catch(()=>{});
 }
-function toggleProjMenu(){
+function renderProjMenu(){
   const sw=document.getElementById('projSwitcher'),menu=document.getElementById('projSwMenu');
   if(!sw||!menu)return;
-  if(menu.style.display!=='none'){menu.style.display='none';return;}
   let projects=[];try{projects=JSON.parse(sw.dataset.projects||'[]');}catch(e){}
-  menu.innerHTML=projects.length?projects.map(p=>
-    `<div class="projsw-item" onclick="switchProject('${escJsAttr(p.path)}')">${esc(p.name)}${p.has_autopilot?'':' <span class=mut>(not initialized)</span>'}${p.loop_running?' <span class=live-dot>●</span>':''}</div>`
-  ).join(''):'<div class="projsw-item mut">No other projects</div>';
+  // Row = switch target (the whole row) + this workspace's loop controls.
+  // Start is disabled while the loop runs: the launcher refuses to put a
+  // second process on a live slot, so the button must not invite the click.
+  // Both minis stopPropagation, or clicking one would also switch project.
+  menu.innerHTML=projects.length?projects.map(p=>{
+    const slots=p.loop_running&&p.loop_slots>1?` <span class=mut>${p.loop_tracked}/${p.loop_slots}</span>`:'';
+    const acts=p.has_autopilot?
+      `<button class="projsw-mini" ${p.loop_running?'disabled':''} title="${p.loop_running?'Loop already running':'Start this workspace loop'}"
+               onclick="event.stopPropagation();loopAction('start','${escJsAttr(p.path)}')">▶</button>
+       <button class="projsw-mini" title="Stop this workspace loop (stays stopped)"
+               onclick="event.stopPropagation();loopAction('stop','${escJsAttr(p.path)}')">■</button>`:'';
+    return `<div class="projsw-item" onclick="switchProject('${escJsAttr(p.path)}')">`
+      +`<span class="projsw-name">${esc(p.name)}${p.has_autopilot?'':' <span class=mut>(not initialized)</span>'}`
+      +`${p.loop_running?' <span class=live-dot>●</span>':''}${slots}</span>${acts}</div>`;
+  }).join(''):'<div class="projsw-item mut">No other projects</div>';
+}
+function toggleProjMenu(){
+  const menu=document.getElementById('projSwMenu');
+  if(!menu)return;
+  if(menu.style.display!=='none'){menu.style.display='none';return;}
+  renderProjMenu();
   menu.style.display='';
+}
+function loopAction(which,path){
+  // Routes spelled out, not concatenated: a grep for '/_launcher/loop-start'
+  // must find every caller (that is how shell/route parity gets checked).
+  const route=which==='start'?'/_launcher/loop-start':'/_launcher/loop-stop';
+  postJSON(route,{path:path}).then(j=>{
+    toast(j.msg||(j.ok?'done':'failed'));
+    // Re-read /_launcher/state so the badge tells the truth. Twice: a stop
+    // returns as soon as it has SIGNALLED the slots, and a signalled process
+    // is still alive (so still "running") for a beat after that. This menu
+    // has no poll of its own, so without the second read the badge would sit
+    // there claiming the loop is up until the operator reopened it.
+    initProjectSwitcher();
+    setTimeout(initProjectSwitcher,2500);
+  }).catch(e=>toast('Loop '+which+' failed: '+e));
 }
 function switchProject(path){
   // /_launcher/* is a launcher-owned namespace and takes a JSON body (unlike

@@ -672,11 +672,18 @@ def loops(launcher, tmp_path, monkeypatch):
     envdir.mkdir()
     script = tmp_path / "fake-run.sh"
     # Records the slot env it was handed (so the spawn contract is assertable),
-    # says one line on stdout (so the loop-<slot>.out redirection is too), then
-    # sleeps until it is signalled.
+    # writes the same $STATE/workers/<slot>.pid record run.sh's
+    # write_worker_pid writes (pid = the loop's own $$ - that is what makes a
+    # loop visible to a launcher that didn't start it), says one line on stdout
+    # (so the loop-<slot>.out redirection is assertable too), then sleeps until
+    # it is signalled. Deliberately does NOT clean the pid file up on exit:
+    # run.sh's trap does, but a loop that dies hard doesn't, and the launcher
+    # has to be right in the harsher case.
     script.write_text(
         "#!/bin/sh\n"
         'printf "%s\\n" "$ORBIT_SLOT|$ORBIT_SLOTS|$ORBIT_LAUNCHD_LABEL|$1" > "$ORBIT_TEST_ENVDIR/slot-$ORBIT_SLOT"\n'
+        'W="$1/.autopilot/state/workers"; mkdir -p "$W"\n'
+        'printf \'{"pid": %s, "tid": "t-fake-%s", "started": "now"}\\n\' "$$" "$ORBIT_SLOT" > "$W/$ORBIT_SLOT.pid"\n'
         'echo "fake loop slot $ORBIT_SLOT up"\n'
         "sleep 60\n")
     script.chmod(0o755)
@@ -752,6 +759,40 @@ def test_loop_start_is_idempotent_for_live_slots(loops, tmp_path):
     second = launcher.do_loop_start(str(repo))
     assert second["started"] == []   # nothing new spawned
     assert launcher.LOOPS[str(repo.resolve())][0].pid == first
+
+
+def test_loop_start_never_double_starts_a_slot_a_foreign_loop_owns(loops, tmp_path):
+    # THE cross-restart case: after a launcher restart LOOPS is empty while
+    # the loops it started keep running (the no-kill-on-exit ruling), so a
+    # Start click must not put a second process on a slot that is already
+    # working - two loops on one slot share a worktree, a pid file and (at
+    # slot 0) the legacy marker names, and would stomp each other mid-cycle.
+    launcher, envdir = loops
+    repo = _workspace(tmp_path, "restarted", concurrency=2)
+    launcher.registry_add(str(repo))
+    workers = repo / ".autopilot" / "state" / "workers"
+    workers.mkdir(parents=True)
+    foreign = subprocess.Popen(["/bin/sh", "-c", "sleep 60"], start_new_session=True)
+    try:
+        # slot 1 is live under a pid this launcher does not track
+        (workers / "1.pid").write_text(json.dumps({"pid": foreign.pid, "tid": "t-9", "started": "now"}))
+        result = launcher.do_loop_start(str(repo))
+        assert result["ok"] is True, result["msg"]
+        assert result["started"] == [0]        # only the genuinely free slot
+        assert result["skipped"] == [1]
+        assert "1" in result["msg"] and "outside this launcher" in result["msg"]
+        assert sorted(launcher.LOOPS[str(repo.resolve())]) == [0]
+        assert _wait_for(lambda: [f.name for f in envdir.iterdir()] == ["slot-0"]), list(envdir.iterdir())
+
+        # and with every slot accounted for, a second Start is a no-op
+        again = launcher.do_loop_start(str(repo))
+        assert again["ok"] is True
+        assert again["started"] == []
+        assert "already running" in again["msg"]
+        assert sorted(launcher.LOOPS[str(repo.resolve())]) == [0]
+    finally:
+        os.killpg(os.getpgid(foreign.pid), signal.SIGKILL)
+        foreign.wait(timeout=5)
 
 
 def test_loop_start_rejects_unregistered_and_uninitialized(loops, tmp_path):
@@ -842,6 +883,117 @@ def test_loop_stop_only_blasts_a_process_group_the_loop_actually_leads(loops, tm
             assert blasted == [(4242, signal.SIGTERM)] and killed == []
         else:
             assert killed == [(4242, signal.SIGTERM)] and blasted == []
+
+
+def test_stop_then_start_works_and_leaves_no_zombie_slot(loops, tmp_path):
+    # The bug this pins (found by a live run, not by a unit test): a slot the
+    # launcher TERMs is its own child, so unreaped it lingers as <defunct> -
+    # and a zombie still answers kill(pid, 0). With its pid file still on disk
+    # (a loop that died hard leaves one), the launcher would read the project
+    # as running forever AND refuse to restart the slot, i.e. Stop would be a
+    # one-way door.
+    launcher, envdir = loops
+    repo = _workspace(tmp_path, "cycleback")
+    launcher.registry_add(str(repo))
+    assert launcher.do_loop_start(str(repo))["started"] == [0]
+    pidfile = repo / ".autopilot" / "state" / "workers" / "0.pid"
+    assert _wait_for(lambda: pidfile.exists())
+
+    launcher.do_loop_stop(str(repo))
+    assert pidfile.exists()                        # nothing cleaned it up
+    assert launcher.LOOPS == {}                    # reaped, not zombified
+    assert launcher._live_workers(str(repo)) == []  # the dead pid is not "live"
+    assert launcher._loop_running(str(repo)) is False
+
+    # ...and Start works again, on the same slot
+    again = launcher.do_loop_start(str(repo))
+    assert again["started"] == [0], again["msg"]
+    assert again["skipped"] == []
+    assert launcher._loop_running(str(repo)) is True
+
+
+def test_loop_stop_ignores_worker_files_it_cannot_correlate(loops, tmp_path):
+    # A pid file is only trusted to name a live loop while its identity holds
+    # up: it must name a task AND have been touched inside 3x cycle_timeout.
+    # A leaked file (SIGKILLed loop) ages out, and once it does its pid may
+    # well have been recycled onto an unrelated process - never TERM that.
+    launcher, envdir = loops
+    repo = _workspace(tmp_path, "stalefiles", concurrency=1)
+    cfg = repo / ".autopilot" / "config.yaml"
+    cfg.write_text(cfg.read_text() + "cycle_timeout_seconds: 60\n")
+    launcher.registry_add(str(repo))
+    workers = repo / ".autopilot" / "state" / "workers"
+    workers.mkdir(parents=True)
+    stray = subprocess.Popen(["/bin/sh", "-c", "sleep 60"], start_new_session=True)
+    try:
+        # old file (mtime way past 3x60s) + a file with no task id
+        old = workers / "0.pid"
+        old.write_text(json.dumps({"pid": stray.pid, "tid": "t-1", "started": "old"}))
+        os.utime(old, (time.time() - 3600, time.time() - 3600))
+        untitled = workers / "1.pid"
+        untitled.write_text(json.dumps({"pid": stray.pid, "tid": "", "started": "now"}))
+
+        result = launcher.do_loop_stop(str(repo))
+        assert result["ok"] is True
+        assert result["signalled"] == []
+        assert sorted(result["ignored"]) == ["0.pid", "1.pid"]
+        assert "0.pid" in result["msg"] and "1.pid" in result["msg"]
+        assert stray.poll() is None       # never signalled
+        assert (repo / ".autopilot" / "state" / "STOP").exists()   # STOP still armed
+
+        # freshen one of them and it becomes signallable again
+        untitled.write_text(json.dumps({"pid": stray.pid, "tid": "t-2", "started": "now"}))
+        result = launcher.do_loop_stop(str(repo))
+        assert result["signalled"] == [stray.pid]
+        assert result["ignored"] == ["0.pid"]
+        assert _wait_for(lambda: stray.poll() is not None)
+    finally:
+        if stray.poll() is None:
+            os.killpg(os.getpgid(stray.pid), signal.SIGKILL)
+            stray.wait(timeout=5)
+
+
+def test_loop_start_and_stop_serialize_their_stop_file_section(loops, tmp_path):
+    # start clears STOP and stop writes it; both do that under the launcher's
+    # lock, so the file can never end up cleared by a start that lost the race
+    # with a stop (slots coming up already stopped, or worse).
+    launcher, envdir = loops
+    repo = _workspace(tmp_path, "stoprace")
+    launcher.registry_add(str(repo))
+    stop = repo / ".autopilot" / "state" / "STOP"
+    barrier = threading.Barrier(3)
+    errors = []
+
+    def start():
+        barrier.wait()
+        try:
+            launcher.do_loop_start(str(repo))
+        except Exception as e:   # pragma: no cover - a raise here IS the failure
+            errors.append(e)
+
+    def halt():
+        barrier.wait()
+        try:
+            launcher.do_loop_stop(str(repo))
+        except Exception as e:   # pragma: no cover
+            errors.append(e)
+
+    threads = [threading.Thread(target=start), threading.Thread(target=halt)]
+    for t in threads:
+        t.start()
+    barrier.wait()
+    for t in threads:
+        t.join(timeout=20)
+    assert errors == []
+    # The invariant that matters: the launcher never ends up with STOP armed
+    # AND slots it believes are running (a start whose STOP-clear was undone
+    # would leave exactly that - live slots that immediately idle, reported as
+    # running). Either the stop won (STOP armed, nothing tracked) or the start
+    # did (no STOP; whatever it spawned may still be tracked).
+    tracked = launcher._tracked_loop_pids(str(repo))
+    if stop.exists():
+        assert stop.read_text().startswith("stopped by the launcher")
+        assert tracked == [], "STOP is armed but the launcher still tracks live slots"
 
 
 def test_loop_running_is_true_while_a_slot_lives_and_false_after_stop(loops, tmp_path):
@@ -965,6 +1117,46 @@ def test_create_accepts_an_existing_empty_directory(launcher, tmp_path, monkeypa
     assert (target / ".autopilot" / "config.yaml").exists()
 
 
+def test_create_refuses_a_broken_symlink_target(launcher, tmp_path, monkeypatch):
+    # exists() is False for a dangling symlink, so without an explicit check
+    # this reached mkdir and died with a bare FileExistsError.
+    monkeypatch.setattr(launcher, "spawn_child", lambda p: (True, "opened"))
+    link = tmp_path / "dangling"
+    link.symlink_to(tmp_path / "nothing-here")
+    result = launcher.do_create(str(link), name="", product=False)
+    assert result["ok"] is False
+    assert "symlink" in result["msg"]
+    assert launcher.registry_list() == []
+
+
+def test_create_non_empty_refusal_names_the_recovery_path(launcher, tmp_path, monkeypatch):
+    # create is not transactional: a half-built directory (git init done, init
+    # died) must not leave the operator with a dead-end refusal.
+    monkeypatch.setattr(launcher, "spawn_child", lambda p: (True, "opened"))
+    half = tmp_path / "half-built"
+    half.mkdir()
+    (half / ".git").mkdir()
+    msg = launcher.do_create(str(half), name="", product=False)["msg"]
+    assert "Import" in msg
+    assert "delete it and create again" in msg
+
+
+def test_create_route_rejects_a_wrong_token(launcher, tmp_path):
+    lch = _start_launcher(launcher)
+    try:
+        target = tmp_path / "never-made"
+        body = json.dumps({"path": str(target), "name": "nope", "product": False}).encode()
+        req = urllib.request.Request(f"http://127.0.0.1:{lch.port}/_launcher/create", data=body, method="POST",
+                                     headers={"Content-Type": "application/json", "X-CC-Token": "wrong-token"})
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            urllib.request.urlopen(req, timeout=10)
+        assert ei.value.code == 403
+        assert not target.exists()          # nothing scaffolded
+        assert launcher.registry_list() == []
+    finally:
+        lch.close()
+
+
 def test_create_rejects_a_relative_or_missing_path(launcher):
     assert launcher.do_create("", name="", product=False)["ok"] is False
     res = launcher.do_create("relative/workspace", name="", product=False)
@@ -1000,6 +1192,20 @@ def test_create_route_over_http(launcher, tmp_path, monkeypatch):
         assert (target / ".autopilot" / "config.yaml").exists()
     finally:
         lch.close()
+
+
+def test_both_shells_wire_the_loop_routes(launcher):
+    # Loop control has to be reachable from wherever the operator is: the
+    # picker's tab strip (launcher_shell) AND the dashboard's project switcher
+    # (cc_shell), which is the only launcher chrome visible once a project is
+    # open and the launcher is proxying / to that child.
+    picker = (ENGINE / "launcher_shell.html").read_text()
+    dash = (ENGINE / "cc_shell.html").read_text()
+    for shell, name in [(picker, "launcher_shell.html"), (dash, "cc_shell.html")]:
+        assert "/_launcher/loop-start" in shell, f"{name} has no way to start a loop"
+        assert "/_launcher/loop-stop" in shell, f"{name} has no way to stop a loop"
+        assert "loop_running" in shell, f"{name} shows no running state"
+    assert "/_launcher/create" in picker
 
 
 def test_concurrency_reads_the_config_and_defaults_to_one(launcher, tmp_path):

@@ -173,9 +173,13 @@ function renderTabs(state) {
     const active = state.active === p.path ? ' is-active' : '';
     const slots = p.loop_running && p.loop_slots ? `${p.loop_tracked}/${p.loop_slots}` : '';
     const label = p.has_autopilot ? 'open' : 'not initialized - click to initialize';
+    // Start is disabled while the loop is running: the server refuses to
+    // double-start a live slot anyway (that would put two loops on one
+    // worktree), so the button must not invite the click either.
     const controls = p.has_autopilot
       ? `<button class="tab-mini go" data-act="loop-start" data-path="${esc(p.path)}"
-                 title="Start this workspace's loop">▶</button>
+                 ${p.loop_running ? 'disabled' : ''}
+                 title="${p.loop_running ? 'Already running' : "Start this workspace's loop"}">▶</button>
          <button class="tab-mini halt" data-act="loop-stop" data-path="${esc(p.path)}"
                  title="Stop this workspace's loop (leaves it stopped)">■</button>`
       : `<button class="tab-mini" data-act="init" data-path="${esc(p.path)}"
