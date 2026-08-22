@@ -1,12 +1,27 @@
 # Task 2: exclusive, pid-aware claims (engine/ledger.py `claim --exclusive
-# --pid P --slot S`) and pid-aware reaping (`reap`). Exclusive claims add a
-# second winner-take-all layer on top of the existing lifecycle gate: two
-# workers racing the same tid must produce exactly one winner, verified
+# --pid P --slot S`) and identity-aware reaping (`reap`). Exclusive claims
+# add a second winner-take-all layer on top of the existing lifecycle gate:
+# two workers racing the same tid must produce exactly one winner, verified
 # under a real flock (engine/locks.py) with the ledger reloaded inside it.
 # A dead worker's in_progress entry is the one case that's reclaimable
-# (takeover, recorded via `reclaimed_from`) rather than refused; every other
-# non-absent state is not. `reap` gets the same pid-awareness: a stale entry
-# whose recorded worker is still alive is skipped, not escalated.
+# (takeover, sanctioned via lifecycle's `reclaim` event and recorded on a
+# `reclaimed_from` list) rather than refused; every other non-absent state
+# is not.
+#
+# `reap` is identity-, not pid-, aware: an entry's claim-time worker_pid is
+# the slot LOOP's own long-lived pid, so trusting it alone (as an earlier
+# version of this fix did) would make the reaper a permanent no-op for as
+# long as that loop keeps running, whether or not it's still on THIS task —
+# the bug an adversarial review caught. Liveness now requires
+# $AP_STATE/workers/<slot>.pid to name a live pid AND the exact tid in
+# question; a mismatch, dead pid, or missing file all escalate. An
+# unconditional backstop escalates past 3x the timeout regardless of any
+# liveness signal.
+#
+# Every ledger state-writing verb (claim, committed, pushed, escalate, mark,
+# clear, reap, ...) now goes through one shared lock (`_locked_update`) for
+# its whole load-modify-save cycle, so two concurrent verb invocations can
+# never lose one's update to the other's whole-file rewrite.
 #
 # Run: python3 -m pytest tests/test_slot_claims.py -v   (from orbit/)
 import json
@@ -14,6 +29,7 @@ import multiprocessing as mp
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 ENGINE = Path(__file__).resolve().parent.parent / "engine"
@@ -91,6 +107,7 @@ def test_two_concurrent_exclusive_claims_exactly_one_wins(tmp_path):
 def test_dead_pid_in_progress_is_reclaimable_with_takeover_note(tmp_path):
     dead = _guaranteed_dead_pid()
     entries = {"t1": {"state": "in_progress", "worker_pid": dead, "slot": "slot-a",
+                       "claimed_at": "2019-01-01T00:00:00Z",
                        "updated_at": "2020-01-01T00:00:00Z"}}
     r = _ledger(tmp_path, "claim", "t1", "again", "--exclusive", "--pid", "555", "--slot", "slot-b",
                 entries=entries)
@@ -98,8 +115,29 @@ def test_dead_pid_in_progress_is_reclaimable_with_takeover_note(tmp_path):
     e = _entries(tmp_path)["t1"]
     assert e["worker_pid"] == 555
     assert e["slot"] == "slot-b"
-    assert e["reclaimed_from"] == dead
+    assert e["reclaimed_from"] == [dead]           # a list, not a bare scalar
     assert e["state"] == "in_progress"
+    assert e["claimed_at"] != "2019-01-01T00:00:00Z"  # takeover resets claimed_at
+
+
+def test_second_takeover_appends_to_reclaimed_from_list(tmp_path):
+    first_dead = 111111
+    second_dead = _guaranteed_dead_pid()
+    entries = {"t1": {"state": "in_progress", "worker_pid": second_dead, "slot": "slot-b",
+                       "reclaimed_from": [first_dead],
+                       "updated_at": "2020-01-01T00:00:00Z"}}
+    r = _ledger(tmp_path, "claim", "t1", "again", "--exclusive", "--pid", "777", "--slot", "slot-c",
+                entries=entries)
+    assert r.returncode == 0, r.stderr
+    assert _entries(tmp_path)["t1"]["reclaimed_from"] == [first_dead, second_dead]  # appended, not overwritten
+
+
+def test_lifecycle_check_can_verb_confirms_reclaim_is_legal(tmp_path):
+    # Nothing calls `ledger.py can ... reclaim` directly today, but this
+    # confirms the same lifecycle.check() path cmd_claim_exclusive routes
+    # its takeover through actually says yes for the state it fires from.
+    r = _ledger(tmp_path, "can", "t1", "reclaim", entries={"t1": {"state": "in_progress"}})
+    assert r.returncode == 0
 
 
 # ── non-reclaimable entries refuse with exit 5, nothing written ────────────
@@ -173,24 +211,76 @@ def test_non_exclusive_claim_over_in_progress_force_still_overrides(tmp_path):
     assert e["forced"] is True
 
 
-# ── reap: pid-aware liveness gates escalation ───────────────────────────────
+# ── reap: identity-aware liveness gates escalation ──────────────────────────
 
-def test_reap_skips_stale_entry_with_a_live_worker_pid(tmp_path):
+def _write_worker_pid_file(tmp_path, slot, pid, tid):
+    workers_dir = tmp_path / "workers"
+    workers_dir.mkdir(exist_ok=True)
+    (workers_dir / f"{slot}.pid").write_text(json.dumps({"pid": pid, "tid": tid}))
+
+
+def test_reap_skips_when_worker_pid_file_matches_live_pid_and_tid(tmp_path):
+    # Must land strictly between max_age and 3x max_age — old enough to
+    # reap, not so old the unconditional backstop fires regardless of the
+    # (genuinely live) match this test is actually checking.
+    from datetime import datetime, timedelta, timezone
+    recent = (datetime.now(timezone.utc) - timedelta(seconds=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _write_worker_pid_file(tmp_path, "slot-a", os.getpid(), "live")
     entries = {
-        "live": {"state": "in_progress", "worker_pid": os.getpid(),
-                  "updated_at": "2020-01-01T00:00:00Z"},
+        "live": {"state": "in_progress", "slot": "slot-a", "worker_pid": os.getpid(),
+                  "updated_at": recent},
     }
-    r = _ledger(tmp_path, "reap", "3600", entries=entries)
+    r = _ledger(tmp_path, "reap", "60", entries=entries)   # 3x = 180s — 90s is safely inside it
     assert r.returncode == 0
     assert r.stdout.strip() == ""            # not reaped
     assert "still alive" in r.stderr
     assert _entries(tmp_path)["live"]["state"] == "in_progress"
 
 
+def test_reap_escalates_when_pid_file_names_a_different_tid(tmp_path):
+    # The slot loop moved on to a different task; this entry is orphaned.
+    _write_worker_pid_file(tmp_path, "slot-a", os.getpid(), "some-other-task")
+    entries = {
+        "orphaned": {"state": "in_progress", "slot": "slot-a", "worker_pid": os.getpid(),
+                      "updated_at": "2020-01-01T00:00:00Z"},
+    }
+    r = _ledger(tmp_path, "reap", "3600", entries=entries)
+    assert r.returncode == 0
+    assert r.stdout.split() == ["orphaned"]
+    assert _entries(tmp_path)["orphaned"]["state"] == "escalated"
+
+
+def test_reap_escalates_when_pid_file_is_absent(tmp_path):
+    entries = {
+        "abandoned": {"state": "in_progress", "slot": "slot-z", "worker_pid": 424242,
+                       "updated_at": "2020-01-01T00:00:00Z"},
+    }
+    r = _ledger(tmp_path, "reap", "3600", entries=entries)
+    assert r.returncode == 0
+    assert r.stdout.split() == ["abandoned"]
+    assert _entries(tmp_path)["abandoned"]["state"] == "escalated"
+
+
+def test_worker_pid_alone_without_slot_no_longer_grants_liveness(tmp_path):
+    # This is exactly the bug an adversarial review caught: worker_pid is the
+    # slot LOOP's own long-lived pid, not a per-task signal — trusting it
+    # alone would make the reaper a permanent no-op for as long as the loop
+    # keeps running. A bare (legacy or slot-less) worker_pid now grants
+    # nothing; only a matching $AP_STATE/workers/<slot>.pid file does.
+    entries = {
+        "t1": {"state": "in_progress", "worker_pid": os.getpid(),
+                "updated_at": "2020-01-01T00:00:00Z"},
+    }
+    r = _ledger(tmp_path, "reap", "3600", entries=entries)
+    assert r.returncode == 0
+    assert r.stdout.split() == ["t1"]
+    assert _entries(tmp_path)["t1"]["state"] == "escalated"
+
+
 def test_reap_escalates_dead_pid_and_legacy_pidless_entries(tmp_path):
     dead = _guaranteed_dead_pid()
     entries = {
-        "dead-worker": {"state": "in_progress", "worker_pid": dead,
+        "dead-worker": {"state": "in_progress", "slot": "slot-a", "worker_pid": dead,
                          "updated_at": "2020-01-01T00:00:00Z"},
         "legacy":      {"state": "committed", "sha": "a",
                          "updated_at": "2020-01-01T00:00:00Z"},
@@ -202,3 +292,97 @@ def test_reap_escalates_dead_pid_and_legacy_pidless_entries(tmp_path):
     assert e["dead-worker"]["state"] == "escalated"
     assert e["legacy"]["state"] == "escalated"
     assert e["legacy"]["sha"] == "a"          # ship evidence preserved
+
+
+def test_reap_backstop_fires_past_3x_timeout_regardless_of_liveness(tmp_path):
+    _write_worker_pid_file(tmp_path, "slot-a", os.getpid(), "stuck")
+    ancient = "2000-01-01T00:00:00Z"  # decades old — safely past any 3x window
+    entries = {
+        "stuck": {"state": "in_progress", "slot": "slot-a", "worker_pid": os.getpid(),
+                   "updated_at": ancient},
+    }
+    r = _ledger(tmp_path, "reap", "60", entries=entries)  # 3x = 180s — ancient blows past it
+    assert r.returncode == 0
+    assert r.stdout.split() == ["stuck"]
+    assert "backstop" in r.stderr
+    assert _entries(tmp_path)["stuck"]["state"] == "escalated"
+
+
+def test_reap_within_backstop_window_still_skips_a_live_match(tmp_path):
+    # Sanity check on the boundary: comfortably inside 3x, a genuine live
+    # match is still honored (the backstop test above is deliberately WAY
+    # past 3x so it can't be confused with ordinary liveness skipping).
+    from datetime import datetime, timedelta, timezone
+    recent = (datetime.now(timezone.utc) - timedelta(seconds=120)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _write_worker_pid_file(tmp_path, "slot-a", os.getpid(), "t1")
+    entries = {
+        "t1": {"state": "in_progress", "slot": "slot-a", "worker_pid": os.getpid(),
+                "updated_at": recent},
+    }
+    r = _ledger(tmp_path, "reap", "60", entries=entries)  # age ~120s: > max_age, < 3x (180s)
+    assert r.returncode == 0
+    assert r.stdout.strip() == ""
+    assert _entries(tmp_path)["t1"]["state"] == "in_progress"
+
+
+# ── --pid/--slot require --exclusive (no silent non-exclusive degrade) ─────
+
+def test_pid_without_exclusive_exits_2(tmp_path):
+    r = _ledger(tmp_path, "claim", "t1", "title", "--pid", "555")
+    assert r.returncode == 2
+    assert len(r.stderr.strip().splitlines()) == 1
+    assert _entries(tmp_path) == {}
+
+
+def test_slot_without_exclusive_exits_2(tmp_path):
+    r = _ledger(tmp_path, "claim", "t1", "title", "--slot", "a")
+    assert r.returncode == 2
+    assert _entries(tmp_path) == {}
+
+
+# ── every state-writing verb is locked: concurrent verbs lose nothing ──────
+
+def _run_verb_worker(state_dir, args, barrier, result_queue):
+    barrier.wait()
+    env = {"AP_STATE": state_dir, "PATH": "/usr/bin:/bin"}
+    r = subprocess.run([sys.executable, str(ENGINE / "ledger.py"), *args],
+                        env=env, capture_output=True, text=True)
+    result_queue.put((args[0], r.returncode, r.stderr))
+
+
+def test_concurrent_committed_and_reap_lose_nothing(tmp_path):
+    # Two DIFFERENT verbs, on two DIFFERENT tids, in the same ledger.json:
+    # a naive load-modify-save race (no shared lock) can silently drop
+    # whichever one saved first, since _save always rewrites the WHOLE file.
+    # With every verb going through _locked_update, both changes must
+    # survive regardless of interleaving. t1 is deliberately FRESH (not
+    # reap-eligible) so `reap`'s own escalation of stale entries can never
+    # legitimately race `committed`'s transition on the SAME tid — the
+    # thing under test here is the shared file, not a business-logic race
+    # over t1's state.
+    fresh = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    entries = {
+        "t1": {"state": "in_progress", "updated_at": fresh},
+        "t2": {"state": "in_progress", "updated_at": "2020-01-01T00:00:00Z"},
+    }
+    (tmp_path / "ledger.json").write_text(json.dumps({"entries": entries}))
+
+    barrier = CTX.Barrier(2)
+    q = CTX.Queue()
+    p1 = CTX.Process(target=_run_verb_worker, args=(
+        str(tmp_path), ["committed", "t1", "autopilot/task-t1", "abc123"], barrier, q))
+    p2 = CTX.Process(target=_run_verb_worker, args=(
+        str(tmp_path), ["reap", "3600"], barrier, q))
+    p1.start()
+    p2.start()
+    p1.join(20)
+    p2.join(20)
+    assert p1.exitcode == 0 and p2.exitcode == 0
+
+    results = {row[0]: row for row in (q.get(timeout=5) for _ in range(2))}
+    assert results["committed"][1] == 0, results["committed"][2]
+    assert results["reap"][1] == 0, results["reap"][2]
+
+    e = _entries(tmp_path)
+    assert e["t1"]["state"] == "committed"    # not lost to the reap's overlapping save
+    assert e["t2"]["state"] == "escalated"    # not lost to the commit's overlapping save

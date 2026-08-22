@@ -28,7 +28,17 @@ Two kinds of event, two levels of strictness:
   that is already in_progress is illegal by default, because a second worker
   taking a live task is exactly the double-work bug exclusive claims exist to
   prevent. `--force` still records a takeover when an operator judges the
-  original worker dead.
+  original worker dead — and so does the narrow, purpose-built `reclaim`
+  event below, which exists so that judgment-driven takeover is a sanctioned
+  transition too, not a bare field mutation that bypasses this module
+  entirely.
+
+- `reclaim` is `claim`'s companion for exactly one case: a confirmed-dead
+  worker's in_progress claim being taken over by a new one. Legal ONLY from
+  in_progress (never from ABSENT — that is plain `claim`'s job), and it lands
+  back in in_progress. Proving the old worker is actually dead is
+  engine/ledger.py's job (a dead worker_pid), not lifecycle's — this module
+  only enforces the state shape, same as every other event.
 
 - REVIEW events (merged / rejected / reverted) record human judgments and are
   strict: they require the entry to be at a reviewable stage, and merged /
@@ -56,6 +66,7 @@ TERMINAL = ("merged", "rejected")
 # event → the states it may legally fire FROM (ABSENT = no entry yet).
 TRANSITIONS = {
     "claim":     {ABSENT},
+    "reclaim":   {"in_progress"},
     "committed": {ABSENT, "in_progress", "committed"},
     "pushed":    {ABSENT, "in_progress", "committed", "pushed"},
     "escalate":  {ABSENT, "in_progress", "committed", "pushed", "escalated"},
@@ -66,9 +77,9 @@ TRANSITIONS = {
 
 # event → the state it lands in ("reverted" is an annotation: state unchanged).
 RESULT = {
-    "claim": "in_progress", "committed": "committed", "pushed": "pushed",
-    "escalate": "escalated", "merged": "merged", "rejected": "rejected",
-    "reverted": None,
+    "claim": "in_progress", "reclaim": "in_progress", "committed": "committed",
+    "pushed": "pushed", "escalate": "escalated", "merged": "merged",
+    "rejected": "rejected", "reverted": None,
 }
 
 # Review events that require proof a ship exists on the entry.

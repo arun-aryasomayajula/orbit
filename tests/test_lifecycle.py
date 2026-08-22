@@ -50,6 +50,15 @@ def test_claim_over_in_progress_is_illegal_by_default():
     assert lifecycle.check("in_progress", "claim") is not None
 
 
+def test_reclaim_is_legal_only_from_in_progress():
+    # `reclaim` sanctions exactly the dead-worker-takeover path ledger.py's
+    # exclusive claim uses — legal ONLY from in_progress, never from ABSENT
+    # (that's plain `claim`) and never from any reviewable/terminal state.
+    assert lifecycle.check("in_progress", "reclaim") is None
+    for st in (None, "committed", "pushed", "escalated", "merged", "rejected"):
+        assert lifecycle.check(st, "reclaim") is not None
+
+
 def test_escalate_is_legal_until_reviewed():
     for st in (None, "in_progress", "committed", "pushed", "escalated"):
         assert lifecycle.check(st, "escalate") is None

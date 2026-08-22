@@ -698,14 +698,23 @@ def do_task_delete(tid: str) -> str:
 
 def do_reap() -> str:
     """Manually reap tasks stuck mid-cycle (the wrapper does this each
-    iteration, but a paused loop never iterates — this button covers that)."""
+    iteration, but a paused loop never iterates — this button covers that).
+    ledger.py's reap is now identity-aware: a stale entry whose slot worker
+    is still alive and on that exact task is skipped rather than escalated
+    (logged on stderr) — surface that count too, so "nothing stalled" is
+    distinguishable from "some entries are stale but their worker is still
+    on it"."""
     r = subprocess.run(["python3", str(ENGINE / "ledger.py"), "reap", str(CYCLE_TIMEOUT + 600)],
                        capture_output=True, text=True)
     if r.returncode != 0:
         return f"Reap failed: {r.stderr.strip()}"
     reaped = r.stdout.strip()
-    return (f"Reaped {reaped.count(' ') + 1} stalled task(s) → Escalated: {reaped}" if reaped
-            else "Nothing stalled — no mid-cycle entry is older than the cycle timeout.")
+    skipped = r.stderr.count("still alive")
+    msg = (f"Reaped {reaped.count(' ') + 1} stalled task(s) → Escalated: {reaped}" if reaped
+           else "Nothing stalled — no mid-cycle entry is older than the cycle timeout.")
+    if skipped:
+        msg += f" ({skipped} skipped — worker still alive on that task)"
+    return msg
 
 
 def do_runnow(tid: str) -> str:
