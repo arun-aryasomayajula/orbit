@@ -5,6 +5,7 @@
 #
 # Run: python3 -m pytest tests/test_intake.py -v   (from orbit/)
 import importlib.util
+import multiprocessing as mp
 import os
 import subprocess
 import sys
@@ -100,3 +101,53 @@ def test_append_never_honors_status_or_autopilot_from_proposal(tmp_path):
     t = (yaml.safe_load(bl.read_text()) or {})["tasks"][0]
     assert t["status"] == "proposed"
     assert t["autopilot"] == "human"
+
+
+# --- Task 3: one lock for every backlog.yaml writer -------------------------
+# Two REAL separate OS processes, each appending 50 tasks concurrently to the
+# SAME backlog.yaml via append_tasks - needs real processes (not threads) to
+# exercise the actual flock() cross-process exclusion append_tasks now takes
+# (see engine/locks.py, engine/backlog_append.py's `_lock_path`/`append_tasks`).
+# "fork" is used so the child inherits the already-imported `ba` module
+# instead of needing this test file to be re-importable by name under
+# "spawn" - same technique as tests/test_locks.py.
+_CTX = mp.get_context("fork")
+
+
+def _append_batch(bl_path: str, prefix: str, n: int, result_queue) -> None:
+    proposals = [{"id": f"{prefix}-{i}", "title": f"task {i} from {prefix}",
+                 "category": "bug", "acceptance_criteria": ["it works"]}
+                for i in range(n)]
+    added, skipped = ba.append_tasks(Path(bl_path), proposals, prefix, f"{prefix} batch")
+    result_queue.put((prefix, added, skipped))
+
+
+def test_concurrent_append_from_two_processes_loses_nothing(tmp_path):
+    bl = tmp_path / "backlog.yaml"
+    bl.write_text("tasks: []\n")
+    q = _CTX.Manager().Queue()
+    procs = [_CTX.Process(target=_append_batch, args=(str(bl), "proc-a", 50, q)),
+             _CTX.Process(target=_append_batch, args=(str(bl), "proc-b", 50, q))]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(60)
+    assert all(p.exitcode == 0 for p in procs)
+
+    results = {}
+    for _ in procs:
+        prefix, added, skipped = q.get(timeout=5)
+        results[prefix] = (added, skipped)
+    assert len(results["proc-a"][0]) == 50, results["proc-a"]
+    assert len(results["proc-b"][0]) == 50, results["proc-b"]
+    assert results["proc-a"][1] == []
+    assert results["proc-b"][1] == []
+
+    # The file must stay valid, parseable YAML the whole time - never torn or
+    # half-written by one process's append landing mid-write of the other's.
+    doc = yaml.safe_load(bl.read_text())
+    tasks = doc["tasks"]
+    ids = {t["id"] for t in tasks}
+    assert len(tasks) == 100                  # nothing lost, nothing duplicated
+    assert len(ids) == 100
+    assert ids == ({f"proc-a-{i}" for i in range(50)} | {f"proc-b-{i}" for i in range(50)})

@@ -29,6 +29,7 @@ import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lifecycle
+import locks
 
 
 def reconcile(tasks: list, entries: dict, is_ancestor, now: str):
@@ -97,38 +98,48 @@ def main():
     base = _base_branch(backlog_path.parent / "config.yaml")
     base_ref = f"origin/{base}"
 
-    backlog = yaml.safe_load(backlog_path.read_text()) or {}
-    tasks = backlog.get("tasks", []) or []
-    ledger = json.loads(ledger_path.read_text()) if ledger_path.exists() else {"entries": {}}
-    entries = ledger.get("entries", {})
-
     def is_ancestor(target: str) -> bool:
         return subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", target, base_ref],
                               capture_output=True).returncode == 0
 
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    closed, kept, new_entries = reconcile(tasks, entries, is_ancestor, now)
+    state_dir = ledger_path.parent   # _paths() already resolved AP_STATE (env, else AP_HOME/state)
 
-    if not closed:
-        print(f"autoclose: nothing to close (base {base})")
-        return
-    for tid in closed:
-        print(f"autoclose: {'[dry-run] would close' if args.dry_run else 'closed'} {tid} "
-              f"({new_entries[tid].get('sha') or new_entries[tid].get('remote_ref')} on {base})")
-    if args.dry_run:
-        print(f"autoclose: {len(closed)} task(s) would close — no changes written")
-        return
+    # Whole read-modify-write under the ONE lock every backlog.yaml writer
+    # takes (see locks.py): the read that decides what's still open and the
+    # write that drops the closed ids must never straddle another writer's
+    # own read-modify-write (backlog_append, autopromote, qa_check, the
+    # dashboard) - a stale snapshot on either side would silently clobber the
+    # other's update. `is_ancestor`'s git calls are fast/local/non-interactive
+    # (never a claude invocation), so running them under the lock is safe.
+    with locks.hold(state_dir / ".backlog.lock"):
+        backlog = yaml.safe_load(backlog_path.read_text()) or {}
+        tasks = backlog.get("tasks", []) or []
+        ledger = json.loads(ledger_path.read_text()) if ledger_path.exists() else {"entries": {}}
+        entries = ledger.get("entries", {})
 
-    backlog["tasks"] = kept
-    tmpb = backlog_path.with_suffix(".yaml.tmp")
-    tmpb.write_text(yaml.safe_dump(backlog, sort_keys=False, default_flow_style=False,
-                                   width=100, allow_unicode=True))
-    tmpb.replace(backlog_path)
-    ledger["entries"] = new_entries
-    tmpl = ledger_path.with_suffix(".json.tmp")
-    tmpl.write_text(json.dumps(ledger, indent=2))
-    tmpl.replace(ledger_path)
-    print(f"autoclose: closed {len(closed)} verified no-op task(s) — removed from backlog, marked merged")
+        closed, kept, new_entries = reconcile(tasks, entries, is_ancestor, now)
+
+        if not closed:
+            print(f"autoclose: nothing to close (base {base})")
+            return
+        for tid in closed:
+            print(f"autoclose: {'[dry-run] would close' if args.dry_run else 'closed'} {tid} "
+                  f"({new_entries[tid].get('sha') or new_entries[tid].get('remote_ref')} on {base})")
+        if args.dry_run:
+            print(f"autoclose: {len(closed)} task(s) would close — no changes written")
+            return
+
+        backlog["tasks"] = kept
+        tmpb = backlog_path.with_suffix(".yaml.tmp")
+        tmpb.write_text(yaml.safe_dump(backlog, sort_keys=False, default_flow_style=False,
+                                       width=100, allow_unicode=True))
+        tmpb.replace(backlog_path)
+        ledger["entries"] = new_entries
+        tmpl = ledger_path.with_suffix(".json.tmp")
+        tmpl.write_text(json.dumps(ledger, indent=2))
+        tmpl.replace(ledger_path)
+        print(f"autoclose: closed {len(closed)} verified no-op task(s) — removed from backlog, marked merged")
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ by re-running backlog_to_tasks.py so the loop queue reflects them immediately.
 """
 from __future__ import annotations
 import atexit
+import contextlib
 import hmac
 import json
 import os
@@ -89,6 +90,7 @@ CONVERTER = ENGINE / "backlog_to_tasks.py"
 # driven by the SAME rules, never a client-side guess.
 sys.path.insert(0, str(ENGINE))
 import lifecycle  # noqa: E402
+import locks  # noqa: E402
 from backlog_lint import KNOWN_CATEGORIES  # noqa: E402
 
 
@@ -366,6 +368,50 @@ def _write_blocks(header: str, blocks: list[str]):
     BACKLOG.write_text(header + "".join(blocks))
 
 
+# ── backlog.yaml write lock (dashboard side) ─────────────────────────────────
+# ThreadingHTTPServer serves each request on its own thread, so a plain
+# per-process flock is NOT enough on its own: locks.hold()'s reentrancy guard
+# is keyed by os.getpid() (see locks.py), which is IDENTICAL across every
+# thread in this process - two request-handler threads both calling
+# locks.hold() on the same path at once would not queue on the flock, the
+# second would immediately raise ReentrantLock (indistinguishable, from
+# inside this module, from a real self-deadlock). This threading.Lock
+# serializes route handlers onto the flock one thread at a time; the flock
+# itself still provides the actual cross-process exclusion against
+# autopromote/autoclose/qa_check/backlog_append running in other processes.
+_BACKLOG_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _backlog_txn():
+    """The WHOLE read-modify-write of one dashboard backlog action (its
+    `_read_blocks()` ... `_write_blocks()` span), under ONE acquisition of the
+    shared `<AP_STATE>/.backlog.lock` - the same lock backlog_append.py
+    (append_tasks/append_raw_blocks/set_task_field), autopromote.py,
+    autoclose.py, and qa_check.py (via set_task_field) all take around their
+    own backlog.yaml writes, so a dashboard edit can never lose - or cause the
+    loss of - any of theirs.
+
+    CRITICAL: never call `_run_converter()` (or anything else that shells out)
+    from INSIDE this - `_run_converter()` runs backlog_to_tasks.py, which can
+    itself launch a source-adapter subprocess that calls straight back into
+    backlog_append's NOW lock-protected append_tasks/set_task_field. That
+    child is a DIFFERENT process (not a reentrant same-pid re-entry - locks.py
+    would raise ReentrantLock for that, not deadlock), so it would instead
+    block waiting for the very flock this process is still holding while this
+    process's own `subprocess.run()` blocks waiting for the child to exit - a
+    real deadlock, not just a slow contender. Every caller below acquires this
+    txn ONLY around the read+mutate+write, and calls `_run_converter()` after
+    it exits.
+
+    None of this module's backlog-writing functions call each other or
+    otherwise re-enter this contextmanager while already inside it, so a
+    single acquisition per call never nests (locks.hold() is not reentrant -
+    see locks.py's module docstring)."""
+    with _BACKLOG_LOCK, locks.hold(AP_STATE / ".backlog.lock"):
+        yield
+
+
 def _run_converter():
     subprocess.run(["python3", str(CONVERTER)], cwd=str(ENGINE), capture_output=True)
 
@@ -419,16 +465,17 @@ def do_killtask() -> str:
 
 
 def do_priority(tid: str, direction: str) -> str:
-    header, blocks, ids = _read_blocks()
-    if tid not in ids:
-        return f"Task {tid} not found."
-    i = ids.index(tid)
-    cur = (_get_field(blocks[i], "priority") or "medium").strip()
-    idx = PRIORITY_LADDER.index(cur) if cur in PRIORITY_LADDER else 1
-    idx = min(2, idx + 1) if direction == "up" else max(0, idx - 1)
-    new = PRIORITY_LADDER[idx]
-    blocks[i] = _set_field(blocks[i], "priority", new)
-    _write_blocks(header, blocks)
+    with _backlog_txn():
+        header, blocks, ids = _read_blocks()
+        if tid not in ids:
+            return f"Task {tid} not found."
+        i = ids.index(tid)
+        cur = (_get_field(blocks[i], "priority") or "medium").strip()
+        idx = PRIORITY_LADDER.index(cur) if cur in PRIORITY_LADDER else 1
+        idx = min(2, idx + 1) if direction == "up" else max(0, idx - 1)
+        new = PRIORITY_LADDER[idx]
+        blocks[i] = _set_field(blocks[i], "priority", new)
+        _write_blocks(header, blocks)
     _run_converter()
     return f"{tid}: priority {cur} → {new}."
 
@@ -459,43 +506,49 @@ def do_move(tid: str, direction: str) -> str:
     behavior) moved the task past an invisible done/proposed block and the
     visible order never changed. Instead: find the on-screen neighbor and
     relocate this task's block just past the neighbor's block."""
-    header, blocks, ids = _read_blocks()
-    if tid not in ids:
-        return f"Task {tid} not found."
-    order = _next_up_order()
-    disp_ids = [r[0] for r in order]
-    if tid in disp_ids:
-        k = disp_ids.index(tid)
-        nk = k - 1 if direction == "up" else k + 1
-        if nk < 0 or nk >= len(order):
-            return f"{tid} is already at the {'top' if direction=='up' else 'bottom'}."
-        n_tid, n_pri = order[nk]
-        pri = order[k][1]
-        if PRIORITY_RANK.get(n_pri, 1) != PRIORITY_RANK.get(pri, 1):
-            # Order is a tie-break WITHIN a priority band — the picker sorts by
-            # priority first, so no amount of reordering crosses a band.
-            return (f"{tid} is at the {'top' if direction == 'up' else 'bottom'} of its "
-                    f"'{pri}' priority band — use {'⬆ pri' if direction == 'up' else '⬇ pri'} "
-                    f"to move it {'sooner' if direction == 'up' else 'later'}.")
-        if n_tid in ids:
+    moved_before_after = None   # set to n_tid iff the on-screen-neighbor path wrote
+    with _backlog_txn():
+        header, blocks, ids = _read_blocks()
+        if tid not in ids:
+            return f"Task {tid} not found."
+        order = _next_up_order()
+        disp_ids = [r[0] for r in order]
+        if tid in disp_ids:
+            k = disp_ids.index(tid)
+            nk = k - 1 if direction == "up" else k + 1
+            if nk < 0 or nk >= len(order):
+                return f"{tid} is already at the {'top' if direction=='up' else 'bottom'}."
+            n_tid, n_pri = order[nk]
+            pri = order[k][1]
+            if PRIORITY_RANK.get(n_pri, 1) != PRIORITY_RANK.get(pri, 1):
+                # Order is a tie-break WITHIN a priority band — the picker sorts by
+                # priority first, so no amount of reordering crosses a band.
+                return (f"{tid} is at the {'top' if direction == 'up' else 'bottom'} of its "
+                        f"'{pri}' priority band — use {'⬆ pri' if direction == 'up' else '⬇ pri'} "
+                        f"to move it {'sooner' if direction == 'up' else 'later'}.")
+            if n_tid in ids:
+                i = ids.index(tid)
+                blk = blocks.pop(i)
+                ids.pop(i)
+                j = ids.index(n_tid)
+                at = j if direction == "up" else j + 1
+                blocks.insert(at, blk)
+                _write_blocks(header, blocks)
+                moved_before_after = n_tid
+        if moved_before_after is None:
+            # Fallback (task not in the Next-up view, e.g. queue.json missing,
+            # or its on-screen neighbor wasn't found on the backlog): the old
+            # raw file-neighbor swap, so the button still does something sensible.
             i = ids.index(tid)
-            blk = blocks.pop(i)
-            ids.pop(i)
-            j = ids.index(n_tid)
-            at = j if direction == "up" else j + 1
-            blocks.insert(at, blk)
+            j = i - 1 if direction == "up" else i + 1
+            if j < 0 or j >= len(blocks):
+                return f"{tid} is already at the {'top' if direction=='up' else 'bottom'}."
+            blocks[i], blocks[j] = blocks[j], blocks[i]
             _write_blocks(header, blocks)
-            _run_converter()
-            return f"Moved {tid} {direction} (now {'before' if direction == 'up' else 'after'} {n_tid})."
-    # Fallback (task not in the Next-up view, e.g. queue.json missing): the old
-    # raw file-neighbor swap, so the button still does something sensible.
-    i = ids.index(tid)
-    j = i - 1 if direction == "up" else i + 1
-    if j < 0 or j >= len(blocks):
-        return f"{tid} is already at the {'top' if direction=='up' else 'bottom'}."
-    blocks[i], blocks[j] = blocks[j], blocks[i]
-    _write_blocks(header, blocks)
     _run_converter()
+    if moved_before_after is not None:
+        return (f"Moved {tid} {direction} (now "
+                f"{'before' if direction == 'up' else 'after'} {moved_before_after}).")
     return f"Moved {tid} {direction}."
 
 
@@ -505,19 +558,20 @@ def do_promote(tid: str) -> str:
     we set status:queued + autopilot:allow so it lands in Next up and the loop can
     work it. For a HUMAN-ONLY category (security/infra/release/git) we queue it but
     leave the gate — the loop never touches those, so it stays board-tracked."""
-    header, blocks, ids = _read_blocks()
-    if tid not in ids:
-        return f"Task {tid} not found."
-    i = ids.index(tid)
-    blocks[i] = _set_field(blocks[i], "status", "queued")
-    cat = _get_field(blocks[i], "category")
-    if cat in EMITTABLE:
-        blocks[i] = _set_field(blocks[i], "autopilot", "allow")
-        tail = " → now in ⏭ Next up (loop will pick it)."
-    else:
-        tail = (f" Queued, but '{cat}' is human-only — the loop never works it. "
-                f"Handle it manually / via PR.")
-    _write_blocks(header, blocks)
+    with _backlog_txn():
+        header, blocks, ids = _read_blocks()
+        if tid not in ids:
+            return f"Task {tid} not found."
+        i = ids.index(tid)
+        blocks[i] = _set_field(blocks[i], "status", "queued")
+        cat = _get_field(blocks[i], "category")
+        if cat in EMITTABLE:
+            blocks[i] = _set_field(blocks[i], "autopilot", "allow")
+            tail = " → now in ⏭ Next up (loop will pick it)."
+        else:
+            tail = (f" Queued, but '{cat}' is human-only — the loop never works it. "
+                    f"Handle it manually / via PR.")
+        _write_blocks(header, blocks)
     _run_converter()
     return f"Promoted {tid}.{tail}"
 
@@ -528,20 +582,21 @@ def do_force(tid: str) -> str:
     the cycle works it. The loop fixes the code-fixable ones and escalates the rest
     (secret rotation, infra grants, running migrations) back to a human. Auto-feed
     still never touches these — only this explicit action does."""
-    header, blocks, ids = _read_blocks()
-    if tid not in ids:
-        return f"Task {tid} not found."
-    i = ids.index(tid)
-    cat = _get_field(blocks[i], "category")
-    blocks[i] = _set_field(blocks[i], "status", "queued")
-    blocks[i] = _set_field(blocks[i], "autopilot", "allow")
-    if re.search(r"(?m)^  (?:  )?forced: ", blocks[i]):
-        blocks[i] = _set_field(blocks[i], "forced", "true")
-    else:   # insert the field right after the autopilot line, matching its indent
-        blocks[i] = re.sub(r"(?m)^(\s{2,4})(autopilot: .*)$",
-                           lambda m: f"{m.group(1)}{m.group(2)}\n{m.group(1)}forced: true",
-                           blocks[i], count=1)
-    _write_blocks(header, blocks)
+    with _backlog_txn():
+        header, blocks, ids = _read_blocks()
+        if tid not in ids:
+            return f"Task {tid} not found."
+        i = ids.index(tid)
+        cat = _get_field(blocks[i], "category")
+        blocks[i] = _set_field(blocks[i], "status", "queued")
+        blocks[i] = _set_field(blocks[i], "autopilot", "allow")
+        if re.search(r"(?m)^  (?:  )?forced: ", blocks[i]):
+            blocks[i] = _set_field(blocks[i], "forced", "true")
+        else:   # insert the field right after the autopilot line, matching its indent
+            blocks[i] = re.sub(r"(?m)^(\s{2,4})(autopilot: .*)$",
+                               lambda m: f"{m.group(1)}{m.group(2)}\n{m.group(1)}forced: true",
+                               blocks[i], count=1)
+        _write_blocks(header, blocks)
     _run_converter()
     return (f"⚠ Forced {tid} ({cat}) to the agent → now in ⏭ Next up. The loop will attempt a "
             f"fix on the branch for review, or escalate it if it's not code-fixable (rotation/infra).")
@@ -602,29 +657,30 @@ def do_task_new(tid: str, title: str, category: str, priority: str = "medium",
         return ("At least one acceptance criterion is required (one per line) — "
                 "without it the verifier has nothing objective to grade and the "
                 "lint gate would hold the task from the queue anyway.")
-    header, blocks, ids = _read_blocks()
-    if tid in ids:
-        return f"Task {tid} already exists on the backlog — edit it instead."
-    if load_ledger().get(tid):
-        return f"Task id '{tid}' was already worked (see Shipped/Escalated) — pick a fresh id."
-    ind = _block_indent(blocks)
-    status = "queued" if queue_now else "proposed"
-    gate = "allow" if (queue_now and category in EMITTABLE) else "human"
-    lines = [f"{ind}- id: {tid}",
-             f"{ind}  title: {json.dumps(' '.join(title.split()))}",
-             f"{ind}  category: {category}",
-             f"{ind}  autopilot: {gate}",
-             f"{ind}  status: {status}",
-             f"{ind}  priority: {priority if priority in ('high', 'medium', 'low') else 'medium'}",
-             f"{ind}  source: dashboard"]
-    ctx = (context or "").strip()
-    if ctx:
-        lines.append(f"{ind}  context: |")
-        lines += [f"{ind}    {ln}" for ln in ctx.splitlines()]
-    lines.append(f"{ind}  acceptance_criteria:")
-    lines += [f"{ind}    - {json.dumps(a)}" for a in acc]
-    blocks.append("\n".join(lines) + "\n")
-    _write_blocks(header, blocks)
+    with _backlog_txn():
+        header, blocks, ids = _read_blocks()
+        if tid in ids:
+            return f"Task {tid} already exists on the backlog — edit it instead."
+        if load_ledger().get(tid):
+            return f"Task id '{tid}' was already worked (see Shipped/Escalated) — pick a fresh id."
+        ind = _block_indent(blocks)
+        status = "queued" if queue_now else "proposed"
+        gate = "allow" if (queue_now and category in EMITTABLE) else "human"
+        lines = [f"{ind}- id: {tid}",
+                 f"{ind}  title: {json.dumps(' '.join(title.split()))}",
+                 f"{ind}  category: {category}",
+                 f"{ind}  autopilot: {gate}",
+                 f"{ind}  status: {status}",
+                 f"{ind}  priority: {priority if priority in ('high', 'medium', 'low') else 'medium'}",
+                 f"{ind}  source: dashboard"]
+        ctx = (context or "").strip()
+        if ctx:
+            lines.append(f"{ind}  context: |")
+            lines += [f"{ind}    {ln}" for ln in ctx.splitlines()]
+        lines.append(f"{ind}  acceptance_criteria:")
+        lines += [f"{ind}    - {json.dumps(a)}" for a in acc]
+        blocks.append("\n".join(lines) + "\n")
+        _write_blocks(header, blocks)
     _run_converter()
     if status == "queued" and gate == "allow":
         return f"Created {tid} → ⏭ Next up (the loop can pick it)."
@@ -637,41 +693,42 @@ def do_task_edit(tid: str, title: str = "", category: str = "", priority: str = 
                  context: str = "", acc_raw: str = "") -> str:
     """Edit a backlog task's contract in place, comment-preserving. Empty form
     fields mean 'leave unchanged' — the UI can't blank a field by accident."""
-    header, blocks, ids = _read_blocks()
-    if tid not in ids:
-        return f"Task {tid} not found on the backlog."
-    i = ids.index(tid)
-    b = blocks[i]
-    fi = _block_indent(blocks) + "  "
-    changed = []
-    if (title or "").strip():
-        b = _upsert_scalar(b, "title", json.dumps(" ".join(title.split())), fi)
-        changed.append("title")
-    if category:
-        if category not in KNOWN_CATEGORIES:
-            return f"Unknown category '{category}'."
-        b = _upsert_scalar(b, "category", category, fi)
-        changed.append("category")
-    if priority in ("high", "medium", "low"):
-        b = _upsert_scalar(b, "priority", priority, fi)
-        changed.append("priority")
-    if (context or "").strip():
-        b = _strip_field(b, "context")
-        if not b.endswith("\n"):
-            b += "\n"
-        b += f"{fi}context: |\n" + "".join(f"{fi}  {ln}\n" for ln in context.strip().splitlines())
-        changed.append("context")
-    acc = _split_acc(acc_raw)
-    if acc:
-        b = _strip_field(b, "acceptance_criteria")
-        if not b.endswith("\n"):
-            b += "\n"
-        b += f"{fi}acceptance_criteria:\n" + "".join(f"{fi}  - {json.dumps(a)}\n" for a in acc)
-        changed.append("acceptance criteria")
-    if not changed:
-        return f"Nothing to change on {tid} (empty fields keep current values)."
-    blocks[i] = b
-    _write_blocks(header, blocks)
+    with _backlog_txn():
+        header, blocks, ids = _read_blocks()
+        if tid not in ids:
+            return f"Task {tid} not found on the backlog."
+        i = ids.index(tid)
+        b = blocks[i]
+        fi = _block_indent(blocks) + "  "
+        changed = []
+        if (title or "").strip():
+            b = _upsert_scalar(b, "title", json.dumps(" ".join(title.split())), fi)
+            changed.append("title")
+        if category:
+            if category not in KNOWN_CATEGORIES:
+                return f"Unknown category '{category}'."
+            b = _upsert_scalar(b, "category", category, fi)
+            changed.append("category")
+        if priority in ("high", "medium", "low"):
+            b = _upsert_scalar(b, "priority", priority, fi)
+            changed.append("priority")
+        if (context or "").strip():
+            b = _strip_field(b, "context")
+            if not b.endswith("\n"):
+                b += "\n"
+            b += f"{fi}context: |\n" + "".join(f"{fi}  {ln}\n" for ln in context.strip().splitlines())
+            changed.append("context")
+        acc = _split_acc(acc_raw)
+        if acc:
+            b = _strip_field(b, "acceptance_criteria")
+            if not b.endswith("\n"):
+                b += "\n"
+            b += f"{fi}acceptance_criteria:\n" + "".join(f"{fi}  - {json.dumps(a)}\n" for a in acc)
+            changed.append("acceptance criteria")
+        if not changed:
+            return f"Nothing to change on {tid} (empty fields keep current values)."
+        blocks[i] = b
+        _write_blocks(header, blocks)
     _run_converter()
     return f"Updated {tid} ({', '.join(changed)})."
 
@@ -680,18 +737,19 @@ def do_task_delete(tid: str) -> str:
     """Delete an UN-WORKED task's block from the backlog. Worked tasks are
     refused — their block is the contract behind a real ship/escalation; use
     Skip to set them aside instead."""
-    header, blocks, ids = _read_blocks()
-    if tid not in ids:
-        return f"Task {tid} not found on the backlog."
-    led = load_ledger().get(tid) or {}
-    if led.get("state"):
-        return (f"Won't delete {tid}: it was worked (ledger state '{led['state']}') — "
-                f"the block documents a real ship/escalation. Skip it instead.")
-    blocks.pop(ids.index(tid))
-    _write_blocks(header, blocks)
-    if tid in load_skips():
-        kept = [ln for ln in SKIPS.read_text().splitlines() if ln.strip() != tid]
-        SKIPS.write_text("\n".join(kept) + ("\n" if kept else ""))
+    with _backlog_txn():
+        header, blocks, ids = _read_blocks()
+        if tid not in ids:
+            return f"Task {tid} not found on the backlog."
+        led = load_ledger().get(tid) or {}
+        if led.get("state"):
+            return (f"Won't delete {tid}: it was worked (ledger state '{led['state']}') — "
+                    f"the block documents a real ship/escalation. Skip it instead.")
+        blocks.pop(ids.index(tid))
+        _write_blocks(header, blocks)
+        if tid in load_skips():
+            kept = [ln for ln in SKIPS.read_text().splitlines() if ln.strip() != tid]
+            SKIPS.write_text("\n".join(kept) + ("\n" if kept else ""))
     _run_converter()
     return f"Deleted {tid} from the backlog."
 
@@ -721,18 +779,19 @@ def do_runnow(tid: str) -> str:
     """Force a task to be the loop's NEXT pick: move it to the top of the backlog,
     set priority high (+ allow if workable), and resume the loop. The agent picks
     it on the next cycle (≤~20s if idle, else after the current cycle finishes)."""
-    header, blocks, ids = _read_blocks()
-    if tid not in ids:
-        return f"Task {tid} not found."
-    i = ids.index(tid)
-    blk = blocks.pop(i)
-    blk = _set_field(blk, "status", "queued")
-    blk = _set_field(blk, "priority", "high")
-    cat = _get_field(blk, "category")
-    if cat in EMITTABLE:
-        blk = _set_field(blk, "autopilot", "allow")
-    blocks.insert(0, blk)
-    _write_blocks(header, blocks)
+    with _backlog_txn():
+        header, blocks, ids = _read_blocks()
+        if tid not in ids:
+            return f"Task {tid} not found."
+        i = ids.index(tid)
+        blk = blocks.pop(i)
+        blk = _set_field(blk, "status", "queued")
+        blk = _set_field(blk, "priority", "high")
+        cat = _get_field(blk, "category")
+        if cat in EMITTABLE:
+            blk = _set_field(blk, "autopilot", "allow")
+        blocks.insert(0, blk)
+        _write_blocks(header, blocks)
     do_resume()           # clear STOP so the loop actually runs
     _run_converter()
     if cat not in EMITTABLE:
@@ -998,50 +1057,55 @@ def do_answer(tid: str, text: str) -> str:
     text = " ".join(text.split())   # single-line: YAML field is one quoted line
     if not text:
         return "Empty answer — nothing done."
-    header, blocks, ids = _read_blocks()
     synthesized = False
-    if tid not in ids:
-        # Orphan escalation (legacy foundry bare-number id, or any ledger-only task
-        # with no backlog block). Instead of refusing — which left the card stuck in
-        # the inbox — synthesize a block from the ledger so the answer IS the
-        # contract. The human answering is the decision to let the loop work it.
-        led = load_ledger().get(tid, {})
-        title = (led.get("title") or f"Answered escalation {tid}").replace('"', "'")
-        reason = (led.get("reason") or "").replace('"', "'")
-        ctx = "Re-queued from an answered escalation that had no backlog block."
-        if reason:
-            ctx += f" Original stop reason: {reason}"
-        new_block = (   # write in the FLAT format the file actually uses
-            f"- id: {tid}\n"
-            f'  title: "{title}"\n'
-            f"  category: bug\n"
-            f"  autopilot: allow\n"
-            f"  status: queued\n"
-            f"  priority: medium\n"
-            f"  source: escalation-answer\n"
-            f"  context: |\n"
-            f"    {ctx}\n"
-            f"  operator_answer: {json.dumps(text)}\n"
-            f"  acceptance_criteria:\n"
-            f"    - {json.dumps(text)}\n"
-        )
-        blocks.append(new_block)
-        ids.append(tid)
-        synthesized = True
-    i = ids.index(tid)
-    blocks[i] = _set_field(blocks[i], "status", "queued")
-    cat = _get_field(blocks[i], "category")
-    if cat in EMITTABLE:
-        blocks[i] = _set_field(blocks[i], "autopilot", "allow")
-    quoted = json.dumps(text)   # safe one-line double-quoted YAML scalar
-    if re.search(r"(?m)^\s{2,4}operator_answer: ", blocks[i]):
-        blocks[i] = re.sub(r"(?m)^(\s{2,4})operator_answer: .*$",
-                           lambda m: f"{m.group(1)}operator_answer: {quoted}", blocks[i], count=1)
-    else:
-        blocks[i] = re.sub(r"(?m)^(\s{2,4})(autopilot: .*)$",
-                           lambda m: f"{m.group(1)}{m.group(2)}\n{m.group(1)}operator_answer: {quoted}",
-                           blocks[i], count=1)
-    _write_blocks(header, blocks)
+    with _backlog_txn():
+        header, blocks, ids = _read_blocks()
+        if tid not in ids:
+            # Orphan escalation (legacy foundry bare-number id, or any ledger-only task
+            # with no backlog block). Instead of refusing — which left the card stuck in
+            # the inbox — synthesize a block from the ledger so the answer IS the
+            # contract. The human answering is the decision to let the loop work it.
+            led = load_ledger().get(tid, {})
+            title = (led.get("title") or f"Answered escalation {tid}").replace('"', "'")
+            reason = (led.get("reason") or "").replace('"', "'")
+            ctx = "Re-queued from an answered escalation that had no backlog block."
+            if reason:
+                ctx += f" Original stop reason: {reason}"
+            new_block = (   # write in the FLAT format the file actually uses
+                f"- id: {tid}\n"
+                f'  title: "{title}"\n'
+                f"  category: bug\n"
+                f"  autopilot: allow\n"
+                f"  status: queued\n"
+                f"  priority: medium\n"
+                f"  source: escalation-answer\n"
+                f"  context: |\n"
+                f"    {ctx}\n"
+                f"  operator_answer: {json.dumps(text)}\n"
+                f"  acceptance_criteria:\n"
+                f"    - {json.dumps(text)}\n"
+            )
+            blocks.append(new_block)
+            ids.append(tid)
+            synthesized = True
+        i = ids.index(tid)
+        blocks[i] = _set_field(blocks[i], "status", "queued")
+        cat = _get_field(blocks[i], "category")
+        if cat in EMITTABLE:
+            blocks[i] = _set_field(blocks[i], "autopilot", "allow")
+        quoted = json.dumps(text)   # safe one-line double-quoted YAML scalar
+        if re.search(r"(?m)^\s{2,4}operator_answer: ", blocks[i]):
+            blocks[i] = re.sub(r"(?m)^(\s{2,4})operator_answer: .*$",
+                               lambda m: f"{m.group(1)}operator_answer: {quoted}", blocks[i], count=1)
+        else:
+            blocks[i] = re.sub(r"(?m)^(\s{2,4})(autopilot: .*)$",
+                               lambda m: f"{m.group(1)}{m.group(2)}\n{m.group(1)}operator_answer: {quoted}",
+                               blocks[i], count=1)
+        _write_blocks(header, blocks)
+    # Both below are subprocess/file side effects best-effort-sequenced AFTER
+    # the backlog lock is released - ledger.py's `clear` takes ITS OWN lock
+    # (a different lock domain; see ledger.py's `_locked_update`), and neither
+    # needs to be inside the backlog critical section above.
     subprocess.run(["python3", str(ENGINE / "ledger.py"), "clear", tid], capture_output=True)
     if tid in load_skips():
         kept = [ln for ln in SKIPS.read_text().splitlines() if ln.strip() != tid]
@@ -1058,15 +1122,16 @@ def do_answer(tid: str, text: str) -> str:
 def do_lintok(tid: str) -> str:
     """Waive the backlog linter's hard gate for one task (sets lint_ok: true).
     Use when the thin contract is intentional (e.g. a trivial chore)."""
-    header, blocks, ids = _read_blocks()
-    if tid not in ids:
-        return f"Task {tid} not found."
-    i = ids.index(tid)
-    if re.search(r"(?m)^    lint_ok: ", blocks[i]):
-        blocks[i] = _set_field(blocks[i], "lint_ok", "true")
-    else:
-        blocks[i] = re.sub(r"(?m)^(    category: .*)$", r"\1\n    lint_ok: true", blocks[i], count=1)
-    _write_blocks(header, blocks)
+    with _backlog_txn():
+        header, blocks, ids = _read_blocks()
+        if tid not in ids:
+            return f"Task {tid} not found."
+        i = ids.index(tid)
+        if re.search(r"(?m)^    lint_ok: ", blocks[i]):
+            blocks[i] = _set_field(blocks[i], "lint_ok", "true")
+        else:
+            blocks[i] = re.sub(r"(?m)^(    category: .*)$", r"\1\n    lint_ok: true", blocks[i], count=1)
+        _write_blocks(header, blocks)
     _run_converter()
     return f"Lint gate waived for {tid} — it can now be emitted despite the thin contract."
 

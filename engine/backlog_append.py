@@ -9,12 +9,37 @@ a machine may suggest work, only a human may queue it.
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
 import yaml
 
+import locks
+
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,79}$")
+
+
+def _lock_path(backlog: Path) -> Path:
+    """<AP_STATE>/.backlog.lock for whichever backlog.yaml `backlog` points at -
+    the ONE lock every backlog.yaml writer (this module's append_tasks/
+    append_raw_blocks/set_task_field, autopromote.py, autoclose.py,
+    qa_check.py, command_center.py) takes around its whole read-modify-write,
+    so none of them can ever lose another's update.
+
+    backlog_append is a low-level utility - many callers hand it a bare
+    backlog.yaml path with no AP_HOME/AP_STATE env set at all (intake, epic
+    decomposition, and this module's own tests all do), so this must never
+    require AP_HOME to resolve a lock path. AP_STATE (if set) wins - it's the
+    authoritative runtime-state dir config.py's shellenv exports for a real
+    run and could in principle point somewhere other than the backlog's own
+    parent; falling back to `<backlog's directory>/state` matches every real
+    target's layout (AP_HOME/backlog.yaml sits next to AP_HOME/state/) and is
+    exactly how every other writer resolves AP_STATE off AP_HOME too.
+    """
+    st = os.environ.get("AP_STATE")
+    state_dir = Path(st) if st else Path(backlog).parent / "state"
+    return state_dir / ".backlog.lock"
 
 
 def slug(s: str) -> str:
@@ -91,28 +116,33 @@ def set_task_field(backlog: Path, tid: str, field: str, value: str) -> bool:
     Same block-level text-edit discipline as the dashboard: locate the `- id:`
     line, bound the block at the next `- id:`, substitute (or insert) the field
     line. Never a YAML round-trip. → False if the task isn't in the backlog.
+
+    Holds the shared backlog lock (see `_lock_path`) around the whole
+    read-modify-write - one of the five backlog.yaml writers autopilot must
+    never let race another.
     """
-    text = backlog.read_text()
-    start = re.search(rf"^(\s*)- id:\s*{re.escape(tid)}\s*(?:#.*)?$", text, re.MULTILINE)
-    if not start:
-        return False
-    nxt = re.search(r"^\s*- id:\s*\S", text[start.end():], re.MULTILINE)
-    end = start.end() + (nxt.start() if nxt else len(text) - start.end())
-    block = text[start.end():end]
-    pat = re.compile(rf"^(\s*){re.escape(field)}:.*$", re.MULTILINE)
-    if pat.search(block):
-        # A callable replacement — never a template string. `value` is
-        # untrusted-shaped (e.g. QA findings folded via json.dumps, which can
-        # contain backslash-escapes like `—` for an em dash): fed through
-        # re.sub's TEMPLATE parser (as `rf"\g<1>{field}: {value}"` used to),
-        # `\u` isn't a recognized replacement escape and raises `re.error: bad
-        # escape \u`. A lambda's return value is spliced in literally, with no
-        # backslash reinterpretation, so `value` is always treated as data.
-        block = pat.sub(lambda m: f"{m.group(1)}{field}: {value}", block, count=1)
-    else:
-        block = f"\n{start.group(1)}  {field}: {value}" + block
-    backlog.write_text(text[:start.end()] + block + text[end:])
-    return True
+    with locks.hold(_lock_path(backlog)):
+        text = backlog.read_text()
+        start = re.search(rf"^(\s*)- id:\s*{re.escape(tid)}\s*(?:#.*)?$", text, re.MULTILINE)
+        if not start:
+            return False
+        nxt = re.search(r"^\s*- id:\s*\S", text[start.end():], re.MULTILINE)
+        end = start.end() + (nxt.start() if nxt else len(text) - start.end())
+        block = text[start.end():end]
+        pat = re.compile(rf"^(\s*){re.escape(field)}:.*$", re.MULTILINE)
+        if pat.search(block):
+            # A callable replacement — never a template string. `value` is
+            # untrusted-shaped (e.g. QA findings folded via json.dumps, which can
+            # contain backslash-escapes like `—` for an em dash): fed through
+            # re.sub's TEMPLATE parser (as `rf"\g<1>{field}: {value}"` used to),
+            # `\u` isn't a recognized replacement escape and raises `re.error: bad
+            # escape \u`. A lambda's return value is spliced in literally, with no
+            # backslash reinterpretation, so `value` is always treated as data.
+            block = pat.sub(lambda m: f"{m.group(1)}{field}: {value}", block, count=1)
+        else:
+            block = f"\n{start.group(1)}  {field}: {value}" + block
+        backlog.write_text(text[:start.end()] + block + text[end:])
+        return True
 
 
 def _strip_inline_comment(raw: str) -> str:
@@ -180,22 +210,33 @@ def get_task_field(backlog: Path, tid: str, field: str) -> str | None:
 
 def append_tasks(backlog: Path, proposals: list[dict], source: str,
                  header: str, dry_run: bool = False) -> tuple[list[str], list[tuple[str, str]]]:
-    """Append valid, new proposals to backlog.yaml. → (added_ids, [(id, why-skipped)])."""
+    """Append valid, new proposals to backlog.yaml. → (added_ids, [(id, why-skipped)]).
+
+    Holds the shared backlog lock around the WHOLE read-modify-write - the
+    existing_ids() read through the final write - so two concurrent callers
+    (two intake runs, an intake racing an epic decomposition, ...) can never
+    both read the same "have" set and each append, silently duplicating or
+    losing an id. Calls `_append_raw_blocks_unlocked` (not the public,
+    locking `append_raw_blocks`) for the actual write - locks.hold() is not
+    reentrant, so nesting a second acquisition of the SAME lock inside this
+    one would self-deadlock (see locks.py's module docstring).
+    """
     from backlog_lint import KNOWN_CATEGORIES
-    have = existing_ids(backlog)
-    added, skipped, blocks = [], [], []
-    for t in proposals:
-        tid = str(t.get("id") or "").strip()
-        why = validate_proposal(t, KNOWN_CATEGORIES)
-        if why:
-            skipped.append((tid or "(no id)", why))
-        elif tid in have or tid in set(added):
-            skipped.append((tid, "already in backlog"))
-        else:
-            added.append(tid)
-            blocks.append(render_proposed_task(t, source))
-    if added and not dry_run:
-        append_raw_blocks(backlog, f"{header} — triage before promoting", blocks)
+    with locks.hold(_lock_path(backlog)):
+        have = existing_ids(backlog)
+        added, skipped, blocks = [], [], []
+        for t in proposals:
+            tid = str(t.get("id") or "").strip()
+            why = validate_proposal(t, KNOWN_CATEGORIES)
+            if why:
+                skipped.append((tid or "(no id)", why))
+            elif tid in have or tid in set(added):
+                skipped.append((tid, "already in backlog"))
+            else:
+                added.append(tid)
+                blocks.append(render_proposed_task(t, source))
+        if added and not dry_run:
+            _append_raw_blocks_unlocked(backlog, f"{header} — triage before promoting", blocks)
     return added, skipped
 
 
@@ -206,7 +247,22 @@ def append_raw_blocks(backlog: Path, header: str, blocks: list[str]) -> None:
     here so the empty-backlog handling lives once: a scaffolded backlog says
     `tasks: []` (flow-style), under which appended block items would be invalid
     YAML — open the list in place first.
+
+    This is the PUBLIC, locking entry point - holds the shared backlog lock
+    around the read-modify-write. `append_tasks` (above) needs the same write
+    under a lock it already holds, so it calls the unlocked variant directly
+    instead of nesting a second acquisition through here.
     """
+    with locks.hold(_lock_path(backlog)):
+        _append_raw_blocks_unlocked(backlog, header, blocks)
+
+
+def _append_raw_blocks_unlocked(backlog: Path, header: str, blocks: list[str]) -> None:
+    """The actual read-modify-write behind `append_raw_blocks` - split out so
+    `append_tasks` can reuse it without nesting a lock (locks.hold() is not
+    reentrant - see locks.py's module docstring). Never call this directly
+    from outside this module; go through `append_raw_blocks` or `append_tasks`
+    so the write is always lock-protected."""
     text = backlog.read_text() if backlog.exists() else "tasks:\n"
     text = re.sub(r"^(tasks:)\s*\[\s*\](\s*(?:#.*)?)$", r"\1\2", text,
                   count=1, flags=re.MULTILINE)

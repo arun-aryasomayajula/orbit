@@ -29,6 +29,8 @@ from pathlib import Path
 
 import yaml
 
+import locks
+
 ENGINE = Path(__file__).resolve().parent
 
 
@@ -115,38 +117,55 @@ def _skips() -> set[str]:
 
 
 def main() -> int:
-    backlog = (yaml.safe_load(BACKLOG.read_text()) or {}).get("tasks", []) or []
-    worked, skips = _worked(), _skips()
-    cands = [t for t in backlog
-             if t.get("status") == "proposed"
-             and _eligible(t)
-             and str(t.get("id")) not in worked
-             and str(t.get("id")) not in skips]
-    if not cands:
-        print("autopromote: no eligible proposed task — nothing to feed.")
-        return 0
-    cands.sort(key=lambda t: PRIORITY_RANK.get(t.get("priority", "medium"), 1))
-    pick = str(cands[0]["id"])
+    # Whole read-modify-write under the ONE lock every backlog.yaml writer
+    # takes (see locks.py) - the read that picks a candidate and the write
+    # that promotes it must never straddle another writer's own
+    # read-modify-write (backlog_append, autoclose, qa_check, the dashboard),
+    # or the two could each act on a now-stale snapshot and silently clobber
+    # each other. The converter subprocess below runs AFTER the lock is
+    # released - never hold this lock across a subprocess (locks.py's module
+    # docstring).
+    with locks.hold(AP_STATE / ".backlog.lock"):
+        backlog = (yaml.safe_load(BACKLOG.read_text()) or {}).get("tasks", []) or []
+        worked, skips = _worked(), _skips()
+        cands = [t for t in backlog
+                 if t.get("status") == "proposed"
+                 and _eligible(t)
+                 and str(t.get("id")) not in worked
+                 and str(t.get("id")) not in skips]
+        if not cands:
+            print("autopromote: no eligible proposed task — nothing to feed.")
+            return 0
+        cands.sort(key=lambda t: PRIORITY_RANK.get(t.get("priority", "medium"), 1))
+        pick = str(cands[0]["id"])
 
-    # Block-level edit (preserve comments): set status queued + autopilot allow.
-    # Indent-tolerant: real backlogs use both `- id:` at column 0 (block style)
-    # and `  - id:` nested under `tasks:` — match either, and flip the key lines
-    # at whatever indent the block uses.
-    text = BACKLOG.read_text()
-    parts = re.split(r"(?m)(?=^\s*- id: )", text)
-    edited = False
-    for i, blk in enumerate(parts):
-        m = re.match(r"^\s*- id: (\S+)", blk)
-        if m and m.group(1) == pick:
-            blk, n_status = re.subn(r"(?m)^(\s*status: ).*$", r"\1queued", blk, count=1)
-            blk = re.sub(r"(?m)^(\s*autopilot: ).*$", r"\1allow", blk, count=1)
-            parts[i] = blk
-            edited = n_status == 1
-            break
-    if not edited:
-        print(f"autopromote: could not rewrite block for '{pick}' — backlog left unchanged.")
-        return 1
-    BACKLOG.write_text("".join(parts))
+        # Block-level edit (preserve comments): set status queued + autopilot allow.
+        # Indent-tolerant: real backlogs use both `- id:` at column 0 (block style)
+        # and `  - id:` nested under `tasks:` — match either, and flip the key lines
+        # at whatever indent the block uses.
+        text = BACKLOG.read_text()
+        parts = re.split(r"(?m)(?=^\s*- id: )", text)
+        edited = False
+        for i, blk in enumerate(parts):
+            m = re.match(r"^\s*- id: (\S+)", blk)
+            if m and m.group(1) == pick:
+                blk, n_status = re.subn(r"(?m)^(\s*status: ).*$", r"\1queued", blk, count=1)
+                blk = re.sub(r"(?m)^(\s*autopilot: ).*$", r"\1allow", blk, count=1)
+                parts[i] = blk
+                edited = n_status == 1
+                break
+        if not edited:
+            print(f"autopromote: could not rewrite block for '{pick}' — backlog left unchanged.")
+            return 1
+
+        # tmp+os.replace INSIDE the lock - a reader (dashboard, a concurrent
+        # cycle) must never be able to observe a truncated backlog.yaml
+        # mid-write (the bare write_text() this replaces truncates-then-writes
+        # in place, which is not atomic).
+        tmp = BACKLOG.with_name(f"{BACKLOG.name}.tmp{os.getpid()}")
+        tmp.write_text("".join(parts))
+        os.replace(tmp, BACKLOG)
+
     subprocess.run([sys.executable, str(CONVERTER)], cwd=str(ENGINE), capture_output=True)
     print(f"autopromote: promoted '{pick}' ({cands[0].get('category')}, "
           f"p{cands[0].get('priority','medium')}) → queued+allow.")

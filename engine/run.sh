@@ -35,6 +35,10 @@ INTERVAL="${AP_INTERVAL:-$ORBIT_INTERVAL}"
 MAX_TASKS_PER_DAY="${AP_MAX_TASKS:-$ORBIT_MAX_TASKS}"
 CYCLE_TIMEOUT="${AP_CYCLE_TIMEOUT:-$ORBIT_CYCLE_TIMEOUT}"
 LIMIT_BACKOFF="${AP_LIMIT_BACKOFF:-1800}"
+# How many pickable tasks auto-feed keeps the queue topped up to. Default 1
+# (today's single-slot loop) - a future multi-slot loop exports a bigger
+# ORBIT_SLOTS so auto-feed refills for every slot, not just the first.
+SLOTS="${ORBIT_SLOTS:-1}"
 BASE_REF="origin/$ORBIT_BASE_BRANCH"
 export AP_HOME AP_STATE ORBIT_HOME
 export AP_BASE_BRANCH="$ORBIT_BASE_BRANCH"   # the cycle reads this to branch/diff against the right base
@@ -111,6 +115,7 @@ PYEOF
 }
 todays_spend(){ cat "$STATE/.spend-$(today)" 2>/dev/null || echo 0; }
 
+# --- auto-feed refill threshold (extracted verbatim by tests/test_autopromote.py) ---
 count_pickable() {
   python3 - "$STATE/queue.json" "$ENGINE/ledger.py" "$STATE/skips.txt" <<'PYEOF'
 import json, os, subprocess, sys
@@ -123,6 +128,15 @@ skips = set(l.strip() for l in open(sk)) if os.path.exists(sk) else set()
 print(sum(1 for t in tasks if str(t.get("id")) not in worked and str(t.get("id")) not in skips))
 PYEOF
 }
+
+# ON iff auto-feed is enabled (AUTO_PROMOTE marker present) AND the queue has
+# fewer than SLOTS pickable tasks - SLOTS defaults to 1 (today's single-slot
+# loop), so this is exactly the old "== 0" trigger until a future multi-slot
+# loop exports a bigger ORBIT_SLOTS.
+should_autofeed() {
+  [ -f "$STATE/AUTO_PROMOTE" ] && [ "$(count_pickable)" -lt "$SLOTS" ]
+}
+# --- end auto-feed refill threshold ---
 
 # The id the cycle will MOST LIKELY claim — first pickable task in queue order,
 # same worked/skipped filter as count_pickable. Written as a provisional marker
@@ -261,7 +275,7 @@ one_iteration() {
   # time — a flow already running still gets its full per-flow timeout).
   python3 "$ENGINE/qa_run.py" "$TARGET" --regression --if-changed >>"$LOGDIR/orbit.log" 2>&1 || log "WARN: regression sweep failed"
   python3 "$ENGINE/backlog_to_tasks.py" >>"$LOGDIR/orbit.log" 2>&1 || log "WARN: backlog→queue refresh failed"
-  if [ -f "$STATE/AUTO_PROMOTE" ] && [ "$(count_pickable)" = "0" ]; then
+  if should_autofeed; then
     log "auto-feed: promoting next safe task"
     python3 "$ENGINE/autopromote.py" >>"$LOGDIR/orbit.log" 2>&1 || log "WARN: autopromote failed"
   fi
