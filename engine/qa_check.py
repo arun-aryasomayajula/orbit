@@ -131,6 +131,20 @@ QA_DEFAULT_MODEL = "sonnet"
 QA_DEFAULT_BROWSER = "chromium"
 DEFAULT_MAX_BOUNCES = 2         # qa.max_bounces default (config/schema.yaml)
 ENGINE_DIR = Path(__file__).resolve().parent
+# THE workspace-wide qa.services mutex. One name, one directory, referenced by
+# every consumer that can bind qa.services' fixed ports: this gate
+# (qa_check()), qa_run.py's --regression/--explore/--generate paths, and the
+# dashboard's persistent Dev session (command_center.do_qa_services_start).
+# Anything new that brings qa.services up belongs on this lock too - the ports
+# are a single shared resource and there is no second way to serialize them.
+SERVICES_LOCK_NAME = ".services.lock"
+
+
+def services_lock_path(ap_state: Path) -> Path:
+    """The qa.services mutex for a workspace ($AP_STATE/qa/.services.lock)."""
+    return Path(ap_state) / "qa" / SERVICES_LOCK_NAME
+
+
 QA_SERVICES_LOCK_SLACK = 60     # extra seconds of patience beyond qa.timeout_seconds itself
                                 # before giving up on the services lock below — a module-level
                                 # constant (not inlined) so a test can shrink it to make the
@@ -554,11 +568,10 @@ def qa_check(cfg_all: dict, qa_cfg: dict, tid: str, worktree: str, patch_path: s
         # down before that invocation exits. Two consumers in the SAME
         # workspace racing to bind those same ports at once (this loop-gate
         # run vs. a dashboard-driven qa_run.py --flow/--regression/--explore,
-        # or a persistent "Dev session") can't both win — see
-        # command_center.py's do_qa_services_start docstring, which notes
-        # this exact port-sharing gap without closing it. Serializing on a
-        # per-workspace lock file is the fix: at most one qa.services
-        # consumer runs at a time here.
+        # or a persistent "Dev session") can't both win. Serializing on ONE
+        # per-workspace lock file is the fix, and every one of those
+        # consumers now takes it (see SERVICES_LOCK_NAME above): at most one
+        # qa.services consumer is up in a workspace at a time.
         #
         # This IS the sanctioned exception to locks.py's "NEVER hold this
         # lock across a claude invocation" rule (see its module docstring):
@@ -574,7 +587,7 @@ def qa_check(cfg_all: dict, qa_cfg: dict, tid: str, worktree: str, patch_path: s
         # under itself) combined with break_stale=True means a leaked fd can
         # wedge contenders for at most that long before the next one breaks
         # the dead holder's lock and moves on.
-        lock_path = AP_STATE / "qa" / ".services.lock"
+        lock_path = services_lock_path(AP_STATE)
         lock_timeout = timeout + QA_SERVICES_LOCK_SLACK
         try:
             with locks.hold(lock_path, timeout=lock_timeout, break_stale=True):
