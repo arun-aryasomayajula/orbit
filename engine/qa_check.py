@@ -20,7 +20,11 @@ This module is a strict superset of the retired `runtime_check.py`:
     writes `reviews/task-<id>-qa.json` (see skills/orbit-qa-check.md for the
     full verdict contract). Judged against `qa.gate_categories`. The
     `ORBIT_QA_CMD` test hook replaces the claude call the same way
-    `ORBIT_RUNTIME_CMD` does for the legacy path.
+    `ORBIT_RUNTIME_CMD` does for the legacy path. When `qa.services` is
+    configured, the agent invocation is serialized per workspace behind
+    `$AP_STATE/qa/.services.lock` (see `qa_check()`'s own comment) — at most
+    one qa.services consumer runs at a time; losing the race ships without
+    QA evidence, same as any other unable-to-run condition.
 
 Exit codes (run.sh dispatches on EXACTLY 3 or 4 — anything else ships):
     0   ship — evidence attached, check skipped/off, or unable-to-run/errored
@@ -102,6 +106,7 @@ from pathlib import Path
 import yaml
 
 from backlog_append import get_task_field, set_task_field
+import locks
 import notify
 
 
@@ -126,6 +131,11 @@ QA_DEFAULT_MODEL = "sonnet"
 QA_DEFAULT_BROWSER = "chromium"
 DEFAULT_MAX_BOUNCES = 2         # qa.max_bounces default (config/schema.yaml)
 ENGINE_DIR = Path(__file__).resolve().parent
+QA_SERVICES_LOCK_SLACK = 60     # extra seconds of patience beyond qa.timeout_seconds itself
+                                # before giving up on the services lock below — a module-level
+                                # constant (not inlined) so a test can shrink it to make the
+                                # timeout path fast without touching the timeout `qa_check`
+                                # itself derives from config.
 
 SHIP, ESCALATE, BOUNCE = 0, 3, 4
 
@@ -536,7 +546,50 @@ def qa_check(cfg_all: dict, qa_cfg: dict, tid: str, worktree: str, patch_path: s
     mcp_path = _resolve_mcp_config(tid, qa_cfg)
     timeout = int(qa_cfg.get("timeout_seconds") or QA_DEFAULT_TIMEOUT)
     verdict_file = REVIEWS / f"task-{tid}-qa.json"
-    run_qa_agent(cfg_all, qa_cfg, tid, worktree, mcp_path, timeout)
+
+    if qa_cfg.get("services"):
+        # qa.services bind FIXED local ports (dev server, API, ...) — the QA
+        # agent brings them up itself (its own Bash tool calls, inside the
+        # claude invocation run_qa_agent launches below) and tears them back
+        # down before that invocation exits. Two consumers in the SAME
+        # workspace racing to bind those same ports at once (this loop-gate
+        # run vs. a dashboard-driven qa_run.py --flow/--regression/--explore,
+        # or a persistent "Dev session") can't both win — see
+        # command_center.py's do_qa_services_start docstring, which notes
+        # this exact port-sharing gap without closing it. Serializing on a
+        # per-workspace lock file is the fix: at most one qa.services
+        # consumer runs at a time here.
+        #
+        # This IS the sanctioned exception to locks.py's "NEVER hold this
+        # lock across a claude invocation" rule (see its module docstring):
+        # that rule exists because a claude subprocess could leak the lock
+        # fd into a still-live grandchild via a bare fork(), wedging every
+        # future contender behind a lock whose recorded pid is already dead.
+        # Holding across run_qa_agent's claude call is unavoidable here
+        # because the up/down dance happens INSIDE that invocation, not in
+        # this process — there is no earlier/later point in qa_check.py's
+        # own code to bound the critical section to instead. The risk is
+        # bounded, not eliminated: a generous timeout (the QA agent's own
+        # timeout plus slack, so a legitimate run is never starved out from
+        # under itself) combined with break_stale=True means a leaked fd can
+        # wedge contenders for at most that long before the next one breaks
+        # the dead holder's lock and moves on.
+        lock_path = AP_STATE / "qa" / ".services.lock"
+        lock_timeout = timeout + QA_SERVICES_LOCK_SLACK
+        try:
+            with locks.hold(lock_path, timeout=lock_timeout, break_stale=True):
+                run_qa_agent(cfg_all, qa_cfg, tid, worktree, mcp_path, timeout)
+        except locks.LockTimeout:
+            # Same semantics as the agent itself reporting `ran=false`: a
+            # wiring/environment condition kept the check from running at
+            # all, never an observed contradiction — ship, don't fail the
+            # cycle, and never touch verdict_file (nothing wrote one).
+            print(f"WARN: qa check for {tid} could not acquire {lock_path} within "
+                  f"{lock_timeout}s (another qa.services consumer holds the workspace's "
+                  f"services lock) — shipping without QA evidence")
+            return SHIP
+    else:
+        run_qa_agent(cfg_all, qa_cfg, tid, worktree, mcp_path, timeout)
 
     try:
         raw = verdict_file.read_text()

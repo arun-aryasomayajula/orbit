@@ -16,6 +16,7 @@ import re
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -688,3 +689,95 @@ def test_qa_fail_bounce_path_exception_falls_back_to_escalate(tmp_path):
     assert r.returncode == 3, r.stdout + r.stderr
     assert "WARN" in r.stdout
     assert "escalat" in r.stdout.lower()
+
+
+# ===========================================================================
+# Section 6 — qa.services serialization (Task 6): at most one qa.services
+# consumer per workspace runs at a time. The lock is a real flock-backed
+# file ($AP_STATE/qa/.services.lock, via engine/locks.py), held across the
+# whole run_qa_agent() claude invocation (the up/down dance itself happens
+# INSIDE that invocation, via the agent's own Bash tool calls — qa_check.py
+# never calls qa_env directly), so exercising the "already held" case needs
+# a real second OS process holding the flock, not just an in-process stand-in.
+# ===========================================================================
+
+QA_SERVICES_CFG = textwrap.dedent("""\
+    qa:
+      gate_categories:
+        frontend: required
+        feature: evidence
+      services:
+        - name: web
+          launch: "true"
+    """)
+
+
+def test_qa_no_services_creates_no_lock_file(tmp_path):
+    repo = target(tmp_path, QA_CFG)                  # QA_CFG has no `services` key at all
+    r = run(repo, qa_agent_cmd=qa_agent(tmp_path, {
+        "ran": True, "verdict": "pass", "contradicts": False, "summary": "ok"}))
+    assert r.returncode == 0, r.stdout + r.stderr
+    lock = repo / ".autopilot" / "state" / "qa" / ".services.lock"
+    assert not lock.exists()
+
+
+def test_qa_services_lock_released_after_normal_run(tmp_path):
+    repo = target(tmp_path, QA_SERVICES_CFG)
+    r = run(repo, qa_agent_cmd=qa_agent(tmp_path, {
+        "ran": True, "verdict": "pass", "contradicts": False, "summary": "ok"}))
+    assert r.returncode == 0, r.stdout + r.stderr
+
+    lock = repo / ".autopilot" / "state" / "qa" / ".services.lock"
+    assert lock.exists()                             # services declared → lock file created
+
+    # Released, not left held: a fresh, near-instant acquisition must succeed.
+    sys.path.insert(0, str(ENGINE))
+    import locks
+    with locks.hold(lock, timeout=2):
+        pass
+
+
+def test_qa_services_lock_pre_held_by_live_process_takes_unable_path(tmp_path, monkeypatch, capsys):
+    # A single flow (in-process caller directly against qa_check.qa_check())
+    # so QA_SERVICES_LOCK_SLACK can be monkeypatched to 0 — a real qa.timeout
+    # + the production 60s slack would make this test take over a minute.
+    repo = target(tmp_path, QA_SERVICES_CFG)
+    ap_home = repo / ".autopilot"
+    ap_state = ap_home / "state"
+    monkeypatch.setenv("AP_HOME", str(ap_home))
+    monkeypatch.setenv("AP_STATE", str(ap_state))
+    monkeypatch.setenv("ORBIT_HOME", str(ROOT))
+    sys.path.insert(0, str(ENGINE))
+    qc = _load_module("qa_check_services_lock_test", CHECK)
+    qc.QA_SERVICES_LOCK_SLACK = 0    # shrink the timeout formula down to just qa.timeout_seconds
+
+    lock_path = ap_state / "qa" / ".services.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # A same-process hold would hit locks.ReentrantLock, not LockTimeout —
+    # the contract under test is "another WORKSPACE consumer", i.e. a
+    # genuinely different, live process. A real subprocess plays that role.
+    holder_script = tmp_path / "hold_lock.py"
+    holder_script.write_text(textwrap.dedent(f"""\
+        import sys, time
+        sys.path.insert(0, {str(ENGINE)!r})
+        import locks
+        with locks.hold({str(lock_path)!r}, timeout=30):
+            time.sleep(3)
+        """))
+    holder = subprocess.Popen([sys.executable, str(holder_script)])
+    try:
+        time.sleep(0.3)   # give the holder time to actually acquire the flock first
+        cfg_all = {"repo": ".", "base_branch": "main"}
+        qa_cfg = {
+            "gate_categories": {"frontend": "required"},
+            "services": [{"name": "web", "launch": "true"}],
+            "timeout_seconds": 1,
+        }
+        rc = qc.qa_check(cfg_all, qa_cfg, "t1", str(repo))
+        assert rc == qc.SHIP                          # unable-to-run path: ship, never fail
+        out = capsys.readouterr().out
+        assert "WARN" in out
+        assert str(lock_path) in out                  # log line names the lock
+    finally:
+        holder.wait(timeout=10)
