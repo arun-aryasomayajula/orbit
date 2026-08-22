@@ -53,10 +53,17 @@ def _write_backlog(target, *blocks):
     (target / ".autopilot" / "backlog.yaml").write_text("tasks:\n" + "".join(blocks))
 
 
-def _run(target):
+def _run(target, workable=None):
+    """`workable` mirrors what run.sh hands down as ORBIT_WORKABLE (config.py
+    shellenv's comma-joined workable_categories). None = the key is absent,
+    which means "no category restriction" on both sides."""
     ap = target / ".autopilot"
     env = dict(os.environ, AP_HOME=str(ap), AP_STATE=str(ap / "state"),
                ORBIT_HOME=str(ORBIT))
+    if workable is None:
+        env.pop("ORBIT_WORKABLE", None)
+    else:
+        env["ORBIT_WORKABLE"] = workable
     return subprocess.run([sys.executable, str(SCRIPT)], cwd=str(target),
                           capture_output=True, text=True, env=env)
 
@@ -270,3 +277,68 @@ def test_should_autofeed_is_off_without_auto_promote_marker(target):
     state = target / ".autopilot" / "state"
     (state / "queue.json").write_text(json.dumps({"tasks": []}))
     assert _should_autofeed(state, auto_promote=False, slots=1) is False
+
+
+# --- F6: auto-feed only promotes what this target can actually WORK ----------
+# Without the workable_categories intersection, a workspace whose workable set
+# excludes a category still auto-promoted proposals in it: run.sh's
+# pickable_ids filtered every one back out, count_pickable stayed below SLOTS,
+# and the next tick promoted another - draining the backlog into a queue no
+# slot may claim, and never letting the N=1 stop condition fire.
+
+def test_autofeed_skips_a_category_this_target_cannot_work(target):
+    """A product workspace (workable: insight/funnel/hypothesis) with only a
+    `testing` proposal on the board must promote nothing."""
+    _write_backlog(target, _task("t-testing", "testing", source="metric_watch"))
+    r = _run(target, workable="insight,funnel,hypothesis")
+    assert r.returncode == 0, r.stderr
+    assert "no eligible proposed task" in r.stdout
+    assert _tasks(target)["t-testing"]["status"] == "proposed"
+
+
+def test_autofeed_promotes_a_workable_category_once(target):
+    """...and the same workspace's insight proposal IS promoted - exactly one
+    task per call, so the queue tops up rather than floods."""
+    _write_backlog(target,
+                   _task("t-testing", "testing", source="metric_watch"),
+                   _task("t-insight", "insight", source="metric_watch"),
+                   _task("t-insight-2", "insight", source="metric_watch"))
+    r = _run(target, workable="insight,funnel,hypothesis")
+    assert r.returncode == 0, r.stderr
+    tasks = _tasks(target)
+    assert tasks["t-insight"]["status"] == "queued"
+    assert tasks["t-insight"]["autopilot"] == "allow"
+    assert tasks["t-insight-2"]["status"] == "proposed"   # one per call
+    assert tasks["t-testing"]["status"] == "proposed"     # never workable here
+
+
+def test_autofeed_filters_nothing_when_no_categories_are_configured(target):
+    """Empty ORBIT_WORKABLE = no workable_categories key. Such a deployment
+    must keep behaving exactly as it does today rather than starve - the same
+    rule run.sh's own pick applies."""
+    _write_backlog(target, _task("t-testing", "testing", source="metric_watch"))
+    assert _run(target, workable="").returncode == 0
+    assert _tasks(target)["t-testing"]["status"] == "queued"
+
+
+def test_eligible_intersects_with_the_wrappers_own_filter(target):
+    """Unit view of the same rule: the conservative set AND the target's
+    workable set. Being workable is not enough on its own - a `code_quality`
+    task can include a risky core rewrite, which is why the conservative set
+    exists in the first place."""
+    src = (ORBIT / "engine" / "autopromote.py").read_text()
+    assert 'os.environ.get("ORBIT_WORKABLE")' in src
+    import importlib.util
+    os.environ["AP_HOME"] = str(target / ".autopilot")
+    sys.path.insert(0, str(ORBIT / "engine"))
+    spec = importlib.util.spec_from_file_location("autopromote_f6", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    testing = {"category": "testing", "autopilot": "human", "source": "metric_watch"}
+    insight = {"category": "insight", "autopilot": "human", "source": "metric_watch"}
+    workable = {"insight", "funnel", "hypothesis"}
+    assert mod._eligible(testing, workable) is False
+    assert mod._eligible(insight, workable) is True
+    assert mod._eligible(testing, set()) is True          # no restriction configured
+    assert mod._eligible({"category": "code_quality", "autopilot": "allow"},
+                         {"code_quality"}) is False

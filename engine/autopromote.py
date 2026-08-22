@@ -12,7 +12,10 @@ the chore categories (testing/documentation/dependencies/bug) plus the
 read-only product-analysis ones (insight/funnel/hypothesis), whose output is a
 doc the insight_lint gate grades. It does NOT auto-promote `code_quality`/
 `refactor` (which can include risky core rewrites) or any human-only category -
-promote those by hand from the dashboard.
+promote those by hand from the dashboard. On top of that it only promotes what
+this target can actually WORK: the conservative set is intersected with
+`workable_categories` (ORBIT_WORKABLE, the same filter run.sh's own pick
+applies), so auto-feed never fills the queue with tasks no slot may claim.
 
 Eligibility (see _eligible): a machine-filed task counts even though
 backlog_append writes every proposal as `autopilot: human`, because the
@@ -80,10 +83,20 @@ UNATTENDED_SOURCES = {"metric_watch", "logwatch", "ui-test", "maturity-score", "
 PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}
 
 
-def _eligible(t: dict) -> bool:
+def _workable() -> set[str]:
+    """The target's `workable_categories`, as run.sh hands them down
+    (ORBIT_WORKABLE, comma-joined by config.py shellenv). EMPTY means the
+    config has no such key, which in run.sh's own pick means "filter
+    nothing" - so it must mean the same here.
+    """
+    return {c for c in (os.environ.get("ORBIT_WORKABLE") or "").split(",") if c}
+
+
+def _eligible(t: dict, workable: set[str] | None = None) -> bool:
     """Is this proposed task one the AUTO_PROMOTE flag may feed the loop?
 
-    Category must be in the conservative set, AND one of:
+    Category must be in the conservative set AND in the target's
+    workable_categories (see _workable), AND one of:
       - `autopilot` is not `human` - the operator already un-gated this task; or
       - an unattended signal adapter filed it (see UNATTENDED_SOURCES).
 
@@ -95,8 +108,22 @@ def _eligible(t: dict) -> bool:
     opt-in: the operator turned the flag on, the category is gated by
     insight_lint, and the filer is a machine. A hand-written human task is
     never covered by it - the person typing it is right there to queue it.
+
+    The workable_categories intersection is what keeps auto-feed and the
+    wrapper's own pick talking about the same tasks. Without it, a workspace
+    whose workable set excludes (say) `testing` still auto-promoted testing
+    proposals: run.sh's pickable_ids then filtered every one of them back
+    out, count_pickable stayed below SLOTS, and the next tick promoted
+    another - a promote-unworkable-forever loop that drains the backlog into
+    a queue no slot may claim, and never lets the N=1 "queue is topped up"
+    stop condition fire.
     """
-    if t.get("category") not in AUTOPROMOTE_CATEGORIES:
+    if workable is None:
+        workable = _workable()
+    cat = t.get("category")
+    if cat not in AUTOPROMOTE_CATEGORIES:
+        return False
+    if workable and str(cat) not in workable:
         return False
     if t.get("autopilot") != "human":
         return True
@@ -128,9 +155,10 @@ def main() -> int:
     with locks.hold(AP_STATE / ".backlog.lock"):
         backlog = (yaml.safe_load(BACKLOG.read_text()) or {}).get("tasks", []) or []
         worked, skips = _worked(), _skips()
+        workable = _workable()
         cands = [t for t in backlog
                  if t.get("status") == "proposed"
-                 and _eligible(t)
+                 and _eligible(t, workable)
                  and str(t.get("id")) not in worked
                  and str(t.get("id")) not in skips]
         if not cands:
