@@ -15,6 +15,11 @@ permission_mode: "acceptEdits"   # claude --permission-mode. Deletes/push stay d
 interval_seconds: 180        # sleep between cycles
 max_tasks_per_day: 12        # hard daily cap (failed cycles count too)
 cycle_timeout_seconds: 3600  # watchdog kill per cycle
+concurrency: 1               # how many task cycles run in parallel. Each "slot" is one independent
+                             # worker (its own worktree, its own claim); the ledger's exclusive claim
+                             # guarantees no two slots ever work the same task. 1 = one worker, which
+                             # is byte-for-byte today's behaviour. Raising it only matters if the
+                             # service manager actually starts that many slot loops (`orbit install`).
 
 # --- where the human gates live ------------------------------------------------
 dashboard_url: "http://127.0.0.1:8787"   # linked from Slack notifications + the digest, so every

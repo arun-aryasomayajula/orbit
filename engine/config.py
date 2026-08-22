@@ -15,6 +15,10 @@ DEFAULTS = {
     "permission_mode": "acceptEdits", "interval_seconds": 180,
     "max_tasks_per_day": 12, "cycle_timeout_seconds": 3600, "spec": None,
     "sources": ["backlog"], "branch_prefix": "autopilot",
+    # How many task cycles ("slots") the loop may run in parallel. 1 = the
+    # single worker every existing deployment runs today; run.sh reads it as
+    # ORBIT_CONCURRENCY and defaults ORBIT_SLOTS to it.
+    "concurrency": 1,
     "commit_trailer": "Co-Authored-By: Claude <noreply@anthropic.com>",
     "pull_requests": "off",
     "dashboard_url": "http://127.0.0.1:8787",
@@ -47,6 +51,7 @@ def shellenv(target):
         f"export ORBIT_INTERVAL={sh(cfg['interval_seconds'])}",
         f"export ORBIT_MAX_TASKS={sh(cfg['max_tasks_per_day'])}",
         f"export ORBIT_CYCLE_TIMEOUT={sh(cfg['cycle_timeout_seconds'])}",
+        f"export ORBIT_CONCURRENCY={sh(cfg['concurrency'])}",
         f"export ORBIT_BRANCH_PREFIX={sh(cfg['branch_prefix'])}",
         f"export ORBIT_PULL_REQUESTS={sh(cfg['pull_requests'])}",
         f"export ORBIT_DASHBOARD_URL={sh(cfg['dashboard_url'])}",
@@ -86,6 +91,15 @@ def validate(target):
     for name, g in (cfg.get("gates") or {}).items():
         if not g.get("cmd"):
             errs.append(f"gate '{name}' has no cmd")
+    # concurrency drives how many slot loops an operator is told to run (and
+    # how far auto-feed tops the queue up). A zero/negative/non-int value would
+    # silently mean "no worker at all" or a nonsense ORBIT_SLOTS, so reject it
+    # here rather than letting run.sh inherit garbage. Absent/null = the
+    # default (1).
+    if raw.get("concurrency") is not None:
+        c = raw["concurrency"]
+        if not isinstance(c, int) or isinstance(c, bool) or c <= 0:
+            errs.append(f"concurrency must be a positive integer, got {c!r}")
     if cfg.get("pull_requests") not in ("off", "github"):
         errs.append(f"pull_requests must be \"off\" or \"github\", got {cfg.get('pull_requests')!r}")
     if "knowledge" in raw and raw["knowledge"] is not None:

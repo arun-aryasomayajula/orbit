@@ -256,22 +256,35 @@ def loop_loaded() -> bool:
         return False
 
 
+_CYCLE_LOG_STAMP = re.compile(r"(\d{8}T\d{6})\.log$")
+
+
+def _cycle_log_stamp(name: str) -> str:
+    """The start stamp in a cycle log's filename, '' if there isn't one. Two
+    shapes exist: the historical cycle-<ts>.log and the slot loop's
+    cycle-<tid>-<ts>.log — whose task id makes a plain lexicographic sort of the
+    filenames meaningless, hence sorting on this instead."""
+    m = _CYCLE_LOG_STAMP.search(name)
+    return m.group(1) if m else ""
+
+
 def probe_runtime() -> dict:
     """Everything the live console needs that isn't in backlog/ledger."""
     pids = cycle_pids()
     running = bool(pids)
-    # Cycle start = the timestamp encoded in the newest cycle-<ts>.log filename
+    # Cycle start = the timestamp encoded in the newest cycle log's filename
     # (created at cycle start; --print only flushes the body at the end, so the
-    # filename is the reliable start clock).
+    # filename is the reliable start clock). The newest stamp across every cycle
+    # log, whichever filename shape it has (see _cycle_log_stamp).
     start = None
-    cyclelogs = sorted(LOGDIR.glob("cycle-*.log")) if LOGDIR.exists() else []
-    if cyclelogs:
-        m = re.search(r"cycle-(\d{8}T\d{6})\.log", cyclelogs[-1].name)
-        if m:
-            try:
-                start = datetime.strptime(m.group(1), "%Y%m%dT%H%M%S").timestamp()
-            except Exception:
-                start = None
+    stamps = sorted(s for s in (_cycle_log_stamp(p.name)
+                                for p in (LOGDIR.glob("cycle-*.log") if LOGDIR.exists() else []))
+                    if s)
+    if stamps:
+        try:
+            start = datetime.strptime(stamps[-1], "%Y%m%dT%H%M%S").timestamp()
+        except Exception:
+            start = None
 
     # Heartbeat + completed-cycle durations from autopilot.log (turnaround time).
     heartbeat = None
@@ -2698,7 +2711,10 @@ def cycletail(max_lines: int = 120) -> dict:
     """Human-readable live tail of the newest cycle log. stream-json logs are
     parsed into narrator lines (agent text, tool calls, final cost); legacy
     plain-text logs pass through as-is."""
-    logs = sorted(LOGDIR.glob("cycle-*.log")) if LOGDIR.exists() else []
+    # Newest by the stamp in the filename, not by the filename itself: a
+    # cycle-<tid>-<ts>.log sorts by its task id otherwise (see _cycle_log_stamp).
+    logs = sorted(LOGDIR.glob("cycle-*.log"), key=lambda p: _cycle_log_stamp(p.name)) \
+        if LOGDIR.exists() else []
     if not logs:
         return {"file": None, "lines": []}
     p = logs[-1]
