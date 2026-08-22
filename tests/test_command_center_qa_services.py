@@ -16,6 +16,7 @@
 #
 # Run: python3.11 -m pytest tests/test_command_center_qa_services.py -v   (from orbit/)
 import importlib.util
+import subprocess
 import sys
 import textwrap
 import threading
@@ -123,6 +124,10 @@ def cc(tmp_path, monkeypatch):
     # state so there's nothing left for either atexit hook to tear down.
     m._QA_SERVICES["handles"] = None
     m._teach_session = None
+    # Hand the workspace qa.services mutex back if a test left the session
+    # holding it: the flock lives on an fd that would otherwise stay open for
+    # the rest of the pytest process.
+    m._qa_services_release_ports()
 
 
 def _wait_for_qa_state(cc, states, timeout=5.0):
@@ -570,3 +575,86 @@ def test_teach_still_brings_its_own_services_up_when_dev_session_stopped(cc, mon
     assert (cc.AP_HOME / "qa" / "flows" / "own-services-flow").is_dir()
     # Never touched the (never-started) persistent session's own bookkeeping.
     assert cc._QA_SERVICES["state"] == "stopped"
+
+
+# ── F4: the Dev session is one consumer of THE workspace qa.services mutex ───
+# The ports are a single shared resource: this session, the loop's own QA gate
+# (qa_check.py) and a qa_run --regression/--explore/--generate run can each
+# bind them, and before this only qa_check took a lock at all. The session
+# holds the mutex from Start until Stop, because that is exactly how long its
+# services stay bound.
+
+def _hold_services_lock(cc):
+    """Hold the mutex from a LIVE child process, standing in for the loop's
+    QA gate holding it across its claude invocation. Live matters: locks.hold
+    breaks a lock whose recorded pid is dead."""
+    code = textwrap.dedent("""\
+        import sys, time
+        sys.path.insert(0, sys.argv[1])
+        import locks
+        with locks.hold(sys.argv[2], timeout=10):
+            print("held", flush=True)
+            time.sleep(30)
+        """)
+    lock = cc.qa_check.services_lock_path(cc.AP_STATE)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.Popen([sys.executable, "-c", code, str(ENGINE), str(lock)],
+                            stdout=subprocess.PIPE, text=True)
+    assert proc.stdout.readline().strip() == "held"
+    return proc
+
+
+def test_dev_session_start_reports_busy_while_another_consumer_holds_the_ports(cc):
+    cc.QA_SERVICES_LOCK_WAIT = 0.2      # no reason to make the test wait
+    holder = _hold_services_lock(cc)
+    try:
+        result = cc.do_qa_services_start()
+        assert result["ok"] is False
+        assert "ports are busy" in result["msg"]
+        assert cc._QA_SERVICES["state"] == "stopped"   # never promised to start
+        assert cc._svc_up_calls == []                  # nothing was launched
+    finally:
+        holder.terminate()
+        holder.wait(timeout=10)
+
+
+def _probe_lock_from_a_child(cc, timeout=0.4):
+    """"busy" or "free", asked from ANOTHER PROCESS - which is the only honest
+    way to ask. locks.hold's reentrancy guard is keyed by pid, so a contender
+    inside this same process would raise ReentrantLock rather than contend,
+    and the cross-process exclusion is the thing under test."""
+    code = textwrap.dedent("""\
+        import sys
+        sys.path.insert(0, sys.argv[1])
+        import locks
+        try:
+            with locks.hold(sys.argv[2], timeout=float(sys.argv[3]), break_stale=False):
+                print("free")
+        except locks.LockTimeout:
+            print("busy")
+        """)
+    lock = cc.qa_check.services_lock_path(cc.AP_STATE)
+    r = subprocess.run([sys.executable, "-c", code, str(ENGINE), str(lock), str(timeout)],
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    return r.stdout.strip()
+
+
+def test_dev_session_holds_the_ports_until_stop(cc):
+    assert cc.do_qa_services_start()["ok"] is True
+    assert _wait_for_qa_state(cc, {"running"}) == "running"
+    assert _probe_lock_from_a_child(cc) == "busy"       # a running session owns it
+    assert cc.do_qa_services_stop()["ok"] is True
+    assert _probe_lock_from_a_child(cc, timeout=2) == "free"   # ...and hands it back
+
+
+def test_dev_session_hands_the_ports_back_when_bring_up_fails(cc, monkeypatch):
+    """A failed Start binds nothing, so holding the mutex in `error` would lock
+    every other consumer out until someone remembered to click Stop."""
+    def boom(target, qa_cfg, log_dir):
+        raise RuntimeError("port already in use")
+
+    monkeypatch.setattr(cc.qa_env, "up", boom)
+    assert cc.do_qa_services_start()["ok"] is True
+    assert _wait_for_qa_state(cc, {"error"}) == "error"
+    assert _probe_lock_from_a_child(cc, timeout=2) == "free"

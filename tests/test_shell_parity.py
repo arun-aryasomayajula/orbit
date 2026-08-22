@@ -38,3 +38,21 @@ def test_inline_shell_fork_is_gone():
         "an inline SHELL template is back in command_center.py — the UI lives ONLY "
         "in cc_shell.html; a second copy WILL silently diverge again"
     )
+
+
+# ── F9: Start stays reachable as a TOP-UP, disabled only at full ─────────────
+# Both shells used to disable Start whenever the loop was "running" at all, so
+# at concurrency > 1 a crashed slot could only be brought back by stopping the
+# slots that were still working. The launcher already refuses to double-start a
+# live slot and starts the free ones, so the button must match that.
+
+LAUNCHER_SHELL = (ENGINE / "launcher_shell.html").read_text()
+CC_SHELL = SHELL_PATH.read_text()
+
+
+def test_both_shells_gate_start_on_full_not_on_running():
+    for name, shell in (("launcher_shell.html", LAUNCHER_SHELL), ("cc_shell.html", CC_SHELL)):
+        assert "loop_tracked >= p.loop_slots" in shell or "loop_tracked>=p.loop_slots" in shell, name
+        # the old, wrong condition must be gone from the Start button
+        assert "${p.loop_running ? 'disabled' : ''}" not in shell, name
+        assert "${p.loop_running?'disabled':''}" not in shell, name

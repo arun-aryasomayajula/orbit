@@ -93,7 +93,15 @@ CONVERTER = ENGINE / "backlog_to_tasks.py"
 sys.path.insert(0, str(ENGINE))
 import lifecycle  # noqa: E402
 import locks  # noqa: E402
+# qa_check resolves its own AP_STATE/AP_HOME at import time, which is why
+# qa_run.py imports it lazily; here those are already resolved above, so a
+# module-level import is safe. Imported for the ONE qa.services mutex
+# (services_lock_path) - the Dev session is one of its consumers.
+import qa_check  # noqa: E402
 from backlog_lint import KNOWN_CATEGORIES  # noqa: E402
+# The ONE concurrency ceiling (see engine/config.py) - imported, never
+# re-stated, so the Admin panel and the loop's preflight can never disagree.
+from config import CONCURRENCY_MAX  # noqa: E402
 
 
 def _resolve_base_branch() -> str:
@@ -270,14 +278,21 @@ def workers_state() -> list | None:
     concurrency > 1, [] is returned instead of None even with no pid files
     yet (dir freshly created, nothing claimed) - an operator who just turned
     on concurrency and is looking for the strip needs to see "no workers
-    right now", not have it vanish."""
+    right now", not have it vanish.
+
+    Only NUMERIC stems are per-cycle worker files. The same directory also
+    holds run.sh's lifetime `loop-<slot>.pid` files, which say "this slot is
+    owned" rather than "this task is in flight" - counting one as a worker
+    would put a permanent phantom row on the strip and, worse, make `live`
+    (build_state) read as a running cycle for as long as the loop is up."""
     concurrency = 1
     try:
         concurrency = int(_load_cfg().get("concurrency") or 1)
     except (TypeError, ValueError):
         pass
     try:
-        pid_files = sorted(WORKERS_DIR.glob("*.pid")) if WORKERS_DIR.is_dir() else []
+        pid_files = sorted(p for p in WORKERS_DIR.glob("*.pid")
+                           if p.stem.isdigit()) if WORKERS_DIR.is_dir() else []
     except OSError:
         pid_files = []
     if not pid_files and concurrency <= 1:
@@ -291,8 +306,14 @@ def workers_state() -> list | None:
         if not isinstance(info, dict):
             continue
         pid = info.get("pid")
+        # cycle_pid/cycle_pgid: the CYCLE this slot is running, as opposed to
+        # `pid` (the slot loop). Absent until run.sh's record_cycle_pid has
+        # run; cycle_pgid additionally absent unless the cycle leads its own
+        # process group. do_killtask is the consumer - see its docstring.
         out.append({"slot": p.stem, "pid": pid, "tid": info.get("tid"),
                     "started": info.get("started"),
+                    "cycle_pid": info.get("cycle_pid"),
+                    "cycle_pgid": info.get("cycle_pgid"),
                     "alive": pid is not None and locks.pid_alive(pid)})
     out.sort(key=lambda w: (int(w["slot"]) if str(w["slot"]).isdigit() else 0, w["slot"]))
     return out
@@ -327,8 +348,16 @@ def _cycle_log_tid(name: str) -> str:
     return m.group(1) if m else ""
 
 
-def probe_runtime() -> dict:
-    """Everything the live console needs that isn't in backlog/ledger."""
+def probe_runtime(workers: list | None = None) -> dict:
+    """Everything the live console needs that isn't in backlog/ledger.
+
+    `workers`: build_state already computed workers_state() for its own
+    `live`/`workers` keys, and every pid file it reads would otherwise be
+    read and liveness-probed a SECOND time here, once per 3-second poll.
+    Pass it in. Omitted (None) means "compute it myself" - the standalone
+    callers and tests that call probe_runtime() on its own."""
+    if workers is None:
+        workers = workers_state()
     pids = cycle_pids()
     running = bool(pids)
     # Cycle start = the timestamp encoded in the newest cycle log's filename
@@ -343,7 +372,7 @@ def probe_runtime() -> dict:
     # unfiltered set when no live worker's tid matches any log on disk (e.g. a
     # legacy single-slot deployment with no workers dir at all).
     logs = list(LOGDIR.glob("cycle-*.log")) if LOGDIR.exists() else []
-    live_tids = {str(w["tid"]) for w in (workers_state() or []) if w.get("alive") and w.get("tid")}
+    live_tids = {str(w["tid"]) for w in (workers or []) if w.get("alive") and w.get("tid")}
     if live_tids:
         owned = [p for p in logs if _cycle_log_tid(p.name) in live_tids]
         if owned:
@@ -378,6 +407,17 @@ def probe_runtime() -> dict:
                 last_start = None
     recent = durs[-12:]
     avg_cycle = round(sum(recent) / len(recent)) if recent else None
+    # Turnaround is measured by PAIRING a "cycle start" line with the next
+    # terminal line in one shared orbit.log. With several slots interleaving
+    # their lines into that log, the pairing is arbitrary: slot 1's terminal
+    # line closes slot 0's start, and the "duration" is the gap between two
+    # unrelated events. Rather than publish a number that is wrong in a way
+    # nobody can see, suppress it while more than one worker is live (the UI
+    # renders null as "—"). Slot-tagged pairing - the honest fix, since every
+    # line already carries "[slot N]" - is M5.
+    if len(live_tids) > 1:
+        last_dur = avg_cycle = None
+        durs = []
 
     today = datetime.now().strftime("%Y-%m-%d")
     try:
@@ -532,10 +572,19 @@ def do_killtask(tid: str = "") -> str:
     immediately re-pick it. Reversible by editing skips.txt.
 
     Targeted path (concurrency-safe): if `tid` names a LIVE worker in
-    workers_state() (its $AP_STATE/workers/<slot>.pid), SIGTERM only that
-    pid's own process group (os.killpg) - never the machine-wide
-    cycle_pids() pgrep, which would also take out every OTHER slot's
-    in-flight task (and any unrelated orbit-cycle process on the box).
+    workers_state(), the signal goes to the CYCLE that worker recorded
+    ($AP_STATE/workers/<slot>.pid's `cycle_pid`/`cycle_pgid`, written by
+    run.sh's record_cycle_pid) - never to the worker file's `pid`, which is
+    the slot LOOP's own pid. That was the C2 bug: killpg'ing the loop's group
+    aborted the whole slot along with the one task, so the operator's Abort
+    silently stopped the workspace. Aborting a task must leave its loop
+    running, ready to escalate the task and pick up the next one.
+
+    `cycle_pgid` is only present when the cycle genuinely leads its own
+    process group (run.sh's session wrapper), which is the same leader guard
+    the launcher applies before killpg (do_loop_stop): with it, the whole
+    cycle tree goes - claude, caffeinate, node children; without it, a plain
+    TERM on the cycle pid is all that is safe.
 
     Legacy fallback: no `tid` given, or it doesn't match any live worker
     (e.g. a state dir from before T4's per-slot pid files existed) - the
@@ -544,17 +593,30 @@ def do_killtask(tid: str = "") -> str:
     workers = workers_state() or []
     match = next((w for w in workers if w.get("alive") and str(w.get("tid")) == str(tid)), None) if tid else None
     if match is not None:
-        pid = match["pid"]
+        cycle_pid, cycle_pgid = match.get("cycle_pid"), match.get("cycle_pgid")
+        if not cycle_pid:
+            # Claimed, but no cycle recorded yet (the window between the claim
+            # and the cycle's first instant), or a pid file written by a run.sh
+            # from before cycle_pid existed. There is nothing safe to signal:
+            # the only other pid on file is the loop's. Skip the task so it is
+            # not re-picked and say plainly that nothing was killed.
+            do_skip(tid)
+            return (f"'{tid}' is claimed by slot {match['slot']} but its cycle process isn't recorded "
+                    f"yet - nothing was stopped. The task is skipped so it won't be retried; if a cycle "
+                    f"really is running, try Abort again in a few seconds. Un-skip by editing skips.txt.")
         try:
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
+            if cycle_pgid:
+                os.killpg(cycle_pgid, signal.SIGTERM)
+            else:
+                os.kill(cycle_pid, signal.SIGTERM)
         except ProcessLookupError:
             pass   # already gone - still skip it below so it isn't re-picked
         except Exception as e:
-            return f"Could not stop '{tid}' (slot {match['slot']}, pid {pid}): {e}"
+            return f"Could not stop '{tid}' (slot {match['slot']}, cycle pid {cycle_pid}): {e}"
         do_skip(tid)
-        return (f"Stopped {tid}'s cycle (slot {match['slot']}, pid {pid}) and skipped it so it won't be "
-                f"retried. That slot's wrapper will reset its worktree and start a fresh cycle after its "
-                f"backoff. Un-skip by editing skips.txt.")
+        return (f"Stopped {tid}'s cycle (slot {match['slot']}, cycle pid {cycle_pid}) and skipped it so "
+                f"it won't be retried. That slot's loop is untouched - it will escalate the task, reset "
+                f"its worktree and start a fresh cycle after its backoff. Un-skip by editing skips.txt.")
     pids = cycle_pids()
     if not pids:
         return "No cycle is currently running — nothing to stop."
@@ -1988,7 +2050,30 @@ def _do_generate_reject(name: str) -> dict:
 # check, "is this thread's own bring-up still wanted" reduces to "is the
 # state still 'starting'".
 _QA_SERVICES_LOCK = threading.Lock()
-_QA_SERVICES = {"state": "stopped", "handles": None, "error": None}
+# `ports` holds the workspace-wide qa.services mutex (qa_check's
+# SERVICES_LOCK_NAME) for the session's WHOLE lifetime - see
+# do_qa_services_start.
+_QA_SERVICES = {"state": "stopped", "handles": None, "error": None, "ports": None}
+# How long a Start waits for the mutex before telling the operator the ports
+# are busy. Short on purpose: whoever holds it is a loop QA gate or a
+# sweep/explore/generate run that lasts minutes, so waiting would just hang
+# the request; a click is better answered with "busy, try again".
+QA_SERVICES_LOCK_WAIT = 2
+
+
+def _qa_services_release_ports() -> None:
+    """Drop the qa.services mutex if this session holds it. Idempotent, and
+    never raises - a release failure must not break the Stop path. (Process
+    death releases it too: flock lives on the fd, which the kernel tears down
+    on exit, so a crashed dashboard never wedges the lock.)"""
+    with _QA_SERVICES_LOCK:
+        stack = _QA_SERVICES.get("ports")
+        _QA_SERVICES["ports"] = None
+    if stack is not None:
+        try:
+            stack.close()
+        except Exception:
+            pass
 
 
 def _qa_services_bring_up(qa_cfg: dict, log_dir: Path) -> None:
@@ -2008,6 +2093,10 @@ def _qa_services_bring_up(qa_cfg: dict, log_dir: Path) -> None:
                 _QA_SERVICES["state"] = "error"
                 _QA_SERVICES["error"] = f"could not bring qa.services up ({e})"
                 _QA_SERVICES["handles"] = None
+        # Nothing is bound any more (qa_env.up tore down what it started), so
+        # the mutex must go back - otherwise a failed Start would lock every
+        # other qa.services consumer out until the dashboard restarts.
+        _qa_services_release_ports()
         return
 
     with _QA_SERVICES_LOCK:
@@ -2018,6 +2107,9 @@ def _qa_services_bring_up(qa_cfg: dict, log_dir: Path) -> None:
             _QA_SERVICES["error"] = None
     if cancelled:
         qa_env.down(handles)   # stopped while services were coming up
+        # The Stop that cancelled us already released the mutex; this is the
+        # belt-and-braces call for the ordering where it had not yet.
+        _qa_services_release_ports()
 
 
 def do_qa_services_start() -> dict:
@@ -2028,17 +2120,20 @@ def do_qa_services_start() -> dict:
     already running/starting just reports so — a double-click (or a stale
     tab re-posting) must never spawn a second overlapping set of services.
 
-    Port-sharing note (contained, not corruption — noted, not solved here):
-    this isn't the only thing that can bind qa.services' ports. The loop's
-    own QA gate (qa_check.py) and a manual --regression/--explore sweep
-    each bring qa.services up/down themselves, independent of
-    _QA_SERVICES, so one of those running against this same target while
-    this session is up races for the same ports. An un-attached `orbit
-    teach` mid-recording holds those same ports too (see
-    _qa_teach_bring_up's non-attached branch, which brings its own
-    qa.services up and only tears them down when recording finishes) — so
-    clicking Start here while a stopped-session teach is still recording
-    can bind-conflict the same way."""
+    Ports: this is NOT the only thing that can bind qa.services' fixed
+    ports. The loop's own QA gate (qa_check.py) and a manual
+    --regression/--explore/--generate run each bring qa.services up and down
+    themselves. All of them - this route included - now serialize on the one
+    workspace mutex (qa_check.SERVICES_LOCK_NAME), so the loser is told the
+    ports are busy instead of racing for the bind. This session holds that
+    mutex from Start until Stop, because that is exactly how long the ports
+    stay bound.
+
+    Still uncovered, and deliberately so: an un-attached `orbit teach`
+    mid-recording brings its OWN qa.services up (see _qa_teach_bring_up's
+    non-attached branch) and is not on this mutex, because a teach recording
+    is an interactive session an operator is watching, not an unattended
+    consumer to be silently skipped."""
     with _QA_SERVICES_LOCK:
         if _QA_SERVICES["state"] in ("running", "starting"):
             return {"ok": True, "msg": f"already {_QA_SERVICES['state']}"}
@@ -2048,6 +2143,21 @@ def do_qa_services_start() -> dict:
             return {"ok": False,
                     "msg": "no 'qa: services' configured in .autopilot/config.yaml — "
                            "see config/schema.yaml's qa.services block and add one first"}
+        # Take the workspace's qa.services mutex BEFORE promising the operator
+        # anything. ExitStack is the stdlib way to hold a context manager open
+        # past the block that entered it: the flock lives on the fd (not the
+        # thread), so entering here and closing on the Stop request is sound.
+        lock_path = qa_check.services_lock_path(AP_STATE)
+        stack = contextlib.ExitStack()
+        try:
+            stack.enter_context(locks.hold(lock_path, timeout=QA_SERVICES_LOCK_WAIT,
+                                           break_stale=True))
+        except locks.LockTimeout:
+            return {"ok": False,
+                    "msg": "your app's ports are busy - the loop's QA gate or a QA "
+                           "sweep/explore/generate run is using them right now. "
+                           "Try again once it finishes."}
+        _QA_SERVICES["ports"] = stack
         _QA_SERVICES["state"] = "starting"
         _QA_SERVICES["error"] = None
         _QA_SERVICES["handles"] = None
@@ -2072,6 +2182,9 @@ def do_qa_services_stop() -> dict:
         _QA_SERVICES["error"] = None
     if handles:
         qa_env.down(handles)
+    # Ports first freed, mutex released after: the next consumer must never be
+    # let in while this session's services are still tearing down.
+    _qa_services_release_ports()
     return {"ok": True, "msg": "app stopped"}
 
 
@@ -2132,6 +2245,12 @@ def do_qa_services_restart(payload: dict) -> dict:
                 # partially started before raising — nothing from the old
                 # set survives to track.
                 _QA_SERVICES["handles"] = None
+        if not service:
+            # Nothing of this session is bound any more, so hand the ports
+            # mutex back instead of holding it in `error` until someone
+            # remembers to click Stop. A NAMED-service failure keeps it: the
+            # other services are still up and still own their ports.
+            _qa_services_release_ports()
         return {"ok": False, "msg": f"restart failed: {e}"}
 
     with _QA_SERVICES_LOCK:
@@ -2146,6 +2265,7 @@ def do_qa_services_restart(payload: dict) -> dict:
             _QA_SERVICES["error"] = None
     if stopped_meanwhile:
         qa_env.down(new_handles)
+        _qa_services_release_ports()   # the Stop released it already; idempotent
         return {"ok": True, "msg": "app was stopped while restarting — nothing to do"}
     return {"ok": True, "msg": f"restarted {service or 'all services'}"}
 
@@ -3459,8 +3579,15 @@ def _validate_config(d: dict) -> list:
         if k in d and (not isinstance(d[k], str) or not d[k].strip()):
             errs.append(f"{k} must be a non-empty string")
     _nonempty("base_branch"); _nonempty("model"); _nonempty("permission_mode"); _nonempty("repo")
+    def _bounded_int(k, lo, hi):
+        if k in d and (not isinstance(d[k], int) or isinstance(d[k], bool)
+                       or d[k] < lo or d[k] > hi):
+            errs.append(f"{k} must be an integer between {lo} and {hi}")
     _posint("interval_seconds"); _posint("max_tasks_per_day"); _posint("cycle_timeout_seconds")
-    _posint("concurrency")
+    # ONE concurrency contract (see engine/config.py's CONCURRENCY_MAX): the
+    # Admin panel must refuse exactly what `config.py validate` refuses, or a
+    # value saved here would fail the loop's own preflight instead.
+    _bounded_int("concurrency", 1, CONCURRENCY_MAX)
     if "git_host" in d and d["git_host"] not in HOSTS_ALL:
         errs.append("git_host must be one of " + ", ".join(HOSTS_ALL))
     if "pull_requests" in d and d["pull_requests"] not in ("off", "github"):
@@ -4192,7 +4319,9 @@ def build_state() -> dict:
         )
         _b["pr_open"] = bool(_real_pr)
 
-    rt = probe_runtime()
+    # `workers` was computed at the top of build_state (for `live`) - hand it
+    # over so one poll reads the pid files ONCE, not twice.
+    rt = probe_runtime(workers)
     rt.update({"running": running, "next_up": next_up, "board": board, "skipped": skipped,
                "auto_feed": AUTO_PROMOTE.exists(), "metrics": agent_metrics(), "history": hist["days"],
                "funnel": funnel,

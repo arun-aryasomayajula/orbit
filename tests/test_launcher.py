@@ -431,19 +431,38 @@ def test_launcher_state_function_shape(launcher, tmp_path):
     assert state["projects"][0]["loop_running"] is False
 
 
-def test_launcher_state_loop_running_reflects_stop_file(launcher, tmp_path):
-    # The legacy (no-pid-file) signal, e.g. a launchd-managed loop napping
-    # between cycles: it has an orbit.log - proof a loop has run here - so STOP
-    # is the only thing left to read.
+def test_launcher_state_loop_running_ignores_orbit_log_and_stop(launcher, tmp_path):
+    # F3: the orbit.log-plus-no-STOP heuristic is GONE. A workspace with a log
+    # (proof a loop ran here at some point) and no live pid file is not
+    # running, and arming STOP does not change that either way - STOP says
+    # "claim nothing", never "the process is gone".
     repo = tmp_path / "looprepo"
     repo.mkdir()
     ap_state = repo / ".autopilot" / "state"
     (ap_state / "logs").mkdir(parents=True)
     (ap_state / "logs" / "orbit.log").write_text("[2026-08-22 10:00:00] [slot 0] tick\n")
     launcher.registry_add(str(repo))
-    assert launcher.launcher_state()["projects"][0]["loop_running"] is True
+    assert launcher.launcher_state()["projects"][0]["loop_running"] is False
     (ap_state / "STOP").write_text("stopped\n")
     assert launcher.launcher_state()["projects"][0]["loop_running"] is False
+
+
+def test_launcher_state_loop_running_reads_the_loop_pid_file(launcher, tmp_path):
+    # The signal that REPLACED the heuristic: run.sh's lifetime
+    # loop-<slot>.pid. Live pid = that slot is owned, cycle or no cycle, STOP
+    # armed or not.
+    repo = tmp_path / "looppid"
+    repo.mkdir()
+    workers = repo / ".autopilot" / "state" / "workers"
+    workers.mkdir(parents=True)
+    (workers / "loop-0.pid").write_text(json.dumps(
+        {"pid": os.getpid(), "slot": "0", "started": "2026-08-22T00:00:00Z"}))
+    launcher.registry_add(str(repo))
+    assert launcher.launcher_state()["projects"][0]["loop_running"] is True
+    (repo / ".autopilot" / "state" / "STOP").write_text("paused\n")
+    assert launcher._loop_running(str(repo)) is True      # paused, still owned
+    (workers / "loop-0.pid").write_text(json.dumps({"pid": 999999999, "slot": "0"}))
+    assert launcher._loop_running(str(repo)) is False     # dead pid = unowned
 
 
 def test_launcher_state_loop_not_running_for_a_never_started_workspace(launcher, tmp_path):
@@ -661,6 +680,27 @@ def _workspace(tmp_path, name="ws", concurrency=None):
     return repo
 
 
+def _stray_loop(repo, name="fake-loop.sh"):
+    """A live process whose COMMAND LINE names this workspace, so
+    launcher._ps_names_the_loop vouches for it - i.e. a stand-in for a
+    launchd/hand-started loop the launcher did not spawn.
+
+    Why a script inside the workspace rather than `sh -c "sleep 60 # <path>"`:
+    /bin/sh exec-optimizes a single simple command, so the comment (and with
+    it the path) vanishes from the process's argv and ps shows a bare
+    `sleep 60`."""
+    script = repo.resolve() / ".autopilot" / "state" / name
+    script.write_text("#!/bin/sh\nsleep 60\n")
+    script.chmod(0o755)
+    return subprocess.Popen(["/bin/sh", str(script)], start_new_session=True)
+
+
+def _kill_stray(proc):
+    if proc.poll() is None:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    proc.wait(timeout=5)
+
+
 @pytest.fixture()
 def loops(launcher, tmp_path, monkeypatch):
     """launcher module with a zero grace period (loop-stop's real 2s window is
@@ -847,7 +887,9 @@ def test_loop_stop_signals_untracked_loops_from_worker_pid_files(loops, tmp_path
     launcher.registry_add(str(repo))
     workers = repo / ".autopilot" / "state" / "workers"
     workers.mkdir(parents=True)
-    stray = subprocess.Popen(["/bin/sh", "-c", "sleep 60"], start_new_session=True)
+    # The command line names the workspace, so `ps` vouches for it (F9's
+    # identity check - its own tests are below).
+    stray = _stray_loop(repo)
     try:
         (workers / "0.pid").write_text(json.dumps({"pid": stray.pid, "tid": "t-1", "started": "now"}))
         result = launcher.do_loop_stop(str(repo))
@@ -871,6 +913,9 @@ def test_loop_stop_only_blasts_a_process_group_the_loop_actually_leads(loops, tm
     workers.mkdir(parents=True)
     (workers / "0.pid").write_text(json.dumps({"pid": 4242, "tid": "t-1"}))
     monkeypatch.setattr(launcher, "_pid_alive", lambda pid: True)
+    # 4242 is a made-up pid, so `ps` cannot vouch for it (F9's identity check
+    # has its own tests below) - this test is about the leader guard only.
+    monkeypatch.setattr(launcher, "_ps_names_the_loop", lambda pid, path: True)
 
     for pgid, expect_group_kill in [(4242, True), (1, False)]:
         killed, blasted = [], []
@@ -924,7 +969,9 @@ def test_loop_stop_ignores_worker_files_it_cannot_correlate(loops, tmp_path):
     launcher.registry_add(str(repo))
     workers = repo / ".autopilot" / "state" / "workers"
     workers.mkdir(parents=True)
-    stray = subprocess.Popen(["/bin/sh", "-c", "sleep 60"], start_new_session=True)
+    # Names the workspace so the `ps` identity check (F9) passes - what this
+    # test is about is the tid + freshness correlation on top of it.
+    stray = _stray_loop(repo)
     try:
         # old file (mtime way past 3x60s) + a file with no task id
         old = workers / "0.pid"
@@ -1013,8 +1060,8 @@ def test_loop_running_is_true_while_a_slot_lives_and_false_after_stop(loops, tmp
 
 
 def test_loop_running_trusts_a_live_worker_pid_over_the_stop_file(loops, tmp_path):
-    # The pid-file signal outranks the legacy STOP heuristic: a loop that is
-    # mid-cycle when STOP is armed is still running until it finishes.
+    # A mid-cycle worker pid file is still a running loop even with STOP armed
+    # (STOP stops new claims, not the process). A dead pid is not.
     launcher, envdir = loops
     repo = _workspace(tmp_path, "midcycle")
     state = repo / ".autopilot" / "state"
@@ -1022,7 +1069,6 @@ def test_loop_running_trusts_a_live_worker_pid_over_the_stop_file(loops, tmp_pat
     (state / "STOP").write_text("stopped\n")
     (state / "workers" / "0.pid").write_text(json.dumps({"pid": os.getpid(), "tid": "t-1"}))
     assert launcher._loop_running(str(repo)) is True
-    # a dead pid falls through to the legacy STOP heuristic
     (state / "workers" / "0.pid").write_text(json.dumps({"pid": 999999999, "tid": "t-1"}))
     assert launcher._loop_running(str(repo)) is False
 
@@ -1033,8 +1079,180 @@ def test_loop_running_tolerates_a_torn_worker_pid_file(loops, tmp_path):
     state = repo / ".autopilot" / "state"
     (state / "workers").mkdir()
     (state / "workers" / "0.pid").write_text('{"pid": 1')   # half-written
+    (state / "workers" / "loop-0.pid").write_text('{"pid": 1')
     (state / "STOP").write_text("stopped\n")
-    assert launcher._loop_running(str(repo)) is False   # no crash, legacy answer
+    assert launcher._loop_running(str(repo)) is False   # no crash, unowned
+
+
+# ── F3: the lifetime loop pid file (idle-slot ownership) ─────────────────────
+
+def test_loop_start_refuses_a_slot_an_idle_foreign_loop_owns(loops, tmp_path):
+    # THE pause-then-Start double start. A paused loop holds no claim, so it
+    # has no <slot>.pid at all - the launcher used to see a free slot and put
+    # a SECOND process on the same worktree. loop-<slot>.pid is what makes an
+    # idle-but-alive slot visible.
+    launcher, envdir = loops
+    repo = _workspace(tmp_path, "idleowned", concurrency=2)
+    launcher.registry_add(str(repo))
+    workers = repo / ".autopilot" / "state" / "workers"
+    workers.mkdir(parents=True)
+    idle = _stray_loop(repo)
+    try:
+        # slot 1 owned, idle: a loop pid file and deliberately NO worker file
+        (workers / "loop-1.pid").write_text(json.dumps(
+            {"pid": idle.pid, "slot": "1", "started": "now"}))
+        assert list(workers.glob("[0-9]*.pid")) == []
+        result = launcher.do_loop_start(str(repo))
+        assert result["ok"] is True, result["msg"]
+        assert result["started"] == [0]
+        assert result["skipped"] == [1]
+        assert launcher._loop_running(str(repo)) is True
+    finally:
+        os.killpg(os.getpgid(idle.pid), signal.SIGKILL)
+        idle.wait(timeout=5)
+
+
+def test_loop_start_proceeds_past_a_stale_dead_loop_pid_file(loops, tmp_path):
+    # A hard-killed loop leaves its file behind. A dead pid owns nothing, so
+    # Start must take the slot rather than refuse it forever.
+    launcher, envdir = loops
+    repo = _workspace(tmp_path, "staleloop")
+    launcher.registry_add(str(repo))
+    workers = repo / ".autopilot" / "state" / "workers"
+    workers.mkdir(parents=True)
+    (workers / "loop-0.pid").write_text(json.dumps({"pid": 999999999, "slot": "0"}))
+    assert launcher._loop_running(str(repo)) is False
+    result = launcher.do_loop_start(str(repo))
+    assert result["started"] == [0], result["msg"]
+    assert result["skipped"] == []
+
+
+def test_loop_stop_reaches_an_idle_foreign_loop(loops, tmp_path):
+    # The other half of F3: Stop can now find and TERM an idle foreign loop,
+    # which used to be invisible here (no claim, so no worker pid file) and
+    # left running with only STOP armed.
+    launcher, envdir = loops
+    repo = _workspace(tmp_path, "stopidle")
+    launcher.registry_add(str(repo))
+    workers = repo / ".autopilot" / "state" / "workers"
+    workers.mkdir(parents=True)
+    idle = _stray_loop(repo)
+    try:
+        (workers / "loop-0.pid").write_text(json.dumps(
+            {"pid": idle.pid, "slot": "0", "started": "now"}))
+        result = launcher.do_loop_stop(str(repo))
+        assert result["signalled"] == [idle.pid], result["msg"]
+        assert _wait_for(lambda: idle.poll() is not None)
+    finally:
+        if idle.poll() is None:
+            os.killpg(os.getpgid(idle.pid), signal.SIGKILL)
+            idle.wait(timeout=5)
+
+
+def test_loop_stop_refuses_a_pid_ps_says_is_not_our_loop(loops, tmp_path):
+    # F9's recycled-pid guard: the pid in the file is alive and fresh, but the
+    # process it names has nothing to do with this workspace. Signalling it
+    # would TERM an innocent process.
+    launcher, envdir = loops
+    repo = _workspace(tmp_path, "recycled")
+    launcher.registry_add(str(repo))
+    workers = repo / ".autopilot" / "state" / "workers"
+    workers.mkdir(parents=True)
+    innocent = subprocess.Popen(["/bin/sh", "-c", "sleep 60"], start_new_session=True)
+    try:
+        (workers / "loop-0.pid").write_text(json.dumps({"pid": innocent.pid, "slot": "0"}))
+        (workers / "1.pid").write_text(json.dumps(
+            {"pid": innocent.pid, "tid": "t-1", "started": "now"}))
+        result = launcher.do_loop_stop(str(repo))
+        assert result["signalled"] == []
+        # Both files are named, not just the first: an operator chasing a loop
+        # that will not die needs to see every file that was refused.
+        assert sorted(result["ignored"]) == ["1.pid", "loop-0.pid"]
+        assert "not a loop of this workspace" in result["msg"]
+        assert innocent.poll() is None
+        assert (repo / ".autopilot" / "state" / "STOP").exists()
+    finally:
+        os.killpg(os.getpgid(innocent.pid), signal.SIGKILL)
+        innocent.wait(timeout=5)
+
+
+def test_loop_stop_also_kills_the_cycle_the_loop_had_in_flight(loops, tmp_path):
+    """The cycle runs in its OWN session now (run.sh's session wrapper, so that
+    aborting one task cannot kill its loop), so killing the loop no longer
+    takes the cycle with it. Stop has to signal it explicitly or it leaves a
+    claude cycle burning tokens against a worktree nobody owns."""
+    launcher, envdir = loops
+    repo = _workspace(tmp_path, "stopcycle")
+    launcher.registry_add(str(repo))
+    workers = repo / ".autopilot" / "state" / "workers"
+    workers.mkdir(parents=True)
+    loop = _stray_loop(repo, name="fake-loop.sh")
+    cycle = _stray_loop(repo, name="fake-cycle.sh")     # its own session leader
+    try:
+        (workers / "0.pid").write_text(json.dumps(
+            {"pid": loop.pid, "tid": "t-1", "started": "now",
+             "cycle_pid": cycle.pid, "cycle_pgid": cycle.pid}))
+        result = launcher.do_loop_stop(str(repo))
+        assert result["signalled"] == [loop.pid], result["msg"]
+        assert result["cycles_signalled"] == [cycle.pid], result["msg"]
+        assert "in-flight cycle" in result["msg"]
+        assert _wait_for(lambda: loop.poll() is not None)
+        assert _wait_for(lambda: cycle.poll() is not None)
+    finally:
+        _kill_stray(loop)
+        _kill_stray(cycle)
+
+
+def test_loop_stop_leaves_a_cycle_alone_when_no_group_was_recorded(loops, tmp_path, monkeypatch):
+    """No cycle_pgid means run.sh could not confirm the cycle leads its own
+    group, so killpg would blast the LOOP's group - the very thing F2 fixed. A
+    plain TERM on the cycle pid is all that is safe."""
+    launcher, envdir = loops
+    repo = _workspace(tmp_path, "nogroupcycle")
+    launcher.registry_add(str(repo))
+    workers = repo / ".autopilot" / "state" / "workers"
+    workers.mkdir(parents=True)
+    (workers / "0.pid").write_text(json.dumps(
+        {"pid": 4242, "tid": "t-1", "started": "now", "cycle_pid": 777001}))
+    signals = []
+    monkeypatch.setattr(launcher, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(launcher, "_ps_names_the_loop", lambda pid, path: True)
+    monkeypatch.setattr(launcher.os, "kill", lambda pid, sig: signals.append(("kill", pid, sig)))
+    monkeypatch.setattr(launcher.os, "killpg", lambda pg, sig: signals.append(("killpg", pg, sig)))
+    monkeypatch.setattr(launcher.os, "getpgid", lambda pid: 1)   # the loop leads no group
+    result = launcher.do_loop_stop(str(repo))
+    assert ("kill", 777001, signal.SIGTERM) in signals    # the cycle, by pid
+    assert ("killpg", 777001, signal.SIGTERM) not in signals
+    assert result["cycles_signalled"] == [777001]
+
+
+def test_ps_names_the_loop_accepts_run_sh_and_the_target_path(loops, tmp_path):
+    launcher, envdir = loops
+    repo = _workspace(tmp_path, "psprobe")
+    named = _stray_loop(repo)
+    other = subprocess.Popen(["/bin/sh", "-c", "sleep 30"], start_new_session=True)
+    try:
+        assert launcher._ps_names_the_loop(named.pid, str(repo)) is True
+        assert launcher._ps_names_the_loop(other.pid, str(repo)) is False
+        assert launcher._ps_names_the_loop(999999999, str(repo)) is False   # fails closed
+    finally:
+        for p in (named, other):
+            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+            p.wait(timeout=5)
+
+
+def test_workers_dir_loop_files_are_not_counted_as_cycle_workers(loops, tmp_path):
+    # loop-<slot>.pid lives in the same directory as the per-cycle <slot>.pid
+    # files. Reading one as a worker would put a permanent phantom "working"
+    # row on the dashboard's strip and make the launcher's worker signal true
+    # forever.
+    launcher, envdir = loops
+    repo = _workspace(tmp_path, "stems")
+    workers = repo / ".autopilot" / "state" / "workers"
+    workers.mkdir(parents=True)
+    (workers / "loop-0.pid").write_text(json.dumps({"pid": os.getpid(), "slot": "0"}))
+    assert launcher._live_workers(str(repo)) == []
+    assert [r["slot"] for r in launcher._live_loops(str(repo))] == [0]
 
 
 def test_loop_routes_over_http_require_the_token(launcher, tmp_path):

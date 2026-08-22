@@ -251,11 +251,15 @@ def _live_workers(path: str) -> list[dict]:
 
     A pid file exists only while its slot HOLDS a claim: run.sh writes it right
     after a successful claim and removes it when the cycle ends. So this sees a
-    working loop, never an idle one between cycles."""
+    working loop, never an idle one between cycles - which is what _live_loops
+    (below) is for.
+
+    Numeric stems only: the same directory holds run.sh's `loop-<slot>.pid`
+    files, which mean something different (slot owned, cycle or no cycle)."""
     out = []
     wd = _state_dir(path) / "workers"
     try:
-        files = sorted(wd.glob("*.pid")) if wd.is_dir() else []
+        files = sorted(f for f in wd.glob("*.pid") if f.stem.isdigit()) if wd.is_dir() else []
     except OSError:
         return out
     for f in files:
@@ -267,7 +271,12 @@ def _live_workers(path: str) -> list[dict]:
         if not isinstance(info, dict) or not _pid_alive(info.get("pid")):
             continue
         slot = int(f.stem) if f.stem.isdigit() else None
+        # cycle_pid/cycle_pgid: the claude cycle this slot is running, which
+        # since it got its own session (run.sh's session wrapper) is NOT in the
+        # loop's process group - so stopping the loop no longer takes it down
+        # as a side effect. do_loop_stop signals it explicitly.
         out.append({"slot": slot, "pid": int(info["pid"]), "tid": str(info.get("tid") or ""),
+                    "cycle_pid": info.get("cycle_pid"), "cycle_pgid": info.get("cycle_pgid"),
                     "mtime": mtime, "file": f})
     return out
 
@@ -276,6 +285,84 @@ def _worker_pids(path: str) -> list[int]:
     """Just the live pids from _live_workers, for callers that only need
     "is anything working here?"."""
     return [w["pid"] for w in _live_workers(path)]
+
+
+_LOOP_PID_RE = re.compile(r"^loop-(\d+)$")
+
+
+def _live_loops(path: str) -> list[dict]:
+    """One entry per $STATE/workers/loop-<slot>.pid naming a LIVE pid:
+    {slot, pid, started, file}.
+
+    This is the definitive answer to "is slot N of this workspace taken?".
+    run.sh writes the file at startup and removes it in its EXIT trap, so it
+    covers the loop's WHOLE life - including the idle naps between cycles,
+    which the per-task worker files (above) cannot, because they only exist
+    while a claim is held. That gap is what the launcher used to paper over by
+    guessing from orbit.log + STOP ("this workspace has run before and is not
+    stopped, so something must be running") - a heuristic that reported a
+    freshly stopped workspace as running and, worse, reported a PAUSED but
+    very much alive loop as absent, so Start happily put a second process on
+    its slot and its worktree.
+
+    A file whose pid is dead is simply not returned: a hard-killed loop leaves
+    one behind, and every reader here treats that as an unowned slot."""
+    out = []
+    wd = _state_dir(path) / "workers"
+    try:
+        files = sorted(f for f in wd.glob("loop-*.pid")) if wd.is_dir() else []
+    except OSError:
+        return out
+    for f in files:
+        m = _LOOP_PID_RE.match(f.stem)
+        if not m:
+            continue
+        try:
+            info = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue   # torn tmp+rename read - same tolerance as _live_workers
+        if not isinstance(info, dict) or not _pid_alive(info.get("pid")):
+            continue
+        out.append({"slot": int(m.group(1)), "pid": int(info["pid"]),
+                    "started": str(info.get("started") or ""), "file": f})
+    return out
+
+
+def _ps_names_the_loop(pid: int, path: str) -> bool:
+    """Does `ps` say pid REALLY is one of this workspace's loops? True when
+    its command line mentions run.sh or the target path.
+
+    The OS recycles pids, and nothing on disk ties a number to the process
+    that wrote it - so before signalling a pid the launcher did not itself
+    spawn, ask the process table what that pid actually is. Without this, a
+    pid file left behind by a loop that died hard names a number that may
+    since have been handed to something else entirely, and loop-stop would
+    TERM an innocent process.
+
+    Fails CLOSED on any doubt (no ps, unreadable output, empty command): the
+    cost of a false negative is a loop the operator has to stop by hand and a
+    named warning telling them so; the cost of a false positive is killing
+    someone else's process."""
+    try:
+        r = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                           capture_output=True, text=True, timeout=10)
+    except Exception:
+        return False
+    cmd = (r.stdout or "").strip()
+    if not cmd:
+        return False
+    if "run.sh" in cmd:
+        return True
+    # Both spellings of the path: the launcher works in resolved paths, but a
+    # loop may well have been started with the unresolved one (a symlinked
+    # home, /var vs /private/var on macOS), and that is the string sitting in
+    # its argv.
+    forms = {str(path)}
+    try:
+        forms.add(str(Path(path).resolve()))
+    except OSError:
+        pass
+    return any(f and f in cmd for f in forms)
 
 
 def _tracked_loop_pids(path: str) -> list[int]:
@@ -295,27 +382,48 @@ def _tracked_loop_pids(path: str) -> list[int]:
     return alive
 
 
+def _live_slot_count(path: str) -> int:
+    """How many of this project's SLOTS are live right now, however they were
+    started: this launcher's own child processes, plus foreign loops that own a
+    slot by pid file. Deduped by slot number, because "3 of 4 slots up" is
+    what the badge shows and what the Start affordance is decided on - a pid
+    count would double-count a slot whose loop file and worker file are both
+    on disk."""
+    p = str(Path(path).resolve())
+    _tracked_loop_pids(path)   # reap dead entries before counting
+    with _LOCK:
+        table = LOOPS.get(p) or {}
+        slots = set(table.keys())
+        ours = {pr.pid for pr in table.values()}
+    for rec in _live_loops(path) + [w for w in _live_workers(path) if w["slot"] is not None]:
+        if rec["pid"] not in ours:
+            slots.add(rec["slot"])
+    return len(slots)
+
+
 def _loop_running(path: str) -> bool:
-    """Is this project's loop running? Three signals, cheapest first:
+    """Is this project's loop running? Three signals, all of them FACTS about
+    a live process - cheapest first:
       1. a slot process THIS launcher started is still alive (LOOPS);
-      2. $STATE/workers/*.pid names a live pid (a loop started by launchd, by
-         a previous launcher, or by hand - the launcher is not the only way in);
-      3. legacy fallback - a loop has run here before (logs/orbit.log) and no
-         STOP file is armed. Kept because the pid files only exist while a slot
-         HOLDS a claim: a service-managed loop napping between cycles has none,
-         and before Task 4 the workers dir didn't exist at all. It is a
-         heuristic, so it comes last - and it is gated on orbit.log because
-         "state dir exists and no STOP" alone reported every freshly scaffolded
-         workspace, which has never run anything, as running."""
+      2. $STATE/workers/loop-<slot>.pid names a live pid - a loop started by
+         launchd, by a previous launcher, or by hand, running OR idling
+         between cycles (the launcher is not the only way in);
+      3. $STATE/workers/<slot>.pid names a live pid - a slot mid-cycle whose
+         loop file is missing (a run.sh from before loop files existed).
+
+    There is deliberately no fourth, heuristic signal any more. The old one
+    ("orbit.log exists and no STOP file") answered a question nobody asked -
+    has this workspace ever run and is it un-paused - and got the real one
+    wrong in both directions: a loop paused via STOP read as NOT running while
+    its process was very much alive (so Start offered to add a second process
+    to a live slot), and a workspace whose loop had exited cleanly read as
+    running for as long as its log file existed."""
     try:
         if _tracked_loop_pids(path):
             return True
-        if _worker_pids(path):
+        if _live_loops(path):
             return True
-        state = _state_dir(path)
-        if not (state / "logs" / "orbit.log").exists():
-            return False
-        return not (state / "STOP").exists()
+        return bool(_worker_pids(path))
     except Exception:
         return False
 
@@ -549,13 +657,21 @@ def do_loop_start(path: str) -> dict:
     (0..concurrency-1). Disarms the STOP file first - a start with STOP still
     on disk would spawn slots that immediately idle.
 
-    Never spawns a slot that is already working. Two slots on one number would
-    share a worktree, a pid file and (at slot 0) the legacy marker filenames,
-    so they would stomp each other's checkout mid-cycle. Own slots are known
-    from LOOPS; slots owned by a loop this launcher did NOT start (launchd, or
-    a previous launcher process - LOOPS is empty after a restart while the
-    loops live on, per the no-kill-on-exit ruling) are known from their
-    $STATE/workers/<slot>.pid files."""
+    Never spawns a slot that is already OWNED - running a cycle or idling
+    between them, either way. Two loops on one slot number would share a
+    worktree, a pid file and (at slot 0) the legacy marker filenames, so they
+    would stomp each other's checkout mid-cycle. Own slots are known from
+    LOOPS; slots owned by a loop this launcher did NOT start (launchd, or a
+    previous launcher process - LOOPS is empty after a restart while the loops
+    live on, per the no-kill-on-exit ruling) are known from their
+    $STATE/workers/loop-<slot>.pid files, with the per-cycle
+    $STATE/workers/<slot>.pid files as a second source for a loop too old to
+    write one.
+
+    The loop files are what closes the pause-then-Start double start: STOP
+    stops a loop from CLAIMING, it does not end the process, so a paused
+    workspace's slots are still taken. Before those files existed the launcher
+    could only see slots holding a claim, and a paused loop holds none."""
     proj = registry_get(path)
     if not proj:
         return {"ok": False, "msg": "project not registered - import it first"}
@@ -583,11 +699,16 @@ def do_loop_start(path: str) -> dict:
             pass
         except OSError as e:
             return {"ok": False, "msg": f"could not clear the STOP file: {e}"}
-        # Slots a foreign loop is working right now, by pid file. Only slots
+        # Slots a foreign loop OWNS right now, by pid file: the lifetime
+        # loop-<slot>.pid files first (running or idle), then the per-cycle
+        # <slot>.pid files for a loop whose run.sh predates them. Only slots
         # NOT in this set (and not already ours) are free to spawn.
-        foreign = {w["slot"]: w["pid"] for w in _live_workers(p)
-                   if w["slot"] is not None and w["pid"] not in
-                   {pr.pid for pr in (LOOPS.get(p) or {}).values()}}
+        ours = {pr.pid for pr in (LOOPS.get(p) or {}).values()}
+        foreign = {}
+        for rec in _live_loops(p) + [w for w in _live_workers(p) if w["slot"] is not None]:
+            if rec["pid"] in ours or rec["slot"] in foreign:
+                continue
+            foreign[rec["slot"]] = rec["pid"]
         table = LOOPS.setdefault(p, {})
         for slot in range(slots):
             if slot in table:
@@ -662,17 +783,29 @@ def do_loop_stop(path: str) -> dict:
     the file), never an accident.
 
     What may be signalled is deliberately narrow. Processes this launcher
-    started are signalled outright (it owns them). A pid read out of a
-    $STATE/workers/<slot>.pid file is only signalled once its identity holds
-    up: the file must name a task (`tid`) and have been touched inside 3x the
-    project's cycle timeout. A leaked file (SIGKILLed loop, crashed box) ages
-    out of that window, and the moment it does, the launcher stops believing
-    its pid - because the OS recycles pids, and a stale number can name
-    someone else's process entirely. Residual risk, stated honestly: inside
-    the freshness window a recycled pid IS still signallable, since nothing on
-    disk ties a pid to the process that wrote it. run.sh removes its pid file
-    at the end of every cycle, so the window only stays open for a loop that
-    died hard mid-cycle."""
+    started are signalled outright (it owns them). Every other pid comes off
+    disk, and none of those is signalled until the PROCESS TABLE agrees it is
+    one of this workspace's loops (`_ps_names_the_loop`): pids are recycled,
+    nothing on disk ties a number to the process that wrote it, and a file
+    left behind by a loop that died hard names a number that may since have
+    been handed to something else. Asking `ps` what the pid actually is turns
+    that guess into a check.
+
+    Two kinds of file feed it:
+      · loop-<slot>.pid - the loop's lifetime file. This is what lets Stop
+        reach an IDLE foreign loop at all; before it existed, a napping
+        launchd loop was invisible here and STOP-armed-only was the best Stop
+        could do.
+      · <slot>.pid - the per-cycle file, still consulted for a loop whose
+        run.sh predates the lifetime one. It additionally has to name a task
+        (`tid`) and have been touched inside 3x the project's cycle timeout,
+        because that file is only supposed to exist while a cycle runs.
+
+    The <slot>.pid files serve a second purpose here: they record the CYCLE
+    each loop has in flight, which since F2 runs in its own session and so no
+    longer dies with its loop. Stopping a loop therefore signals its cycle
+    explicitly (see below) - otherwise Stop would leave a claude cycle burning
+    tokens against a worktree whose loop is gone."""
     proj = registry_get(path)
     if not proj:
         return {"ok": False, "msg": "project not registered - import it first"}
@@ -695,27 +828,55 @@ def do_loop_stop(path: str) -> dict:
         procs = list((LOOPS.get(p) or {}).values())
     tracked = _tracked_loop_pids(p)
     # Untracked loops (launchd, systemd, a previous launcher) are only ever
-    # signalled when THIS project's own workers/*.pid names them - the pid
-    # files are the whole allowlist. Nothing here ever pgreps the machine.
+    # signalled when THIS project's own workers/ pid files name them AND `ps`
+    # confirms the pid is a loop of this workspace - the pid files are the
+    # whole allowlist, and ps is the identity check on top. Nothing here ever
+    # pgreps the machine.
+    # `allow` is the set of pids already cleared for signalling, so a slot
+    # whose loop file AND worker file both name the same pid is signalled
+    # once. Stale entries are NOT deduped: each unverifiable file is named in
+    # the message, because an operator chasing a loop that will not die needs
+    # to know every file the launcher refused to trust.
     extra, stale = [], []
+    allow = set(tracked)
+    for rec in _live_loops(p):
+        if rec["pid"] in allow:
+            continue
+        if not _ps_names_the_loop(rec["pid"], p):
+            stale.append({**rec, "why": "not a loop of this workspace per ps"})
+            continue
+        allow.add(rec["pid"])
+        extra.append(rec["pid"])
     cutoff = time.time() - _stale_after(p)
     for w in _live_workers(p):
-        if w["pid"] in tracked:
+        if w["pid"] in allow:
             continue
         if not w["tid"] or w["mtime"] < cutoff:
-            stale.append(w)
+            stale.append({**w, "why": "no task id" if not w["tid"] else "not touched recently"})
             continue
+        if not _ps_names_the_loop(w["pid"], p):
+            stale.append({**w, "why": "not a loop of this workspace per ps"})
+            continue
+        allow.add(w["pid"])
         extra.append(w["pid"])
+    # The cycles those loops have in flight, read off the same pid files. A
+    # cycle now runs in its OWN session (run.sh's session wrapper, so that
+    # aborting one task cannot kill its loop), which means killing the loop no
+    # longer takes its cycle down as a side effect the way it used to - the
+    # cycle would be left running, burning tokens against a worktree nobody
+    # owns any more. So it is signalled explicitly, and only when the file
+    # recorded a group the cycle actually LEADS (same guard as everywhere else:
+    # otherwise the group is the loop's own and blasting it is what F2 fixed).
+    cycles = [w for w in _live_workers(p) if w["pid"] in allow and w.get("cycle_pid")]
     signalled, errors = [], []
     for pid in tracked + extra:
         try:
-            # Signal the GROUP when the loop leads its own one, so the cycle it
-            # has in flight goes with it instead of being orphaned (same
-            # discipline as command_center.do_killtask). Our own spawns always
-            # qualify - start_new_session makes each slot a session leader -
-            # and so does a launchd/systemd job. A loop that is NOT its
-            # group's leader was backgrounded from some other process's shell,
-            # whose group is not ours to blast: TERM that pid alone.
+            # Signal the GROUP when the loop leads its own one, so anything
+            # else it backgrounded goes with it. Our own spawns always qualify
+            # - start_new_session makes each slot a session leader - and so
+            # does a launchd/systemd job. A loop that is NOT its group's leader
+            # was backgrounded from some other process's shell, whose group is
+            # not ours to blast: TERM that pid alone.
             if os.getpgid(pid) == pid:
                 os.killpg(pid, signal.SIGTERM)
             else:
@@ -725,6 +886,18 @@ def do_loop_stop(path: str) -> dict:
             pass   # already gone - STOP stays armed either way
         except OSError as e:
             errors.append(f"pid {pid}: {e}")
+    cycles_signalled = []
+    for w in cycles:
+        try:
+            if w.get("cycle_pgid"):
+                os.killpg(int(w["cycle_pgid"]), signal.SIGTERM)
+            else:
+                os.kill(int(w["cycle_pid"]), signal.SIGTERM)
+            cycles_signalled.append(int(w["cycle_pid"]))
+        except ProcessLookupError:
+            pass   # the cycle finished on its own
+        except OSError as e:
+            errors.append(f"cycle pid {w['cycle_pid']}: {e}")
     # Reap what we just killed. A slot the launcher started is its CHILD, and
     # an unreaped child sits on the process table as a zombie that still
     # answers kill(pid, 0) - which would leave this project reading as running
@@ -741,16 +914,17 @@ def do_loop_stop(path: str) -> dict:
     _tracked_loop_pids(p)   # prunes the reaped slots out of LOOPS
     msg = f"{proj['name']}: STOP armed"
     msg += f", TERMed {len(signalled)} loop process(es)" if signalled else ", no live loop process found"
+    if cycles_signalled:
+        msg += f" and {len(cycles_signalled)} in-flight cycle(s)"
     if stale:
         # Named, not swallowed: an operator who sees a loop that won't die
         # needs to know which file the launcher refused to trust.
-        msg += (". Ignored unverifiable worker file(s): "
-                + "; ".join(f"{w['file'].name} (pid {w['pid']}, "
-                            + ("no task id" if not w["tid"] else "not touched recently") + ")"
-                            for w in stale))
+        msg += (". Ignored unverifiable pid file(s): "
+                + "; ".join(f"{w['file'].name} (pid {w['pid']}, {w['why']})" for w in stale))
     if errors:
         msg += " (" + "; ".join(errors) + ")"
     return {"ok": True, "msg": msg, "signalled": signalled,
+            "cycles_signalled": cycles_signalled,
             "ignored": [w["file"].name for w in stale]}
 
 
@@ -854,11 +1028,15 @@ def launcher_state() -> dict:
             "path": path,
             "has_autopilot": ha,
             "loop_running": _loop_running(path) if ha else False,
-            # Configured slot count and how many of them are this launcher's
-            # own live processes - the tab strip badge reads "2/2" from these.
+            # Configured slot count and how many of those slots are live -
+            # counted however the loop was started (this launcher, launchd, by
+            # hand), because the tab-strip badge reads "2/2" from these and
+            # the shells gate the Start button on tracked < slots. Counting
+            # only the launcher's own children would leave Start inviting a
+            # click that can do nothing on a fully launchd-run workspace.
             # slots is 0 for an un-initialized project (no config to read).
             "loop_slots": _concurrency(path) if ha else 0,
-            "loop_tracked": len(_tracked_loop_pids(path)) if ha else 0,
+            "loop_tracked": _live_slot_count(path) if ha else 0,
         })
     with _LOCK:
         active = ACTIVE["path"]

@@ -3040,13 +3040,16 @@ function renderProjMenu(){
   if(!sw||!menu)return;
   let projects=[];try{projects=JSON.parse(sw.dataset.projects||'[]');}catch(e){}
   // Row = switch target (the whole row) + this workspace's loop controls.
-  // Start is disabled while the loop runs: the launcher refuses to put a
-  // second process on a live slot, so the button must not invite the click.
+  // Start is disabled only at FULL (every configured slot live): the launcher
+  // refuses to put a second process on a live slot but does start the free
+  // ones, which is the only way to top a crashed slot back up without
+  // stopping the working ones.
   // Both minis stopPropagation, or clicking one would also switch project.
   menu.innerHTML=projects.length?projects.map(p=>{
     const slots=p.loop_running&&p.loop_slots>1?` <span class=mut>${p.loop_tracked}/${p.loop_slots}</span>`:'';
+    const full=p.loop_slots>0&&p.loop_tracked>=p.loop_slots;
     const acts=p.has_autopilot?
-      `<button class="projsw-mini" ${p.loop_running?'disabled':''} title="${p.loop_running?'Loop already running':'Start this workspace loop'}"
+      `<button class="projsw-mini" ${full?'disabled':''} title="${full?`All ${p.loop_slots} slot(s) already running`:p.loop_running?`Start the remaining slot(s) (${p.loop_tracked}/${p.loop_slots} running)`:'Start this workspace loop'}"
                onclick="event.stopPropagation();loopAction('start','${escJsAttr(p.path)}')">▶</button>
        <button class="projsw-mini" title="Stop this workspace loop (stays stopped)"
                onclick="event.stopPropagation();loopAction('stop','${escJsAttr(p.path)}')">■</button>`:'';
