@@ -45,6 +45,12 @@ STATE="$AP_STATE"
 LOGDIR="$STATE/logs"
 DIFFDIR="$STATE/diffs"
 STOP_FILE="$STATE/STOP"
+# Test/smoke seam only: run exactly ONE iteration then exit, instead of the
+# infinite loop below. Off (unset/0) by default — a real deployment always
+# leaves this unset. Exists so a concurrency smoke can drive a single slot
+# tick without pre-arming STOP first, which would also block the very claim
+# the smoke wants to observe.
+ONE_SHOT="${ORBIT_ONE_SHOT:-0}"
 SETTINGS="$ORBIT_HOME/config/orbit.settings.json"
 MODEL="${AP_MODEL:-$ORBIT_MODEL}"
 PERM="${AP_PERM:-$ORBIT_PERM}"
@@ -679,6 +685,17 @@ log "==== orbit up (pid $$) slot $SLOT of $SLOTS target=$TARGET model=$MODEL bas
 # longer manages — and one that may hold the only copy of an unpushed commit.)
 if [ "$WT" != "${REPO}-orbit-worktree" ] && [ -d "${REPO}-orbit-worktree" ]; then
   log "note: ${REPO}-orbit-worktree is the pre-slot worktree and is no longer used — remove it with 'git -C $REPO worktree remove --force ${REPO}-orbit-worktree' once you have checked it holds nothing you want"
+fi
+if [ "$ONE_SHOT" = "1" ]; then
+  # Bypasses STOP/daily-cap admission on purpose — those gate the infinite loop
+  # below, and a one-shot smoke wants THIS iteration to run, not to idle on a
+  # marker meant for an unattended deployment. Bookkeeping (count_cycle) still
+  # runs on OK/FAIL, matching the loop's own accounting, so a smoke's
+  # spend/count files come out exactly as if the normal loop had ticked once.
+  status="$(one_iteration)"; status="${status##*$'\n'}"
+  case "$status" in OK|FAIL) count_cycle >/dev/null 2>&1 || true ;; esac
+  log "ORBIT_ONE_SHOT set — exiting after one iteration (status=$status)."
+  exit 0
 fi
 while true; do
   # STOP is checked HERE and nowhere else: it stops new CLAIMS, never an in-flight
