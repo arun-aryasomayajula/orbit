@@ -857,3 +857,68 @@ def test_concurrency_rejects_non_positive_and_rolls_back(cc):
     assert msg.startswith("Rejected")
     assert "concurrency" in msg
     assert cfg_path.read_text() == before
+
+
+# ── watches editor card (Task 8) ──────────────────────────────────────────
+# watches joins the mcp/gates/qa/plan/knowledge family in the Admin panel,
+# but as a structured card (cc_shell.html's watchRows/watchRowHtml/
+# validateWatchRows) rather than a JSON textarea. _validate_config only
+# checks shape (must be a list-or-absent) - deep per-row validation (name
+# slug, non-empty question, positive cadence_hours, category enum) stays
+# config.py's own `validate`, which do_save_config already shells out to
+# post-write, rolling the file back to its exact prior bytes on failure -
+# same two-pass discipline as the mcp/concurrency cards above.
+
+def test_validate_config_rejects_non_list_watches_shape_only(cc):
+    """_validate_config's cheap pass only checks shape - it neither knows nor
+    cares about name/question/cadence rules, those are config.py's."""
+    assert cc._validate_config({"watches": {"not": "a list"}})
+    assert cc._validate_config({"watches": [{"name": "not a slug!"}]}) == []
+    assert cc._validate_config({"watches": []}) == []
+    assert cc._validate_config({}) == []
+
+
+def test_watches_add_two_remove_one_round_trips_through_do_save_config(cc):
+    """The editor's add/remove/save cycle: two rows saved, then a second save
+    with one removed - each save must survive config.py's own validate() and
+    land exactly the rows sent (shallow merge means the sender's list wins
+    outright, same as sources/workable_categories)."""
+    first = [
+        {"name": "wow-signup", "question": "What changed WoW in signup?",
+         "cadence_hours": 24, "category": "funnel"},
+        {"name": "activation-drop", "question": "Why did activation drop?",
+         "cadence_hours": 168, "category": "insight"},
+    ]
+    msg = cc.do_save_config(json.dumps({"watches": first}))
+    assert msg.startswith("✓ Saved"), msg
+    assert cc._load_cfg()["watches"] == first
+
+    second = [first[1]]   # "wow-signup" removed
+    msg2 = cc.do_save_config(json.dumps({"watches": second}))
+    assert msg2.startswith("✓ Saved"), msg2
+    assert cc._load_cfg()["watches"] == second
+
+
+def test_watches_empty_list_clears_prior_rows_not_omitted(cc):
+    """Removing every row and saving must actually clear watches: on disk -
+    the editor always sends the list (never omits the key), because omitting
+    it would leave the shallow merge unable to ever clear a stale block."""
+    cc.do_save_config(json.dumps({"watches": [{"name": "wow-signup", "question": "q?"}]}))
+    assert cc._load_cfg()["watches"]
+
+    msg = cc.do_save_config(json.dumps({"watches": []}))
+    assert msg.startswith("✓ Saved"), msg
+    assert cc._load_cfg()["watches"] == []
+    assert cc.watches_state([]) == []   # present-but-empty, not absent - config.py's own reading
+
+
+def test_watches_bad_row_rejected_by_config_py_and_rolled_back(cc):
+    """A row that fails config.py's deep rules (bad name shape here) is
+    caught by the SECOND pass, after the write - and rolled back byte-exact,
+    same as the mcp http-without-url case above."""
+    cfg_path = Path(cc.AP_HOME) / "config.yaml"
+    before = cfg_path.read_text()
+    msg = cc.do_save_config(json.dumps({"watches": [{"name": "Not A Slug!", "question": "q?"}]}))
+    assert msg.startswith("Rejected")
+    assert "watches[0].name" in msg
+    assert cfg_path.read_text() == before

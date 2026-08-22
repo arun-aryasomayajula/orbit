@@ -438,6 +438,15 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
   background:linear-gradient(0deg,var(--void) 55%,transparent);padding:14px 0 6px;margin-top:4px}
 .set-meta{font:500 11px/1.7 var(--mono);color:var(--faint)}
 .set-meta code{color:var(--dim)}
+.watchrows{display:flex;flex-direction:column;gap:8px;margin-bottom:10px}
+.watchrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.watchrow input,.watchrow select{background:var(--void);border:1px solid var(--line2);border-radius:8px;
+  padding:7px 10px;color:var(--ink);font:500 12px var(--mono)}
+.watchrow input:focus,.watchrow select:focus{outline:2px solid var(--blue);outline-offset:1px}
+.watchrow .w-name{flex:0 0 150px}
+.watchrow .w-question{flex:2 1 220px}
+.watchrow .w-cadence{flex:0 0 90px}
+.watchrow .w-category{flex:0 0 110px}
 .secrets-list{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}
 .secret-row{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--line2);
   border-radius:8px;padding:7px 11px;font:500 12px var(--mono)}
@@ -2822,9 +2831,62 @@ function escAttr(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/"
 function postJSON(path,obj){return fetch(path,{method:'POST',
   headers:{'Content-Type':'application/json','X-CC-Token':TOKEN},body:JSON.stringify(obj)}).then(r=>r.json());}
 function collectChecks(id){return [...document.querySelectorAll('#set-'+id+' input:checked')].map(i=>i.value);}
+/* Working copy of cfg.watches while Settings is open, edited as structured
+   rows (name/question/cadence_hours/category) rather than a JSON textarea -
+   the mcp/gates/qa/plan/knowledge cards stay raw JSON, but watches has a
+   small enough fixed shape (config.py's own watches[i] schema) to earn a
+   real form. Sanitized on load the same way command_center.watches_state
+   is corrupt-tolerant server-side: a non-dict entry or a dict missing keys
+   in a hand-edited config.yaml renders as a blank/defaulted row instead of
+   throwing. */
+let watchRows=[];
+function _sanitizeWatchRow(w){
+  w=(w&&typeof w==='object')?w:{};
+  const cats=['insight','funnel','hypothesis'];
+  return {name:typeof w.name==='string'?w.name:'',
+          question:typeof w.question==='string'?w.question:'',
+          cadence_hours:(Number.isInteger(w.cadence_hours)&&w.cadence_hours>0)?w.cadence_hours:168,
+          category:cats.includes(w.category)?w.category:'insight'};
+}
+function watchRowHtml(w,i){
+  const cats=['insight','funnel','hypothesis'];
+  return `<div class=watchrow data-i="${i}">
+    <input class=w-name placeholder="name (slug)" value="${escAttr(w.name)}" oninput="watchRows[${i}].name=this.value">
+    <input class=w-question placeholder="question" value="${escAttr(w.question)}" oninput="watchRows[${i}].question=this.value">
+    <input class=w-cadence type=number min=1 placeholder="cadence (h)" value="${escAttr(w.cadence_hours)}" oninput="watchRows[${i}].cadence_hours=parseInt(this.value,10)">
+    <select class=w-category onchange="watchRows[${i}].category=this.value">${cats.map(o=>`<option value="${o}" ${w.category===o?'selected':''}>${esc(o)}</option>`).join('')}</select>
+    <button class="btn btn-stop btn-mini" onclick="removeWatchRow(${i})">Remove</button></div>`;
+}
+function renderWatchesCard(){
+  const el=document.getElementById('watchRowsList');if(!el)return;
+  el.innerHTML=watchRows.length?watchRows.map(watchRowHtml).join('')
+    :'<div class=meta style="padding:2px 0 6px">No watches yet.</div>';
+}
+function addWatchRow(){watchRows.push(_sanitizeWatchRow(null));renderWatchesCard();}
+function removeWatchRow(i){watchRows.splice(i,1);renderWatchesCard();}
+// Client-side mirror of config.py's watches[i] rules (name slug, non-empty
+// question, positive cadence) - same discipline as the mcp card's "deep
+// validation runs on save" hint: this just saves an operator the round trip
+// to find out a typo'd row will bounce. Server-side shape check is
+// _validate_config's "watches must be a list"; per-row deep validation is
+// config.py's `validate` either way, so a bypass of this client check still
+// can't corrupt config.yaml.
+const _watchNameRe=/^[a-z0-9][a-z0-9-]*$/;
+function validateWatchRows(){
+  const rows=[];
+  for(let i=0;i<watchRows.length;i++){
+    const w=watchRows[i], n=i+1, name=(w.name||'').trim(), question=(w.question||'').trim();
+    if(!_watchNameRe.test(name))return{err:`Watch row ${n}: name must be a lowercase slug (e.g. wow-signup)`};
+    if(!question)return{err:`Watch row ${n}: question is required`};
+    if(!Number.isInteger(w.cadence_hours)||w.cadence_hours<=0)return{err:`Watch row ${n}: cadence must be a positive integer`};
+    rows.push({name,question,cadence_hours:w.cadence_hours,category:w.category||'insight'});
+  }
+  return{rows};
+}
 function loadSettings(){
   fetch('/api/config',{headers:{'X-CC-Token':TOKEN}}).then(r=>r.json()).then(function(d){
     const c=d.config||{}, m=d.meta||{};
+    watchRows=(Array.isArray(c.watches)?c.watches:[]).map(_sanitizeWatchRow);
     const txt=(id,label,val,hint)=>`<div class=field><label>${label}</label><input id="set-${id}" value="${escAttr(val)}">${hint?`<div class=hint>${hint}</div>`:''}</div>`;
     const num=(id,label,val,hint)=>`<div class=field><label>${label}</label><input id="set-${id}" type="number" min="1" value="${escAttr(val)}">${hint?`<div class=hint>${hint}</div>`:''}</div>`;
     const sel=(id,label,val,opts)=>`<div class=field><label>${label}</label><select id="set-${id}">`+opts.map(o=>`<option value="${escAttr(o)}" ${o===val?'selected':''}>${esc(o)}</option>`).join('')+`</select></div>`;
@@ -2849,6 +2911,10 @@ function loadSettings(){
       <div class=setcard><h3>Discovery</h3>
         ${checks('sources','Task sources',m.sources_all||[],c.sources||[],'where the loop pulls work from')}
         ${checks('workable_categories','Auto-workable categories',m.categories_all||[],c.workable_categories||[],'categories the loop may build unattended')}</div>
+      <div class=setcard><h3>Watches <span style="font-weight:500;text-transform:none;letter-spacing:0">(optional)</span></h3>
+        <div class=watchrows id=watchRowsList></div>
+        <button class="btn btn-mini" onclick="addWatchRow()">Add row</button>
+        <div class=hint>standing metric questions re-filed into a fresh insight past cadence - name is a lowercase slug, cadence is in hours, category drives the filed task's category. Leave empty to opt out.</div></div>
       <div class=setcard><h3>Verification gates</h3>
         <div class=field><label>Gates — JSON: name → { cmd, cwd, needs: [] }</label>
           <textarea id="set-gates" spellcheck="false">${esc(JSON.stringify(c.gates||{},null,2))}</textarea>
@@ -2887,6 +2953,7 @@ function loadSettings(){
         <button class="btn btn-amber" onclick="if(confirm('Restart the loop to apply saved config? Any in-flight cycle is aborted.'))post('/restart-loop',{})">Restart loop</button>
         <button class="btn" onclick="if(confirm('Restart the dashboard? The page will blink — hard-refresh after ~2s.'))post('/restart-dashboard',{})">Restart dashboard</button>
         <span class=set-meta>Save writes config.yaml · Restart loop applies it to the running loop</span></div>`;
+    renderWatchesCard();
     loadSecrets();
   }).catch(e=>{document.getElementById('settingsBody').innerHTML=`<div class=empty>Could not load settings: ${esc(String(e))}</div>`;});
 }
@@ -2921,6 +2988,8 @@ function saveSettings(){
     try{blocks[id]=JSON.parse(document.getElementById('set-'+id).value||'{}');}
     catch(e){toast(labels[id]+' is not valid JSON: '+e.message);return;}
   }
+  const wv=validateWatchRows();
+  if(wv.err){toast(wv.err);return;}
   const v=id=>document.getElementById('set-'+id).value.trim();
   const n=id=>parseInt(document.getElementById('set-'+id).value,10);
   const payload={
@@ -2929,6 +2998,15 @@ function saveSettings(){
     interval_seconds:n('interval_seconds'),max_tasks_per_day:n('max_tasks_per_day'),cycle_timeout_seconds:n('cycle_timeout_seconds'),
     concurrency:n('concurrency'),
     sources:collectChecks('sources'),workable_categories:collectChecks('workable_categories'),
+    // watches is always sent as a list, never omitted - same as sources/
+    // workable_categories above. cfg.update()'s server-side merge (Task 8)
+    // is shallow: omitting the key on an empty edit would leave a STALE
+    // watches: block on disk after every row is removed, since nothing else
+    // would ever clear it. Sending [] is what actually round-trips "no
+    // watches" - it also matches watches_state's own present-but-empty
+    // reading (band shows "No watches configured." rather than vanishing),
+    // which is the correct fact once this editor has touched the block.
+    watches:wv.rows,
     spec:v('spec'),commit_trailer:v('commit_trailer'),gates:blocks.gates,qa:blocks.qa,plan:blocks.plan,knowledge:blocks.knowledge,
     mcp:blocks.mcp,pull_requests:v('pull_requests')
   };

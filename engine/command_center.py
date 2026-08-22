@@ -3480,6 +3480,8 @@ def _validate_config(d: dict) -> list:
                     errs.append(f"gate '{name}' needs a non-empty cmd")
     if "mcp" in d and d["mcp"] is not None and not isinstance(d["mcp"], dict):
         errs.append("mcp must be an object of server-name -> {transport, url/command, tools}")
+    if "watches" in d and d["watches"] is not None and not isinstance(d["watches"], list):
+        errs.append("watches must be a list of {name, question, cadence_hours, category}")
     return errs
 
 
