@@ -40,7 +40,14 @@ def test_late_recorded_facts_are_legal():
     assert lifecycle.check(None, "committed") is None
     assert lifecycle.check(None, "pushed") is None
     assert lifecycle.check(None, "escalate") is None
-    assert lifecycle.check("in_progress", "claim") is None      # crash re-claim
+
+
+def test_claim_over_in_progress_is_illegal_by_default():
+    # `claim` is the one loop event that is NOT permissive: a second worker
+    # (or a naive crash re-claim) taking an already-in_progress task is
+    # exactly the double-work bug exclusive claims exist to prevent. Only
+    # --force records a takeover now.
+    assert lifecycle.check("in_progress", "claim") is not None
 
 
 def test_escalate_is_legal_until_reviewed():
@@ -142,6 +149,21 @@ def test_can_verb_is_a_dry_check(tmp_path):
     bad = _ledger(tmp_path, "can", "t1", "claim")
     assert bad.returncode == 3
     assert _entries(tmp_path)["t1"]["state"] == "pushed"   # nothing written either way
+
+
+def test_claim_over_in_progress_ledger_refused_without_force(tmp_path):
+    r = _ledger(tmp_path, "claim", "t1", "again",
+                entries={"t1": {"state": "in_progress", "updated_at": "2020-01-01T00:00:00Z"}})
+    assert r.returncode == 3
+    assert "illegal transition" in r.stderr
+    assert _entries(tmp_path)["t1"]["updated_at"] == "2020-01-01T00:00:00Z"  # untouched
+
+
+def test_claim_over_in_progress_ledger_force_overrides(tmp_path):
+    r = _ledger(tmp_path, "claim", "t1", "again", "--force",
+                entries={"t1": {"state": "in_progress"}})
+    assert r.returncode == 0 and "FORCED" in r.stderr
+    assert _entries(tmp_path)["t1"]["forced"] is True
 
 
 def test_committed_then_runtime_escalation(tmp_path):

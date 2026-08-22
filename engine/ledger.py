@@ -20,6 +20,21 @@ why and exits 3, writing nothing. `--force` overrides the gate and stamps
 
 Usage:
   ledger.py claim <id> <title>          # mark in_progress
+  ledger.py claim <id> <title> --exclusive --pid P --slot S
+                                         # pid-aware exclusive claim: under a
+                                         # real flock on the ledger, refuses
+                                         # (exit 5, nothing written) a tid
+                                         # that already has a non-reclaimable
+                                         # entry (in_progress with a live pid,
+                                         # committed, pushed, merged, ...); an
+                                         # in_progress entry whose worker_pid
+                                         # is dead IS reclaimable (takeover -
+                                         # records the new pid/slot plus
+                                         # reclaimed_from). Non-exclusive
+                                         # claim (no --exclusive) is unchanged
+                                         # except that re-claiming an
+                                         # in_progress task now needs --force
+                                         # (see lifecycle.py).
   ledger.py committed <id> <branch> <sha>  # mark committed (atomic local commit made)
   ledger.py pushed <id> <remote_ref>    # mark pushed (on remote branch, awaiting review)
   ledger.py escalate <id> <reason>      # mark escalated (needs a human)
@@ -47,6 +62,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lifecycle
+import locks
 
 
 def _ap_state():
@@ -63,6 +79,7 @@ def _ap_state():
 
 
 LEDGER = os.path.join(_ap_state(), "ledger.json")
+LEDGER_LOCK = LEDGER + ".lock"
 
 
 def _now():
@@ -121,16 +138,66 @@ def _gate(data, tid, event, force):
     sys.exit(3)
 
 
-def cmd_claim(tid, title, force=False):
-    # Record a task as in_progress at claim time.
-    data = _load()
-    forced = _gate(data, tid, "claim", force)
-    e = _entry(data, tid)
-    e.update(state="in_progress", title=title,
-             claimed_at=e.get("claimed_at") or _now(), updated_at=_now())
-    if forced:
-        e["forced"] = True
-    _save(data)
+def cmd_claim(tid, title, force=False, exclusive=False, pid=None, slot=None):
+    # Record a task as in_progress at claim time. Non-exclusive (no --pid):
+    # today's behavior exactly, unchanged except that lifecycle.py now makes
+    # re-claiming an in_progress task illegal by default (see its docstring).
+    if not exclusive:
+        data = _load()
+        forced = _gate(data, tid, "claim", force)
+        e = _entry(data, tid)
+        e.update(state="in_progress", title=title,
+                 claimed_at=e.get("claimed_at") or _now(), updated_at=_now())
+        if forced:
+            e["forced"] = True
+        _save(data)
+        return
+    cmd_claim_exclusive(tid, title, pid, slot, force=force)
+
+
+def cmd_claim_exclusive(tid, title, pid, slot, force=False):
+    # Exclusive, pid-aware claim: the whole point is a single winner when two
+    # workers race the same tid, so the check-then-write has to happen under
+    # a real lock with the ledger reloaded INSIDE it (a load taken before the
+    # lock could be stale by the time we act on it). Refuses (exit 5, nothing
+    # written) a tid that already has a non-reclaimable entry: in_progress
+    # with a live worker_pid, or any reviewable/terminal state (committed,
+    # pushed, merged, ...). An in_progress entry whose recorded worker_pid is
+    # dead IS reclaimable — takeover, not refusal — since the loop invariant
+    # this exists to protect ("at most one live worker per tid") already
+    # holds; it just needs the entry updated to the new worker.
+    if pid is None:
+        print("claim --exclusive requires --pid P", file=sys.stderr)
+        sys.exit(2)
+    with locks.hold(LEDGER_LOCK):
+        data = _load()
+        e = data["entries"].get(str(tid))
+        reclaimed_from = None
+        if e is not None:
+            state = e.get("state")
+            live_pid = e.get("worker_pid")
+            reclaimable = state == "in_progress" and live_pid is not None \
+                and not locks._pid_alive(live_pid)
+            if not reclaimable:
+                detail = (f"in_progress, worker_pid {live_pid} still live" if state == "in_progress"
+                          else f"state '{state}'")
+                if force:
+                    print(f"task {tid}: FORCED exclusive claim over a non-reclaimable entry "
+                          f"({detail})", file=sys.stderr)
+                else:
+                    print(f"task {tid}: exclusive claim refused — non-reclaimable entry "
+                          f"({detail}) (--force to take over anyway)", file=sys.stderr)
+                    sys.exit(5)
+            else:
+                reclaimed_from = live_pid
+        entry = _entry(data, tid)
+        entry.update(state="in_progress", title=title, worker_pid=pid, slot=slot,
+                     claimed_at=entry.get("claimed_at") or _now(), updated_at=_now())
+        if reclaimed_from is not None:
+            entry["reclaimed_from"] = reclaimed_from
+        if force and e is not None and not reclaimed_from:
+            entry["forced"] = True
+        _save(data)
 
 
 def cmd_committed(tid, branch, sha, force=False):
@@ -261,6 +328,13 @@ def cmd_reap(max_age_seconds):
     # Escalating is the lifecycle-legal way out — the operator's answer re-queues.
     # Prints the reaped ids space-separated (empty output = nothing reaped) so the
     # wrapper can notify. Entries without a parseable updated_at are left alone.
+    #
+    # pid-aware: an entry stuck past the timeout that still has a LIVE
+    # worker_pid is not actually dead — it's a slow cycle, not a crashed one —
+    # so it is skipped (logged, not escalated) rather than reaped out from
+    # under the worker still holding it. A dead worker_pid, or no worker_pid
+    # at all (legacy entries predating exclusive claims), keeps today's
+    # unconditional age-based escalation.
     try:
         max_age = int(max_age_seconds)
     except (TypeError, ValueError):
@@ -279,6 +353,11 @@ def cmd_reap(max_age_seconds):
             continue
         age = (now - ts).total_seconds()
         if age <= max_age:
+            continue
+        pid = e.get("worker_pid")
+        if pid is not None and locks._pid_alive(pid):
+            print(f"reap: task {tid} stuck at '{state}' for {int(age)}s but worker_pid "
+                  f"{pid} is still alive — skipping", file=sys.stderr)
             continue
         e.update(state="escalated", updated_at=_now(),
                  reason=f"reaper: cycle died mid-flight (stuck at '{state}' for {int(age)}s; "
@@ -345,6 +424,10 @@ def cmd_show():
             line += f"\n      patch: {e['patch']}"
         if e.get("reason"):
             line += f"\n      reason: {e['reason']}"
+        if e.get("worker_pid"):
+            line += f"\n      worker: pid {e['worker_pid']}" + (f" slot {e['slot']}" if e.get("slot") else "")
+            if e.get("reclaimed_from"):
+                line += f" (reclaimed from dead pid {e['reclaimed_from']})"
         for a in e.get("attachments") or []:
             line += (f"\n      attach[{a.get('kind')}]: {a.get('path')}"
                       + (f" — {a['label']}" if a.get("label") else ""))
@@ -355,16 +438,42 @@ def cmd_show():
         print(line)
 
 
+def _pop_flag_value(argv, flag):
+    # Remove `flag VALUE` from argv in place and return VALUE, or None if the
+    # flag isn't present. Exits 2 if the flag is present with no value.
+    if flag not in argv:
+        return None
+    i = argv.index(flag)
+    if i + 1 >= len(argv):
+        print(f"missing value for {flag}", file=sys.stderr)
+        sys.exit(2)
+    val = argv[i + 1]
+    del argv[i:i + 2]
+    return val
+
+
 def main(argv):
+    argv = list(argv)
     force = "--force" in argv
     argv = [a for a in argv if a != "--force"]
+    exclusive = "--exclusive" in argv
+    argv = [a for a in argv if a != "--exclusive"]
+    pid = _pop_flag_value(argv, "--pid")
+    if pid is not None:
+        try:
+            pid = int(pid)
+        except ValueError:
+            print(f"--pid must be an integer, got '{pid}'", file=sys.stderr)
+            return 2
+    slot = _pop_flag_value(argv, "--slot")
     if not argv:
         print(__doc__)
         return 2
     cmd, rest = argv[0], argv[1:]
     try:
         if cmd == "claim":
-            cmd_claim(rest[0], rest[1] if len(rest) > 1 else "", force=force)
+            cmd_claim(rest[0], rest[1] if len(rest) > 1 else "", force=force,
+                      exclusive=exclusive, pid=pid, slot=slot)
         elif cmd == "committed":
             cmd_committed(rest[0], rest[1], rest[2], force=force)
         elif cmd == "pushed":

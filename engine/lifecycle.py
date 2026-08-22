@@ -22,8 +22,13 @@ Two kinds of event, two levels of strictness:
   happened in git. They are permissive — including late-recorded facts: an
   agent that skipped `claim` still gets its `committed` recorded, and the
   wrapper's `pushed` lands even if the agent recorded nothing. Refusing to
-  record a fact loses state (run.sh swallows verb failures), so these only
-  reject genuinely nonsensical moves (e.g. claiming a merged task).
+  record a fact loses state (run.sh swallows verb failures), so these mostly
+  reject only genuinely nonsensical moves (e.g. claiming a merged task).
+  `claim` is the one deliberate exception to "permissive": re-claiming a task
+  that is already in_progress is illegal by default, because a second worker
+  taking a live task is exactly the double-work bug exclusive claims exist to
+  prevent. `--force` still records a takeover when an operator judges the
+  original worker dead.
 
 - REVIEW events (merged / rejected / reverted) record human judgments and are
   strict: they require the entry to be at a reviewable stage, and merged /
@@ -50,7 +55,7 @@ TERMINAL = ("merged", "rejected")
 
 # event → the states it may legally fire FROM (ABSENT = no entry yet).
 TRANSITIONS = {
-    "claim":     {ABSENT, "in_progress"},
+    "claim":     {ABSENT},
     "committed": {ABSENT, "in_progress", "committed"},
     "pushed":    {ABSENT, "in_progress", "committed", "pushed"},
     "escalate":  {ABSENT, "in_progress", "committed", "pushed", "escalated"},
