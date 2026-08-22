@@ -30,6 +30,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -79,6 +80,7 @@ STATE = AP_STATE / "STATE.md"
 STOP = AP_STATE / "STOP"
 SKIPS = AP_STATE / "skips.txt"
 MARKER = AP_STATE / ".current-task-id"
+WORKERS_DIR = AP_STATE / "workers"   # per-slot <slot>.pid liveness files (run.sh write_worker_pid)
 FEATURE_BUILDS = AP_STATE / "feature_builds.json"   # dedicated feature-agent builds (outside the loop)
 AUTO_PROMOTE = AP_STATE / "AUTO_PROMOTE"   # presence = auto-feed ON (wrapper reads it)
 LOGDIR = AP_STATE / "logs"
@@ -240,12 +242,60 @@ def _ts_to_epoch(s: str) -> float | None:
 
 
 def cycle_pids() -> list[int]:
-    """PIDs of the in-flight cycle (claude --print /orbit-cycle + its caffeinate)."""
+    """PIDs of every orbit-cycle process on the MACHINE (claude --print
+    /orbit-cycle + its caffeinate) - a machine-wide pgrep, so it cannot tell
+    ours from an unrelated deployment's, or one slot's from another's. Kept
+    only as a legacy fallback (single-slot deployments, or a state dir from
+    before T4's per-slot pid files existed) - see workers_state()/do_killtask
+    for the identity-aware replacement everything else now prefers."""
     try:
         out = subprocess.run(["pgrep", "-f", "orbit-cycle"], capture_output=True, text=True).stdout
         return [int(x) for x in out.split()]
     except Exception:
         return []
+
+
+def workers_state() -> list | None:
+    """Per-slot worker liveness for the dashboard's workers strip: one entry
+    per $AP_STATE/workers/<slot>.pid file (run.sh's write_worker_pid - {pid,
+    tid, started}, removed the instant a cycle ends), each stamped with
+    `alive` (locks.pid_alive on the recorded pid - the ONLY trustworthy
+    "still in flight" signal per ledger.py's _slot_worker_matches docstring;
+    the loop's own pid outlives any single task).
+
+    None (key omitted from build_state) when there is nothing worth a strip:
+    the dir is empty or missing AND concurrency is 1 - the overwhelming
+    majority of deployments today, which must see a byte-identical
+    /api/state (same discipline as watches_state/qa_services_state). Once
+    concurrency > 1, [] is returned instead of None even with no pid files
+    yet (dir freshly created, nothing claimed) - an operator who just turned
+    on concurrency and is looking for the strip needs to see "no workers
+    right now", not have it vanish."""
+    concurrency = 1
+    try:
+        concurrency = int(_load_cfg().get("concurrency") or 1)
+    except (TypeError, ValueError):
+        pass
+    try:
+        pid_files = sorted(WORKERS_DIR.glob("*.pid")) if WORKERS_DIR.is_dir() else []
+    except OSError:
+        pid_files = []
+    if not pid_files and concurrency <= 1:
+        return None
+    out = []
+    for p in pid_files:
+        try:
+            info = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue   # a torn tmp+rename read - same tolerance as every other state-file parse here
+        if not isinstance(info, dict):
+            continue
+        pid = info.get("pid")
+        out.append({"slot": p.stem, "pid": pid, "tid": info.get("tid"),
+                    "started": info.get("started"),
+                    "alive": pid is not None and locks.pid_alive(pid)})
+    out.sort(key=lambda w: (int(w["slot"]) if str(w["slot"]).isdigit() else 0, w["slot"]))
+    return out
 
 
 def loop_loaded() -> bool:
@@ -257,6 +307,7 @@ def loop_loaded() -> bool:
 
 
 _CYCLE_LOG_STAMP = re.compile(r"(\d{8}T\d{6})\.log$")
+_CYCLE_LOG_TID = re.compile(r"^cycle-(.+)-\d{8}T\d{6}\.log$")
 
 
 def _cycle_log_stamp(name: str) -> str:
@@ -268,6 +319,14 @@ def _cycle_log_stamp(name: str) -> str:
     return m.group(1) if m else ""
 
 
+def _cycle_log_tid(name: str) -> str:
+    """The task id embedded in a slot loop's cycle-<tid>-<ts>.log filename,
+    '' for the historical cycle-<ts>.log shape (no tid at all) or anything
+    that doesn't match."""
+    m = _CYCLE_LOG_TID.match(name)
+    return m.group(1) if m else ""
+
+
 def probe_runtime() -> dict:
     """Everything the live console needs that isn't in backlog/ledger."""
     pids = cycle_pids()
@@ -275,11 +334,22 @@ def probe_runtime() -> dict:
     # Cycle start = the timestamp encoded in the newest cycle log's filename
     # (created at cycle start; --print only flushes the body at the end, so the
     # filename is the reliable start clock). The newest stamp across every cycle
-    # log, whichever filename shape it has (see _cycle_log_stamp).
+    # log, whichever filename shape it has (see _cycle_log_stamp) - UNLESS pid
+    # files name live workers, in which case narrow to the logs those workers
+    # actually own first: with concurrency>1 every slot writes its own
+    # cycle-<tid>-<ts>.log concurrently, so the single newest timestamp across
+    # ALL of them can belong to a different slot than the one this heuristic is
+    # trying to time (Task 4's interleaving finding). Falls back to the
+    # unfiltered set when no live worker's tid matches any log on disk (e.g. a
+    # legacy single-slot deployment with no workers dir at all).
+    logs = list(LOGDIR.glob("cycle-*.log")) if LOGDIR.exists() else []
+    live_tids = {str(w["tid"]) for w in (workers_state() or []) if w.get("alive") and w.get("tid")}
+    if live_tids:
+        owned = [p for p in logs if _cycle_log_tid(p.name) in live_tids]
+        if owned:
+            logs = owned
     start = None
-    stamps = sorted(s for s in (_cycle_log_stamp(p.name)
-                                for p in (LOGDIR.glob("cycle-*.log") if LOGDIR.exists() else []))
-                    if s)
+    stamps = sorted(s for s in (_cycle_log_stamp(p.name) for p in logs) if s)
     if stamps:
         try:
             start = datetime.strptime(stamps[-1], "%Y%m%dT%H%M%S").timestamp()
@@ -457,11 +527,35 @@ def do_skip(tid: str):
     _run_converter()
 
 
-def do_killtask() -> str:
-    """Abort the in-flight cycle: SIGTERM the cycle process, then skip the task so
-    the loop won't immediately re-pick it. Reversible by editing skips.txt."""
+def do_killtask(tid: str = "") -> str:
+    """Abort ONE task's in-flight cycle, then skip it so the loop won't
+    immediately re-pick it. Reversible by editing skips.txt.
+
+    Targeted path (concurrency-safe): if `tid` names a LIVE worker in
+    workers_state() (its $AP_STATE/workers/<slot>.pid), SIGTERM only that
+    pid's own process group (os.killpg) - never the machine-wide
+    cycle_pids() pgrep, which would also take out every OTHER slot's
+    in-flight task (and any unrelated orbit-cycle process on the box).
+
+    Legacy fallback: no `tid` given, or it doesn't match any live worker
+    (e.g. a state dir from before T4's per-slot pid files existed) - the
+    original machine-wide behavior, kept only so a single-slot deployment
+    without a populated workers dir still has a working Abort button."""
+    workers = workers_state() or []
+    match = next((w for w in workers if w.get("alive") and str(w.get("tid")) == str(tid)), None) if tid else None
+    if match is not None:
+        pid = match["pid"]
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        except ProcessLookupError:
+            pass   # already gone - still skip it below so it isn't re-picked
+        except Exception as e:
+            return f"Could not stop '{tid}' (slot {match['slot']}, pid {pid}): {e}"
+        do_skip(tid)
+        return (f"Stopped {tid}'s cycle (slot {match['slot']}, pid {pid}) and skipped it so it won't be "
+                f"retried. That slot's wrapper will reset its worktree and start a fresh cycle after its "
+                f"backoff. Un-skip by editing skips.txt.")
     pids = cycle_pids()
-    tid = MARKER.read_text().strip() if MARKER.exists() else ""
     if not pids:
         return "No cycle is currently running — nothing to stop."
     for p in pids:
@@ -469,9 +563,13 @@ def do_killtask() -> str:
             os.kill(p, 15)
         except ProcessLookupError:
             pass
-    if tid:
-        do_skip(tid)
-        return (f"Stopped the running cycle (pid {pids[0]}) and skipped '{tid}' so it won't be retried. "
+    # No pid file matched `tid` - fall back to the legacy single-slot marker
+    # so the message (and the skip) still names the right task when there is
+    # no workers dir to consult at all.
+    fallback_tid = tid or (MARKER.read_text().strip() if MARKER.exists() else "")
+    if fallback_tid:
+        do_skip(fallback_tid)
+        return (f"Stopped the running cycle (pid {pids[0]}) and skipped '{fallback_tid}' so it won't be retried. "
                 f"The wrapper will reset the worktree and start a fresh cycle after its backoff. "
                 f"Un-skip by editing skips.txt.")
     return f"Stopped the running cycle (pid {pids[0]}). No task id was claimed yet."
@@ -3362,6 +3460,7 @@ def _validate_config(d: dict) -> list:
             errs.append(f"{k} must be a non-empty string")
     _nonempty("base_branch"); _nonempty("model"); _nonempty("permission_mode"); _nonempty("repo")
     _posint("interval_seconds"); _posint("max_tasks_per_day"); _posint("cycle_timeout_seconds")
+    _posint("concurrency")
     if "git_host" in d and d["git_host"] not in HOSTS_ALL:
         errs.append("git_host must be one of " + ", ".join(HOSTS_ALL))
     if "pull_requests" in d and d["pull_requests"] not in ("off", "github"):
@@ -3854,7 +3953,21 @@ def build_state() -> dict:
                 "acceptance_criteria": [a for a in (meta.get("acceptance_criteria") or [])
                                         if isinstance(a, str)]}
 
-    live = bool(cycle_pids())   # is a real cycle process actually running right now?
+    workers = workers_state()   # None only when unconfigured/empty AND concurrency==1 - see workers_state()
+    if WORKERS_DIR.is_dir():
+        # T4 always mkdir -p's this dir before its first iteration, so its
+        # presence means the pid-file contract is in force - trust it
+        # completely, including "empty = nothing live right now" (a
+        # concurrency>1 deployment between cycles is genuinely idle, not a
+        # reason to fall back to a machine-wide pgrep).
+        live = any(w.get("alive") for w in (workers or []))
+    else:
+        # Legacy fallback ONLY when the workers dir has never existed at all
+        # (a pre-T4 state dir, or the dashboard polled before the loop's very
+        # first iteration) - cycle_pids() is a machine-wide pgrep and would
+        # misattribute liveness to an unrelated orbit-cycle process elsewhere
+        # on the box, but it's the only signal available until then.
+        live = bool(cycle_pids())   # is a real cycle process actually running right now?
     cur_marker = MARKER.read_text().strip() if MARKER.exists() else ""
     mm = merged_map()
     running, done, escalated = [], [], []
@@ -4119,6 +4232,11 @@ def build_state() -> dict:
     insight_docs = insight_docs_state()
     if insight_docs is not None:
         rt["insight_docs"] = insight_docs
+    # Same discipline again: `workers` (computed above, for `live`) is present
+    # only when workers_state() has something worth a strip - see its
+    # docstring for the exact None-vs-[] contract.
+    if workers is not None:
+        rt["workers"] = workers
     rt["onboarding"] = onboarding_state()
     return rt
 
@@ -4299,7 +4417,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/resume":
                 do_resume(); msg = "Loop resumed."
             elif path == "/killtask":
-                msg = do_killtask()
+                msg = do_killtask(tid)
             elif path == "/skip":
                 do_skip(tid); msg = f"Skipped {tid} — moved to the Skipped section."
             elif path == "/unskip":

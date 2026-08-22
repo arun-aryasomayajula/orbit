@@ -692,6 +692,12 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
         <button class="btn btn-go btn-mini" id="qaDevStartBtn" onclick="qaServicesStart()">▶ Start app</button>
         <button class="btn btn-stop btn-mini" id="qaDevStopBtn" style="display:none" onclick="qaServicesStop()">■ Stop app</button>
       </div>
+      <!-- Workers strip (Task 7) - one row per $AP_STATE/workers/<slot>.pid,
+           concurrency's per-slot answer to "what is actually running right
+           now". Independent of qa.services: renders whenever build_state
+           served a `workers` key at all, self-hides otherwise (see
+           renderWorkers). -->
+      <div id="workersStrip" style="display:none;margin-top:10px"></div>
     </div>
     <!-- ── New test / Record — the web equivalent of `orbit teach` ── -->
     <div class="band" id="qaTeachBand" style="display:none">
@@ -977,7 +983,7 @@ function card(t,kind){
   if(kind==='run'){live='live';
     timer=`<div class="meta"><span class="orbmark orbmark-sm" aria-hidden="true"></span> ${S&&S.stopped?'⏸ pause pending — finishing this cycle':'in orbit'} <span class="timer" data-start="${t._start||''}">…</span>`+
       `<div class="wd"><i data-wd="${t._start||''}" style="width:0%"></i></div></div>`;
-    btns=`<button class="btn btn-stop btn-mini" onclick="if(confirm('Abort the running cycle and set ${esc(t.id)} aside?'))post('/killtask',{})">Abort &amp; skip</button>`;
+    btns=`<button class="btn btn-stop btn-mini" onclick="if(confirm('Abort the running cycle and set ${esc(t.id)} aside?'))post('/killtask',{id:'${esc(t.id)}'})">Abort &amp; skip</button>`;
   }else if(kind==='next'){
     btns=`<button class="btn btn-go btn-mini" title="move it to the front and resume the loop" onclick="post('/runnow',{id:'${esc(t.id)}'})">Run this next</button>
       <button class="btn btn-mini" title="move up in the queue" onclick="post('/move',{id:'${esc(t.id)}',dir:'up'})">▲</button>
@@ -1155,7 +1161,7 @@ function renderTop(){
   document.getElementById('heroBtns').innerHTML=
     (r.stopped?`<button class="btn btn-go" onclick="post('/resume',{})">Resume loop</button>`
              :`<button class="btn btn-stop" onclick="post('/stop',{})">Pause loop</button>`)+
-    (r.cycle_running?`<button class="btn" onclick="if(confirm('Abort the running cycle? The task is set aside, not retried.'))post('/killtask',{})">Abort cycle</button>`:'');
+    (r.cycle_running?`<button class="btn" onclick="if(confirm('Abort the running cycle? The task is set aside, not retried.'))post('/killtask',{id:'${escJsAttr(r.current_task||'')}'})">Abort cycle</button>`:'');
   // rail buttons + meter
   const lb=document.getElementById('loopBtn');
   lb.innerHTML=r.stopped?'<span class="fi">▶</span><span class="lbl">Resume</span>':'<span class="fi">⏸</span><span class="lbl">Pause</span>';
@@ -1735,27 +1741,61 @@ function qaDevServiceRow(s){
   return `<div class=brow><code>${esc(s.name)}</code>${s.ready?` <span class=aside>${esc(s.ready)}</span>`:''}<span class=spacer></span>
     <button class="btn btn-mini" onclick="qaServicesRestart('${escJsAttr(s.name)}')">↻ Restart</button></div>`;
 }
+function workerRow(w){
+  return `<div class=brow><code>slot ${esc(w.slot)}</code> <span class=aside>${w.tid?esc(w.tid):'no task'}</span>
+    <span class=aside>${w.started?esc(w.started):''}</span><span class=spacer></span>${badge(w.alive?'alive':'gone',w.alive?'ok':'muted')}</div>`;
+}
+function renderWorkers(){
+  // Independent of qa.services - this is per-slot concurrency liveness
+  // (Task 7), not the dev-session app. Self-hides on its own whenever
+  // build_state omitted `workers` entirely (unconfigured, concurrency==1
+  // with nothing running); see workers_state()'s docstring for the exact
+  // absent-vs-empty contract.
+  const el=document.getElementById('workersStrip');
+  if(!el)return;
+  const workers=S&&S.workers;
+  if(!workers){el.style.display='none';el.innerHTML='';return;}
+  el.style.display='';
+  el.innerHTML=`<div class=bandhead style="margin:0 0 4px"><h3 style="font-size:12px">Workers</h3></div>`+
+    (workers.length?workers.map(workerRow).join(''):`<div class=empty>No workers running right now.</div>`);
+}
 function renderQaDev(){
   const band=document.getElementById('qaDevBand');
   if(!band)return;
   const qs=S&&S.qa_services;
-  if(!qs){band.style.display='none';return;}
+  const workers=S&&S.workers;
+  // The band itself now serves two independent stories (dev-session app,
+  // per-slot workers) - show it if EITHER has something to say, so a
+  // concurrency>1 target with no qa.services still sees its workers strip.
+  if(!qs&&!workers){band.style.display='none';return;}
   band.style.display='';
-  const stLabel={stopped:'stopped',starting:'starting…',running:'running',error:'error'}[qs.state]||qs.state;
-  const stClass={stopped:'muted',starting:'warn',running:'ok',error:'stop'}[qs.state]||'muted';
   const stateEl=document.getElementById('qaDevState');
-  if(stateEl)stateEl.innerHTML=badge(stLabel,stClass);
   const noteEl=document.getElementById('qaDevNote');
-  if(noteEl)noteEl.textContent=qs.state==='running'
-    ? 'Tests run against the warm app (attach) — no reboot.'
-    : qs.state==='error' ? (qs.error||'could not bring the app up')
-    : 'Bring the app up once, then flows/teach attach instead of relaunching it every run.';
   const svcEl=document.getElementById('qaDevServices');
-  if(svcEl)svcEl.innerHTML=(qs.services||[]).map(qaDevServiceRow).join('');
-  const busy=qs.state==='running'||qs.state==='starting';
   const startBtn=document.getElementById('qaDevStartBtn'),stopBtn=document.getElementById('qaDevStopBtn');
-  if(startBtn)startBtn.style.display=busy?'none':'';
-  if(stopBtn)stopBtn.style.display=busy?'':'none';
+  if(qs){
+    const stLabel={stopped:'stopped',starting:'starting…',running:'running',error:'error'}[qs.state]||qs.state;
+    const stClass={stopped:'muted',starting:'warn',running:'ok',error:'stop'}[qs.state]||'muted';
+    if(stateEl)stateEl.innerHTML=badge(stLabel,stClass);
+    if(noteEl)noteEl.textContent=qs.state==='running'
+      ? 'Tests run against the warm app (attach) — no reboot.'
+      : qs.state==='error' ? (qs.error||'could not bring the app up')
+      : 'Bring the app up once, then flows/teach attach instead of relaunching it every run.';
+    if(svcEl)svcEl.innerHTML=(qs.services||[]).map(qaDevServiceRow).join('');
+    const busy=qs.state==='running'||qs.state==='starting';
+    if(startBtn)startBtn.style.display=busy?'none':'';
+    if(stopBtn)stopBtn.style.display=busy?'':'none';
+  }else{
+    // No qa.services configured on this target - the dev-session-specific
+    // controls have nothing to show; the workers strip below still renders
+    // on its own.
+    if(stateEl)stateEl.innerHTML='';
+    if(noteEl)noteEl.textContent='';
+    if(svcEl)svcEl.innerHTML='';
+    if(startBtn)startBtn.style.display='none';
+    if(stopBtn)stopBtn.style.display='none';
+  }
+  renderWorkers();
 }
 function renderQa(){
   renderQaDev();
@@ -2804,7 +2844,8 @@ function loadSettings(){
         <div class=grid2>${txt('model','Model',c.model)}${sel('permission_mode','Permission mode',c.permission_mode,['acceptEdits','plan','bypassPermissions','default'])}</div></div>
       <div class=setcard><h3>Cadence</h3>
         <div class=grid2>${num('interval_seconds','Poll interval (s)',c.interval_seconds)}${num('max_tasks_per_day','Max tasks / day',c.max_tasks_per_day)}</div>
-        ${num('cycle_timeout_seconds','Cycle timeout (s)',c.cycle_timeout_seconds)}</div>
+        ${num('cycle_timeout_seconds','Cycle timeout (s)',c.cycle_timeout_seconds)}
+        ${num('concurrency','Concurrent slots',c.concurrency,'how many task cycles the loop may run in parallel - each slot polls and claims independently; 1 = today\'s single worker')}</div>
       <div class=setcard><h3>Discovery</h3>
         ${checks('sources','Task sources',m.sources_all||[],c.sources||[],'where the loop pulls work from')}
         ${checks('workable_categories','Auto-workable categories',m.categories_all||[],c.workable_categories||[],'categories the loop may build unattended')}</div>
@@ -2886,6 +2927,7 @@ function saveSettings(){
     repo:v('repo'),base_branch:v('base_branch'),branch_prefix:v('branch_prefix'),
     git_host:v('git_host'),git_repo:v('git_repo'),model:v('model'),permission_mode:v('permission_mode'),
     interval_seconds:n('interval_seconds'),max_tasks_per_day:n('max_tasks_per_day'),cycle_timeout_seconds:n('cycle_timeout_seconds'),
+    concurrency:n('concurrency'),
     sources:collectChecks('sources'),workable_categories:collectChecks('workable_categories'),
     spec:v('spec'),commit_trailer:v('commit_trailer'),gates:blocks.gates,qa:blocks.qa,plan:blocks.plan,knowledge:blocks.knowledge,
     mcp:blocks.mcp,pull_requests:v('pull_requests')
@@ -2932,7 +2974,7 @@ document.addEventListener('click',e=>{
 });
 
 /* ── render pipeline ────────────────────────────────────────────────────── */
-function sig(r){return JSON.stringify([r.running,r.next_up,r.done,r.board,r.skipped,r.escalated,r.runlog,r.history,r.funnel,r.feature_builds,r.spend_history,r.branches,r.epics,r.qa_flows,r.qa_services,r.onboarding,r.prd,r.watches,r.surveys,r.insight_docs]);}
+function sig(r){return JSON.stringify([r.running,r.next_up,r.done,r.board,r.skipped,r.escalated,r.runlog,r.history,r.funnel,r.feature_builds,r.spend_history,r.branches,r.epics,r.qa_flows,r.qa_services,r.onboarding,r.prd,r.watches,r.surveys,r.insight_docs,r.workers]);}
 function renderViews(){
   // Preserve column scroll positions across rebuilds.
   const colsEl=document.getElementById('queueCols');

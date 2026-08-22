@@ -12,6 +12,7 @@ import importlib
 import json
 import os
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -655,3 +656,204 @@ def test_category_fallback_lists_insight(cc):
     shell = (Path(cc.ENGINE) / "cc_shell.html").read_text()
     fallback = shell.split("function _catOptions", 1)[1].split("\n}", 1)[0]
     assert "'insight'" in fallback
+
+
+# ── per-slot workers (Task 7) ────────────────────────────────────────────
+# workers_state() reads $AP_STATE/workers/<slot>.pid (run.sh's
+# write_worker_pid: {pid, tid, started}) and stamps each with `alive`
+# (locks.pid_alive) - the same identity-aware liveness ledger.py's reap
+# already trusts (a slot loop's own pid outlives any single task, so a plain
+# "is the loop alive" check would never go false). Absent from build_state
+# (not merely empty) when there's nothing to show: the dir is empty or
+# missing AND concurrency is 1 (today's overwhelming default) - same
+# discipline as watches_state/qa_services_state.
+
+def _guaranteed_dead_pid() -> int:
+    """A pid that has definitely already exited - not a made-up number that
+    might collide with something real and alive on the test machine (mirrors
+    tests/test_slot_claims.py's helper of the same name)."""
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    return p.pid
+
+
+def _write_worker_pid(cc, slot, pid, tid, started="2026-08-22T00:00:00Z"):
+    d = Path(cc.AP_STATE) / "workers"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{slot}.pid").write_text(json.dumps({"pid": pid, "tid": tid, "started": started}))
+
+
+def _write_ledger(cc, entries):
+    (Path(cc.AP_STATE) / "ledger.json").write_text(json.dumps({"entries": entries}))
+
+
+def test_workers_absent_when_unconfigured(cc):
+    """No workers/ dir at all, concurrency unset (defaults to 1) - the key
+    must not appear, so a single-slot target's /api/state stays
+    byte-identical to before T7."""
+    assert cc.workers_state() is None
+    assert "workers" not in cc.build_state()
+
+
+def test_workers_shape_alive_and_dead_pid(cc):
+    dead = _guaranteed_dead_pid()
+    _write_worker_pid(cc, "0", os.getpid(), "t-live", "2026-08-22T00:00:00Z")
+    _write_worker_pid(cc, "1", dead, "t-dead", "2026-08-22T00:01:00Z")
+    ws = cc.workers_state()
+    by_slot = {w["slot"]: w for w in ws}
+    assert by_slot["0"] == {"slot": "0", "pid": os.getpid(), "tid": "t-live",
+                            "started": "2026-08-22T00:00:00Z", "alive": True}
+    assert by_slot["1"] == {"slot": "1", "pid": dead, "tid": "t-dead",
+                            "started": "2026-08-22T00:01:00Z", "alive": False}
+    s = cc.build_state()
+    assert s["workers"] == ws
+
+
+def test_workers_present_but_empty_when_concurrency_over_one(cc):
+    """concurrency > 1 with an empty/missing workers dir still shows the key
+    ([] not absent) - an operator who just turned it on and is looking for
+    the strip needs to see "no workers right now", not have it vanish."""
+    import yaml
+    cfg_path = Path(cc.AP_HOME) / "config.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text()) or {}
+    cfg["concurrency"] = 3
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    assert cc.workers_state() == []
+    assert cc.build_state()["workers"] == []
+
+
+def test_workers_tolerates_corrupt_pid_file(cc):
+    d = Path(cc.AP_STATE) / "workers"
+    d.mkdir(parents=True)
+    (d / "0.pid").write_text("not json{")
+    assert cc.workers_state() == []
+    s = cc.build_state()   # must not raise
+    assert s["workers"] == []
+
+
+# ── board `live`: replacing the pgrep-based bool (Task 7) ────────────────
+# An in_progress ledger entry only shows as RUNNING when build_state's `live`
+# is true AND it's the claimed marker's task. `live` now comes from
+# workers_state() (any alive worker) whenever $AP_STATE/workers/ exists at
+# all - including "empty means genuinely idle", not a reason to fall back -
+# and only drops back to the machine-wide cycle_pids() pgrep when that dir
+# has never been created (a pre-T4 state dir, or the dashboard polled before
+# the loop's very first iteration).
+
+def test_in_progress_shows_running_when_a_worker_is_alive(cc, monkeypatch):
+    # cycle_pids() still feeds the unrelated legacy `cycle_running` field
+    # probe_runtime always computes - stub it to a harmless empty result so
+    # this test isolates `live` (the ledger running/escalated split), the
+    # thing workers_state() actually replaced.
+    monkeypatch.setattr(cc, "cycle_pids", lambda: [])
+    _write_ledger(cc, {"t1": {"state": "in_progress"}})
+    (Path(cc.AP_STATE) / ".current-task-id").write_text("t1")
+    _write_worker_pid(cc, "0", os.getpid(), "t1")
+    s = cc.build_state()
+    assert [r["id"] for r in s["running"]] == ["t1"]
+    assert s["escalated"] == []
+
+
+def test_in_progress_not_running_when_workers_dir_present_but_empty(cc, monkeypatch):
+    """An empty but PRESENT workers/ dir means genuinely idle - this must NOT
+    fall back to the machine-wide pgrep. cycle_pids() is stubbed to return a
+    LIVE pid here specifically to prove the point: if `live` were still
+    falling back to pgrep, this task would wrongly show as running."""
+    monkeypatch.setattr(cc, "cycle_pids", lambda: [os.getpid()])
+    (Path(cc.AP_STATE) / "workers").mkdir()
+    _write_ledger(cc, {"t1": {"state": "in_progress"}})
+    (Path(cc.AP_STATE) / ".current-task-id").write_text("t1")
+    s = cc.build_state()
+    assert s["running"] == []
+    assert [r["id"] for r in s["escalated"]] == ["t1"]
+
+
+def test_legacy_pgrep_fallback_only_when_workers_dir_never_existed(cc, monkeypatch):
+    """No workers/ dir at all - falls back to cycle_pids(), exactly the
+    pre-T7 behavior, so a state dir from before the pid-file contract existed
+    still gets a working live/running signal."""
+    assert not (Path(cc.AP_STATE) / "workers").exists()
+    _write_ledger(cc, {"t1": {"state": "in_progress"}})
+    (Path(cc.AP_STATE) / ".current-task-id").write_text("t1")
+
+    monkeypatch.setattr(cc, "cycle_pids", lambda: [])
+    s = cc.build_state()
+    assert s["running"] == []
+    assert [r["id"] for r in s["escalated"]] == ["t1"]
+    assert "workers" not in s
+
+    monkeypatch.setattr(cc, "cycle_pids", lambda: [12345])
+    s2 = cc.build_state()
+    assert [r["id"] for r in s2["running"]] == ["t1"]
+
+
+# ── do_killtask(tid): identity-aware abort (Task 7) ───────────────────────
+# Targeting a specific slot's process group replaces the old machine-wide
+# pgrep-and-kill-everything behavior, which would abort every OTHER slot's
+# in-flight task (and any unrelated orbit-cycle process on the box) right
+# along with the one the operator actually clicked Abort on.
+
+def test_killtask_targets_only_the_owning_slots_process_group(cc, monkeypatch):
+    # Both pid files must name genuinely LIVE pids - workers_state() gates
+    # the match on `alive` (locks.pid_alive), so a made-up pid would never
+    # match and the test would silently exercise the legacy fallback instead.
+    other_proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
+    try:
+        _write_worker_pid(cc, "1", os.getpid(), "t-target")
+        _write_worker_pid(cc, "0", other_proc.pid, "t-other")
+        monkeypatch.setattr(cc, "cycle_pids", lambda: (_ for _ in ()).throw(
+            AssertionError("must not touch the machine-wide pgrep once a pid file matched")))
+        monkeypatch.setattr(cc.os, "getpgid", lambda pid: pid * 10)
+        calls = []
+        monkeypatch.setattr(cc.os, "killpg", lambda pgid, sig: calls.append((pgid, sig)))
+        msg = cc.do_killtask("t-target")
+        # ONLY the target's pgid - t-other's process group is never touched
+        assert calls == [(os.getpid() * 10, cc.signal.SIGTERM)]
+        assert "t-target" in msg and "slot 1" in msg
+        assert "t-target" in cc.load_skips()
+    finally:
+        other_proc.kill()
+        other_proc.wait()
+
+
+def test_killtask_falls_back_to_legacy_pgrep_when_tid_unmatched(cc, monkeypatch):
+    """No pid file names this tid (a stale dashboard tab, or a state dir with
+    no workers/ at all) - the original machine-wide behavior, so the Abort
+    button still does something instead of silently no-op'ing."""
+    killpg_calls = []
+    monkeypatch.setattr(cc.os, "killpg", lambda *a: killpg_calls.append(a))
+    killed = []
+    monkeypatch.setattr(cc.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(cc, "cycle_pids", lambda: [9999])
+    msg = cc.do_killtask("t-unmatched")
+    assert killed == [(9999, 15)]
+    assert not killpg_calls
+    assert "t-unmatched" in msg
+    assert "t-unmatched" in cc.load_skips()
+
+
+def test_killtask_no_cycle_running_reports_nothing_to_stop(cc, monkeypatch):
+    monkeypatch.setattr(cc, "cycle_pids", lambda: [])
+    msg = cc.do_killtask("")
+    assert "nothing to stop" in msg.lower()
+
+
+# ── concurrency setting (Task 7) ──────────────────────────────────────────
+# `concurrency` joins interval_seconds/max_tasks_per_day/cycle_timeout_seconds
+# as a validated positive-int field in the Admin panel's Cadence card -
+# _validate_config's cheap check runs first; config.py's own `validate` (the
+# authoritative schema) already covers it a second time on write.
+
+def test_concurrency_round_trips_through_do_save_config(cc):
+    msg = cc.do_save_config(json.dumps({"concurrency": 3}))
+    assert msg.startswith("✓ Saved"), msg
+    assert cc._load_cfg()["concurrency"] == 3
+
+
+def test_concurrency_rejects_non_positive_and_rolls_back(cc):
+    cfg_path = Path(cc.AP_HOME) / "config.yaml"
+    before = cfg_path.read_text()
+    msg = cc.do_save_config(json.dumps({"concurrency": 0}))
+    assert msg.startswith("Rejected")
+    assert "concurrency" in msg
+    assert cfg_path.read_text() == before
