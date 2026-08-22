@@ -449,6 +449,9 @@ def _bounce(tid: str, qa_cfg: dict, summary: str, patch_path: str,
         f"{summary} — full report: {findings_report} "
         f"(previous attempt patch: {patch_note})".split())
 
+    # Three separate set_task_field calls = three separate lock transactions
+    # by design (each is independently lock-protected; interleaving with
+    # another writer's edit to this task BETWEEN them is tolerated, not atomic).
     if not set_task_field(backlog, tid, "qa_bounces", str(new_bounces)):
         raise RuntimeError(f"task {tid!r} not found in {backlog} — cannot bounce")
     set_task_field(backlog, tid, "status", "queued")
