@@ -22,7 +22,7 @@ concurrency: 1               # how many task cycles run in parallel. Each "slot"
                              # actually starts that many slot loops: the background service
                              # (`orbit install`, launchd/systemd) or the launcher's per-tab
                              # Start/Stop control (`orbit web`, see README "Concurrency and the
-                             # launcher"). Slot 0 alone is unaffected either way — it stays this
+                             # launcher"). Slot 0 alone is unaffected either way - it stays this
                              # workspace's housekeeper regardless of how many slots run.
 
 # --- where the human gates live ------------------------------------------------
