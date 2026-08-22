@@ -52,6 +52,13 @@ def shellenv(target):
         f"export ORBIT_MAX_TASKS={sh(cfg['max_tasks_per_day'])}",
         f"export ORBIT_CYCLE_TIMEOUT={sh(cfg['cycle_timeout_seconds'])}",
         f"export ORBIT_CONCURRENCY={sh(cfg['concurrency'])}",
+        # Comma-joined `workable_categories`, for the wrapper's own task pick
+        # (run.sh pickable_ids/count_pickable). EMPTY means "no category
+        # restriction configured" - the wrapper must then filter nothing, or a
+        # config without the key would starve instead of behaving as it does
+        # today. A category name with a comma in it is not representable and is
+        # not a thing (backlog_lint's category names are bare identifiers).
+        f"export ORBIT_WORKABLE={sh(','.join(str(c) for c in (raw.get('workable_categories') or [])))}",
         f"export ORBIT_BRANCH_PREFIX={sh(cfg['branch_prefix'])}",
         f"export ORBIT_PULL_REQUESTS={sh(cfg['pull_requests'])}",
         f"export ORBIT_DASHBOARD_URL={sh(cfg['dashboard_url'])}",

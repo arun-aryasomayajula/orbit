@@ -151,6 +151,11 @@ interval_seconds: 180
 max_tasks_per_day: 12
 cycle_timeout_seconds: 3600
 
+# How many task cycles run in parallel (one "slot" = one worker with its own
+# worktree). Default 1. Raise it only alongside `orbit install`, which is what
+# actually starts the extra slot loops.
+# concurrency: 1
+
 spec: null                   # optional: path to a standing spec the loop rereads (e.g. docs/VISION.md)
 
 # HOW the checker verifies THIS repo (auto-detected — REVIEW and fix these):

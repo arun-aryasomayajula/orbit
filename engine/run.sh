@@ -52,6 +52,13 @@ INTERVAL="${AP_INTERVAL:-$ORBIT_INTERVAL}"
 MAX_TASKS_PER_DAY="${AP_MAX_TASKS:-$ORBIT_MAX_TASKS}"
 CYCLE_TIMEOUT="${AP_CYCLE_TIMEOUT:-$ORBIT_CYCLE_TIMEOUT}"
 LIMIT_BACKOFF="${AP_LIMIT_BACKOFF:-1800}"
+# How long a slot naps after finding nothing it may claim. Slot 0 keeps today's
+# ten minutes: it is the housekeeper, so its own next tick is the thing that
+# regenerates and tops up the queue. A higher slot has no housekeeping of its
+# own — work can only appear for it when slot 0 refills the queue — so a
+# ten-minute nap leaves it sitting idle with claimable work already waiting. It
+# polls faster instead; a tick that finds nothing costs one queue read.
+EMPTY_BACKOFF=600; [ "$SLOT" = "0" ] || EMPTY_BACKOFF=60
 BASE_REF="origin/$ORBIT_BASE_BRANCH"
 # --- per-slot state filenames -------------------------------------------------
 # These three marker filenames are LOAD-BEARING: the dashboard reads
@@ -119,7 +126,10 @@ gates_ready() {
 
 prepare_worktree() {
   git -C "$REPO" fetch origin --quiet 2>>"$LOGDIR/orbit.log" || true
-  if [ ! -d "$WT/.git" ] && ! git -C "$REPO" worktree list | grep -q "$WT"; then
+  # Anchored match: `grep -q "$WT"` would also match ANOTHER slot's worktree
+  # (…-orbit-wt-1 contains …-orbit-wt-1x, and …-wt-1 is a prefix of …-wt-10), so
+  # a slot could decide its own worktree already exists and never create it.
+  if [ ! -d "$WT/.git" ] && ! git -C "$REPO" worktree list --porcelain | grep -qx "worktree $WT"; then
     log "creating worktree at $WT"
     git -C "$REPO" worktree add --force "$WT" "$BASE_REF" >>"$LOGDIR/orbit.log" 2>&1 || { log "FATAL: worktree add failed"; return 1; }
   fi
@@ -203,9 +213,10 @@ todays_spend(){ cat "$STATE/.spend-$(today)" 2>/dev/null || echo 0; }
 # One atomic increment of .count-<date>, checked against the daily cap inside
 # the same critical section (spend.py bump-count), so N slots can never push the
 # count past the cap between one's check and another's write. Return 0 = counted,
-# 1 = do not start another cycle today. A lock timeout (exit 4) returns 1 too:
-# with the accounting in doubt, idling is the safe direction — the alternative is
-# burning uncounted cycles past the cap.
+# 1 = do not start another cycle today. Every non-zero exit maps to 1, not just
+# the at-cap 3: on a lock timeout (4) or a bad argument (2) the count did NOT go
+# up, and idling is the safe direction — the alternative is burning uncounted
+# cycles past the cap.
 count_cycle() {
   local new rc
   new="$(python3 "$ENGINE/spend.py" bump-count "$STATE" "$(today)" --cap "$MAX_TASKS_PER_DAY" 2>>"$LOGDIR/orbit.log")"
@@ -218,16 +229,30 @@ count_cycle() {
 }
 
 # --- auto-feed refill threshold (extracted verbatim by tests/test_autopromote.py) ---
+# Counts what the loop could actually PICK, so it must apply the same three
+# filters as pickable_ids (worked · skipped · workable category, `forced`
+# bypassing the last) - a count that includes tasks no slot may claim would make
+# auto-feed decide the queue is topped up while every slot sits idle.
 count_pickable() {
-  python3 - "$STATE/queue.json" "$ENGINE/ledger.py" "$STATE/skips.txt" <<'PYEOF'
+  python3 - "$STATE/queue.json" "$ENGINE/ledger.py" "$STATE/skips.txt" "${ORBIT_WORKABLE:-}" <<'PYEOF'
 import json, os, subprocess, sys
 qf, ledger, sk = sys.argv[1], sys.argv[2], sys.argv[3]
+workable = set(c for c in sys.argv[4].split(",") if c) if len(sys.argv) > 4 else set()
 q = json.load(open(qf)) if os.path.exists(qf) else {}
 tasks = q.get("queue", q.get("tasks", q)) if isinstance(q, dict) else q
 try: worked = set(subprocess.check_output(["python3", ledger, "worked-ids"], text=True).split())
 except Exception: worked = set()
 skips = set(l.strip() for l in open(sk)) if os.path.exists(sk) else set()
-print(sum(1 for t in tasks if str(t.get("id")) not in worked and str(t.get("id")) not in skips))
+n, seen = 0, set()
+for t in tasks:
+    tid = str(t.get("id"))
+    if tid in worked or tid in skips or tid in seen:
+        continue
+    if workable and str(t.get("category", "")) not in workable and not t.get("forced"):
+        continue
+    seen.add(tid)
+    n += 1
+print(n)
 PYEOF
 }
 
@@ -252,15 +277,23 @@ should_autofeed() {
 #      patch be named after the task, the dashboard name it immediately instead of
 #      guessing, and the worker pid file say what this slot is actually working.
 
-# Every pickable task, best candidate first. Same worked/skipped filter as
-# count_pickable; ordered highest-priority-first (a stable sort, so queue order
-# breaks ties) to preserve the pick the agent used to make for itself — it chose
-# the highest-priority pickable task, and moving that choice into the wrapper must
-# not quietly turn it into "whatever sits first in backlog.yaml".
+# Every pickable task, best candidate first. This is the wrapper's version of the
+# pick the AGENT used to make for itself, so it has to apply all three of the
+# clauses the skill applied, or the wrapper hands the agent work it will only
+# refuse (a burnt cycle, then an escalation, every tick):
+#   · not already worked (ledger) and not skipped (skips.txt);
+#   · `category` in the config's workable_categories — EXCEPT when the task is
+#     `forced`, which is precisely the operator saying "yes, this excluded
+#     category, do it anyway";
+#   · highest priority first (a stable sort, so queue order breaks ties).
+# An EMPTY ORBIT_WORKABLE means no workable_categories key in config: filter
+# nothing, because a deployment without the key must keep behaving as it does
+# today rather than starve.
 pickable_ids() {
-  python3 - "$STATE/queue.json" "$ENGINE/ledger.py" "$STATE/skips.txt" <<'PYEOF'
+  python3 - "$STATE/queue.json" "$ENGINE/ledger.py" "$STATE/skips.txt" "${ORBIT_WORKABLE:-}" <<'PYEOF'
 import json, os, subprocess, sys
 qf, ledger, sk = sys.argv[1], sys.argv[2], sys.argv[3]
+workable = set(c for c in sys.argv[4].split(",") if c) if len(sys.argv) > 4 else set()
 q = json.load(open(qf)) if os.path.exists(qf) else {}
 tasks = q.get("queue", q.get("tasks", q)) if isinstance(q, dict) else q
 try: worked = set(subprocess.check_output(["python3", ledger, "worked-ids"], text=True).split())
@@ -271,6 +304,8 @@ cands, rank, seen = [], {}, set()
 for t in tasks:
     tid = str(t.get("id"))
     if tid in worked or tid in skips or tid in seen:
+        continue
+    if workable and str(t.get("category", "")) not in workable and not t.get("forced"):
         continue
     seen.add(tid)
     cands.append(tid)
@@ -303,22 +338,29 @@ PYEOF
 # Win ONE task out of the candidate list ($1, one id per line).
 # stdout carries ONLY the id we won — the caller reads it with $( ), so a stray
 # log line in here would be spliced into the task id (that is what logf is for).
-# Exit: 0 won (id on stdout) · 1 nothing left to win · 2 the ledger lock was busy
-# (transient: this tick does nothing, the next one retries).
+# Exit: 0 won (id on stdout) · 1 every candidate was legitimately lost to another
+# claimant · 2 the ledger lock was busy (transient: this tick does nothing, the
+# next one retries) · 3 nothing was won and at least one claim FAILED unexpectedly
+# — kept apart from 1 so a broken ledger reads as a broken ledger in the log
+# instead of hiding behind "another slot has it".
 claim_first() {
-  local tid rc
+  local tid rc errored=0
   while IFS= read -r tid; do
     [ -n "$tid" ] || continue
+    # </dev/null: the loop is reading the candidate list on stdin, and a child
+    # that read from it would swallow the remaining candidates.
     python3 "$ENGINE/ledger.py" claim --exclusive "$tid" "$(task_title "$tid")" \
-        --pid "$$" --slot "$SLOT" >>"$LOGDIR/orbit.log" 2>&1
+        --pid "$$" --slot "$SLOT" </dev/null >>"$LOGDIR/orbit.log" 2>&1
     rc=$?
     case "$rc" in
       0) printf '%s\n' "$tid"; return 0 ;;
       5) logf "task $tid already claimed elsewhere — trying the next candidate" ;;
       6) logf "ledger lock busy while claiming $tid — no claim this tick"; return 2 ;;
-      *) logf "WARN: claiming $tid failed (rc=$rc, see above) — trying the next candidate" ;;
+      *) logf "WARN: claiming $tid failed (rc=$rc, see above) — trying the next candidate"
+         errored=1 ;;
     esac
   done <<< "$1"
+  [ "$errored" = "1" ] && return 3
   return 1
 }
 # --- end claim-then-run candidate walk ---
@@ -480,6 +522,7 @@ one_iteration() {
   case "$claim_rc" in
     0) : ;;
     2) log "ledger lock busy — no claim this tick, retrying next tick."; echo EMPTY; return ;;
+    3) log "ERROR: every claim attempt failed on $pickable candidate(s) — see orbit.log; no cycle spent."; echo EMPTY; return ;;
     *) log "all $pickable pickable task(s) are claimed elsewhere — idling, no cycle spent."; echo EMPTY; return ;;
   esac
   if [ -z "$tid" ]; then
@@ -584,10 +627,22 @@ one_iteration() {
     fi
   else
     log "cycle produced no commit (no-op / escalation)."
-    if [ -n "$tid" ] && ! python3 "$ENGINE/ledger.py" worked-ids 2>/dev/null | tr ' ' '\n' | grep -qx "$tid"; then
-      python3 "$ENGINE/ledger.py" escalate "$tid" "wrapper: no commit (gate fail / too large / incomplete)" >>"$LOGDIR/orbit.log" 2>&1 \
-        || log "WARN: ledger escalate not recorded for $tid (lifecycle gate or write error — see orbit.log)"
-    fi
+    # The safety net for a cycle that produced nothing: put the task on a human
+    # gate instead of leaving it mid-flight. Keyed on the ledger STATE, because
+    # the old guard ("this id is not in worked-ids") can no longer ever be true —
+    # the WRAPPER's own claim is what put it there. That made this net dead, and
+    # every no-op cycle — a watchdog kill, an agent that refused the task, a run
+    # cut short by a usage limit — left the task in_progress and invisible until
+    # the reaper noticed an hour later. States that mean "already handled":
+    # committed/pushed (shipped), merged/rejected (reviewed), escalated (already
+    # on the gate), queued (something re-filed it deliberately).
+    local lstate; lstate="$(python3 "$ENGINE/ledger.py" state "$tid" 2>/dev/null || true)"
+    case "$lstate" in
+      committed|pushed|merged|rejected|escalated|queued) : ;;
+      *)
+        python3 "$ENGINE/ledger.py" escalate "$tid" "wrapper: no commit (gate fail / too large / incomplete)" >>"$LOGDIR/orbit.log" 2>&1 \
+          || log "WARN: ledger escalate not recorded for $tid (lifecycle gate or write error — see orbit.log)" ;;
+    esac
     # An escalated cycle is a stalled human gate — say so where the human is.
     if [ -n "$tid" ] && [ "$(python3 "$ENGINE/ledger.py" state "$tid" 2>/dev/null)" = "escalated" ]; then
       notify "🙋 Orbit needs you" "task $tid escalated — answer it to unblock the loop" "$DASH"
@@ -617,6 +672,14 @@ set_idle_reason(){ echo "$1 $(( $(date +%s) + ${2:-0} ))" > "$IDLE_MARKER"; }
 # gets escalated exactly as it should.
 trap 'clear_worker_pid' EXIT
 log "==== orbit up (pid $$) slot $SLOT of $SLOTS target=$TARGET model=$MODEL base=$ORBIT_BASE_BRANCH ===="
+# Said once per start, because nothing else will ever mention it again: the
+# pre-slot worktree is now orphaned and no loop will touch it, so an operator
+# reading the log knows both that it is safe to delete and that it is theirs to
+# delete. (Deleting it here would be this script destroying a directory it no
+# longer manages — and one that may hold the only copy of an unpushed commit.)
+if [ "$WT" != "${REPO}-orbit-worktree" ] && [ -d "${REPO}-orbit-worktree" ]; then
+  log "note: ${REPO}-orbit-worktree is the pre-slot worktree and is no longer used — remove it with 'git -C $REPO worktree remove --force ${REPO}-orbit-worktree' once you have checked it holds nothing you want"
+fi
 while true; do
   # STOP is checked HERE and nowhere else: it stops new CLAIMS, never an in-flight
   # cycle (killing a cycle mid-commit is how tasks end up in limbo).
@@ -640,7 +703,7 @@ while true; do
            else set_idle_reason "daily-cap" 600; sleep 600; fi ;;
     FAIL)  if count_cycle; then set_idle_reason "recovering" 120; sleep 120
            else set_idle_reason "daily-cap" 600; sleep 600; fi ;;
-    EMPTY) set_idle_reason "queue-empty" 600; sleep 600 ;;
+    EMPTY) set_idle_reason "queue-empty" "$EMPTY_BACKOFF"; sleep "$EMPTY_BACKOFF" ;;
     SKIP)  set_idle_reason "waiting-for-services" 300; sleep 300 ;;
     LIMIT) log "usage limit — backing off ${LIMIT_BACKOFF}s."; set_idle_reason "usage-limit" "$LIMIT_BACKOFF"; sleep "$LIMIT_BACKOFF" ;;
     *)     set_idle_reason "between-cycles" "$INTERVAL"; sleep "$INTERVAL" ;;

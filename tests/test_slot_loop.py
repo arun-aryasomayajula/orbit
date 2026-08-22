@@ -41,7 +41,7 @@ RUN_SH = (ENGINE / "run.sh").read_text()
 
 def _cfg_repo(tmp_path, extra=""):
     ap = tmp_path / ".autopilot"
-    ap.mkdir()
+    ap.mkdir(parents=True)
     (ap / "config.yaml").write_text(
         'repo: "."\nbase_branch: "main"\ngates:\n  test: {cmd: "true", cwd: "."}\n' + extra)
     return tmp_path
@@ -73,6 +73,15 @@ def test_shellenv_emits_configured_concurrency(tmp_path):
     assert _shellenv(_cfg_repo(tmp_path, "concurrency: 4\n"))["ORBIT_CONCURRENCY"] == "4"
 
 
+def test_shellenv_emits_workable_categories_for_the_wrappers_pick(tmp_path):
+    """run.sh's own pick has to honour workable_categories (the clause the agent
+    used to apply), so shellenv hands it over comma-joined. No key = empty = no
+    category restriction."""
+    assert _shellenv(_cfg_repo(tmp_path))["ORBIT_WORKABLE"] == ""
+    target = _cfg_repo(tmp_path / "b", "workable_categories: [documentation, testing]\n")
+    assert _shellenv(target)["ORBIT_WORKABLE"] == "documentation,testing"
+
+
 def test_validate_accepts_positive_concurrency(tmp_path):
     r = _config("validate", str(_cfg_repo(tmp_path, "concurrency: 3\n")))
     assert r.returncode == 0, r.stdout + r.stderr
@@ -101,6 +110,9 @@ def _extract(start_marker: str, end_marker: str) -> str:
 _WALK = _extract(
     "# --- claim-then-run candidate walk (extracted verbatim by tests/test_slot_loop.py) ---\n",
     "# --- end claim-then-run candidate walk ---")
+_AUTOFEED = _extract(
+    "# --- auto-feed refill threshold (extracted verbatim by tests/test_autopromote.py) ---\n",
+    "# --- end auto-feed refill threshold ---")
 _LIVENESS = _extract(
     "# --- worker liveness (extracted verbatim by tests/test_slot_loop.py) ---\n",
     "# --- end worker liveness ---")
@@ -143,12 +155,20 @@ _WALK_PRELUDE = (
 )
 
 
-def _run_walk(tmp_path, queue_tasks, tail, *, rc_by_tid=None, default_rc=0, slot="0"):
+def _run_walk(tmp_path, queue_tasks, tail, *, rc_by_tid=None, default_rc=0, slot="0",
+              workable=None):
     state, engine = _walk_env(tmp_path, queue_tasks, rc_by_tid, default_rc)
-    script = _WALK_PRELUDE + _WALK + "\n" + tail
+    # Both blocks: count_pickable (auto-feed) has to agree with pickable_ids, so
+    # the tests drive them side by side.
+    script = _WALK_PRELUDE + _AUTOFEED + _WALK + "\n" + tail
+    env = dict(os.environ)
+    if workable is not None:
+        env["ORBIT_WORKABLE"] = workable
+    else:
+        env.pop("ORBIT_WORKABLE", None)
     r = subprocess.run(["bash", "-uo", "pipefail", "-c", script, "bash",
                         str(state), str(engine), slot],
-                       capture_output=True, text=True, env=dict(os.environ))
+                       capture_output=True, text=True, env=env)
     calls = []
     cf = engine / "calls.jsonl"
     if cf.exists():
@@ -171,6 +191,48 @@ def test_pickable_ids_orders_by_priority_and_skips_worked_and_skipped(tmp_path):
     r, _ = _run_walk(tmp_path, tasks, "pickable_ids")
     assert r.returncode == 0, r.stderr
     assert r.stdout.split() == ["high-1", "med-1", "med-2", "low-1"]
+
+
+def test_pickable_ids_skips_categories_this_target_cannot_work(tmp_path):
+    """The clause the wrapper's pick must not lose: the agent only ever picked a
+    task whose category is in config.workable_categories. Without it the wrapper
+    claims work the agent will refuse — a burnt cycle and an escalation, every
+    tick. Probe shape from the review: workable [documentation] + a HIGHER
+    priority testing task must still pick the documentation task."""
+    tasks = [{"id": "t-testing", "category": "testing", "priority": "high"},
+             {"id": "t-doc", "category": "documentation", "priority": "medium"}]
+    r, _ = _run_walk(tmp_path, tasks, "pickable_ids", workable="documentation")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == ["t-doc"]
+
+
+def test_pickable_ids_lets_a_forced_task_through_any_category(tmp_path):
+    """`forced: true` IS the operator saying "yes, this excluded category"."""
+    tasks = [{"id": "t-forced", "category": "security", "priority": "low", "forced": True},
+             {"id": "t-doc", "category": "documentation", "priority": "low"}]
+    r, _ = _run_walk(tmp_path, tasks, "pickable_ids", workable="documentation")
+    assert sorted(r.stdout.split()) == ["t-doc", "t-forced"]
+
+
+def test_pickable_ids_filters_nothing_when_no_categories_are_configured(tmp_path):
+    """An empty ORBIT_WORKABLE means the target has no workable_categories key.
+    Such a deployment must keep behaving exactly as it does today, not starve."""
+    tasks = [{"id": "t-testing", "category": "testing"}, {"id": "t-none"}]
+    r, _ = _run_walk(tmp_path, tasks, "pickable_ids", workable="")
+    assert sorted(r.stdout.split()) == ["t-none", "t-testing"]
+
+
+def test_count_pickable_applies_the_same_filters_as_pickable_ids(tmp_path):
+    """Auto-feed tops the queue up to SLOTS *pickable* tasks. If the count
+    includes tasks no slot may claim, it refuses to refill while every slot
+    idles."""
+    tasks = [{"id": "t-testing", "category": "testing"},
+             {"id": "t-doc", "category": "documentation"},
+             {"id": "t-doc", "category": "documentation"},        # duplicate id
+             {"id": "t-forced", "category": "release", "forced": True}]
+    r, _ = _run_walk(tmp_path, tasks, "count_pickable", workable="documentation")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "2"                                # t-doc + t-forced
 
 
 def test_pickable_ids_is_empty_without_a_queue(tmp_path):
@@ -223,6 +285,22 @@ def test_claim_first_reports_nothing_left_to_win(tmp_path):
                      rc_by_tid={"t1": 5, "t2": 5})
     assert "rc=1" in r.stdout
     assert "t1" not in r.stdout.replace("rc=1", "")   # stdout carries ONLY a won id
+
+
+def test_claim_first_separates_a_broken_ledger_from_a_lost_race(tmp_path):
+    """An unexpected claim failure must not read as "another slot has it": one is
+    a healthy queue, the other is a broken ledger nobody would notice."""
+    r, _ = _run_walk(tmp_path, [{"id": "t1"}, {"id": "t2"}],
+                     'claim_first "$(pickable_ids)"; echo "rc=$?"',
+                     rc_by_tid={"t1": 5, "t2": 1})
+    assert "rc=3" in r.stdout
+    assert 'every claim attempt failed' in RUN_SH   # the caller's distinct headline
+
+
+def test_claim_first_does_not_let_a_child_eat_the_candidate_list(tmp_path):
+    """The walk reads its candidates on stdin; a claim child that read stdin
+    would swallow the rest of them, so the call is `</dev/null`."""
+    assert '--pid "$$" --slot "$SLOT" </dev/null' in RUN_SH
 
 
 def test_claim_first_treats_a_lock_timeout_as_transient(tmp_path):
@@ -398,7 +476,7 @@ def test_no_signal_traps_are_installed():
     or a whole cycle instead of ending the process at once, as it does today. A
     leaked pid file is harmless by comparison: the reaper only believes one whose
     pid is still alive."""
-    traps = [ln.strip() for ln in RUN_SH.splitlines() if ln.startswith("trap ")]
+    traps = [ln.strip() for ln in RUN_SH.splitlines() if ln.strip().startswith("trap ")]
     assert traps == ["trap 'clear_worker_pid' EXIT"], traps
 
 
@@ -416,6 +494,28 @@ def test_stop_is_still_checked_only_at_the_top_of_the_outer_loop():
     assert RUN_SH.count('[ -f "$STOP_FILE" ]') == 1
     top = RUN_SH.split("while true; do", 1)[1]
     assert '[ -f "$STOP_FILE" ]' in top.split("status=\"$(one_iteration)\"", 1)[0]
+
+
+def test_the_no_commit_escalation_net_is_keyed_on_ledger_state():
+    """The old guard ("id not in worked-ids") cannot fire now that the wrapper's
+    own claim puts it there, which left every no-op cycle — watchdog kill, agent
+    refusal, usage-limit cut — parked in_progress and invisible until the reaper."""
+    assert "worked-ids 2>/dev/null | tr ' ' '\\n' | grep -qx" not in RUN_SH
+    assert 'lstate="$(python3 "$ENGINE/ledger.py" state "$tid"' in RUN_SH
+    assert "committed|pushed|merged|rejected|escalated|queued) : ;;" in RUN_SH
+
+
+def test_higher_slots_do_not_wait_out_slot_zeros_refill():
+    """Only slot 0 regenerates the queue, so a higher slot napping ten minutes on
+    an empty queue can sit idle with claimable work already waiting."""
+    assert 'EMPTY_BACKOFF=600; [ "$SLOT" = "0" ] || EMPTY_BACKOFF=60' in RUN_SH
+    assert 'EMPTY) set_idle_reason "queue-empty" "$EMPTY_BACKOFF"; sleep "$EMPTY_BACKOFF" ;;' in RUN_SH
+
+
+def test_worktree_existence_check_is_anchored():
+    """`grep -q "$WT"` also matches another slot's worktree (…-wt-1 is a prefix
+    of …-wt-10), so a slot could think its own worktree exists and never make it."""
+    assert 'worktree list --porcelain | grep -qx "worktree $WT"' in RUN_SH
 
 
 def test_spend_and_count_go_through_spend_py():
