@@ -24,6 +24,14 @@ Two kinds of event, two levels of strictness:
   wrapper's `pushed` lands even if the agent recorded nothing. Refusing to
   record a fact loses state (run.sh swallows verb failures), so these mostly
   reject only genuinely nonsensical moves (e.g. claiming a merged task).
+  `committed` and `pushed` are legal from `escalated` for the same reason: a
+  ship and an escalation RACE. The reaper (or the operator's Abort) can
+  escalate a task in the same seconds its cycle finishes committing, and the
+  wrapper records `pushed` after the branch is already on the remote - a
+  refusal there would leave the ledger claiming nothing shipped while
+  origin says otherwise, and the review packet would have no entry to attach
+  to. The ship is the fact, so it wins; the escalation survives as the
+  entry's `reason`, and the operator still sees the task on the gate.
   `claim` is the one deliberate exception to "permissive": re-claiming a task
   that is already in_progress is illegal by default, because a second worker
   taking a live task is exactly the double-work bug exclusive claims exist to
@@ -67,8 +75,8 @@ TERMINAL = ("merged", "rejected")
 TRANSITIONS = {
     "claim":     {ABSENT},
     "reclaim":   {"in_progress"},
-    "committed": {ABSENT, "in_progress", "committed"},
-    "pushed":    {ABSENT, "in_progress", "committed", "pushed"},
+    "committed": {ABSENT, "in_progress", "committed", "escalated"},
+    "pushed":    {ABSENT, "in_progress", "committed", "pushed", "escalated"},
     "escalate":  {ABSENT, "in_progress", "committed", "pushed", "escalated"},
     "merged":    {"committed", "pushed", "escalated"},
     "rejected":  {"committed", "pushed", "escalated"},

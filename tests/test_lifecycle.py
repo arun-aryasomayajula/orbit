@@ -66,6 +66,21 @@ def test_escalate_is_legal_until_reviewed():
         assert lifecycle.check(st, "escalate") is not None
 
 
+def test_ships_are_recordable_over_an_escalation():
+    # F7: a ship and an escalation race. The reaper (or an operator's Abort)
+    # can escalate in the same seconds a cycle finishes committing, and the
+    # wrapper records `pushed` only after the branch is already on the remote.
+    # Refusing there leaves the ledger claiming nothing shipped while origin
+    # disagrees - and run.sh swallows verb failures, so nobody finds out.
+    assert lifecycle.check("escalated", "committed") is None
+    assert lifecycle.check("escalated", "pushed") is None
+    assert lifecycle.RESULT["pushed"] == "pushed"      # the ship wins the state
+    # ...but a REVIEWED task is still terminal - a late ship never reopens it.
+    for st in ("merged", "rejected"):
+        assert lifecycle.check(st, "committed") is not None
+        assert lifecycle.check(st, "pushed") is not None
+
+
 def test_judgments_require_a_reviewable_state():
     # The holes the machine closes: judging work that never shipped.
     assert lifecycle.check(None, "merged", None) is not None
@@ -219,6 +234,20 @@ def test_reap_rejects_a_non_integer_age(tmp_path):
                 entries={"t": {"state": "in_progress", "updated_at": "2020-01-01T00:00:00Z"}})
     assert r.returncode == 2
     assert _entries(tmp_path)["t"]["state"] == "in_progress"
+
+
+def test_escalate_then_pushed_is_recorded_end_to_end(tmp_path):
+    """F7 through the real verb: escalate, then the ship lands anyway."""
+    r = _ledger(tmp_path, "escalate", "t1", "reaper: looked stalled",
+                entries={"t1": {"state": "in_progress", "updated_at": "2026-08-22T00:00:00Z"}})
+    assert r.returncode == 0, r.stderr
+    assert _entries(tmp_path)["t1"]["state"] == "escalated"
+    r = _ledger(tmp_path, "pushed", "t1", "origin/autopilot/task-t1")
+    assert r.returncode == 0, r.stderr
+    e = _entries(tmp_path)["t1"]
+    assert e["state"] == "pushed"
+    assert e["remote_ref"] == "origin/autopilot/task-t1"
+    assert e["reason"] == "reaper: looked stalled"   # the escalation is not erased
 
 
 # ── autoclose consults the same machine ──────────────────────────────────────
