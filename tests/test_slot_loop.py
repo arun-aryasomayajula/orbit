@@ -92,11 +92,20 @@ def test_validate_absent_concurrency_passes(tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
 
 
-@pytest.mark.parametrize("value", ["0", "-2", '"three"', "true", "1.5"])
-def test_validate_rejects_non_positive_int_concurrency(tmp_path, value):
+@pytest.mark.parametrize("value", ["0", "-2", '"three"', "true", "1.5", "33", "3200"])
+def test_validate_rejects_out_of_range_concurrency(tmp_path, value):
+    """F5: ONE contract, 1..32. Above the ceiling it stops being a config and
+    becomes a fork bomb - every slot is a full claude cycle with its own
+    worktree."""
     r = _config("validate", str(_cfg_repo(tmp_path, f"concurrency: {value}\n")))
     assert r.returncode == 1, r.stdout
     assert "concurrency" in r.stdout
+    assert "1 and 32" in r.stdout
+
+
+def test_validate_accepts_the_top_of_the_range(tmp_path):
+    r = _config("validate", str(_cfg_repo(tmp_path, "concurrency: 32\n")))
+    assert r.returncode == 0, r.stdout + r.stderr
 
 
 # ── the shipped shell blocks, extracted and driven ─────────────────────────
@@ -119,6 +128,12 @@ _LIVENESS = _extract(
 _SLOT_NAMES = _extract(
     "# --- per-slot state filenames -------------------------------------------------\n",
     "export AP_HOME AP_STATE ORBIT_HOME")
+_LOOP_LIVENESS = _extract(
+    "# --- loop liveness (extracted verbatim by tests/test_slot_loop.py) ---\n",
+    "# --- end loop liveness ---")
+_BOUND = _extract(
+    "# --- concurrency bound (extracted verbatim by tests/test_slot_loop.py) --------\n",
+    "# --- end concurrency bound ---")
 
 
 def _fake_ledger(engine_dir: Path, rc_by_tid: dict, default_rc: int = 0):
@@ -346,6 +361,116 @@ def test_write_worker_pid_writes_the_shape_the_reaper_reads(tmp_path):
     assert info["started"].endswith("Z") and len(info["started"]) == 20
 
 
+def test_record_cycle_pid_folds_the_cycles_identity_into_the_same_file(tmp_path):
+    """F2: the file the dashboard's Abort reads must name the CYCLE, not just
+    the loop. cycle_pgid is only written when that pid really leads its own
+    group - here the shell's own $$ does not, so it must be absent while
+    cycle_pid is present, and the loop's own pid/tid must survive."""
+    r = _run_liveness(tmp_path, 'write_worker_pid t1; record_cycle_pid "$$"')
+    assert r.returncode == 0, r.stderr
+    info = json.loads((tmp_path / "state" / "workers" / "0.pid").read_text())
+    assert info["tid"] == "t1"
+    assert info["cycle_pid"] == info["pid"]        # $$ of the same shell
+    assert isinstance(info["pid"], int)
+    assert info["started"].endswith("Z")           # not clobbered by the update
+
+
+def test_record_cycle_pid_records_a_pgid_only_for_a_real_group_leader(tmp_path):
+    """A setsid'd cycle IS its own group leader, and only then may an aborter
+    killpg it - otherwise the group is the LOOP's and killpg would take the
+    slot down with the task (the C2 bug)."""
+    # A python child that setsids itself, exactly like run.sh's wrapper, then
+    # sleeps long enough for record_cycle_pid's own probe to see it.
+    r = _run_liveness(tmp_path, (
+        'python3 -c \'import os, time\n'
+        'os.setsid()\n'
+        'time.sleep(5)\' & CPID=$!\n'
+        'write_worker_pid t1; record_cycle_pid "$CPID"; kill "$CPID" 2>/dev/null; echo "$CPID"'))
+    assert r.returncode == 0, r.stderr
+    cpid = int(r.stdout.strip().splitlines()[-1])
+    info = json.loads((tmp_path / "state" / "workers" / "0.pid").read_text())
+    assert info["cycle_pid"] == cpid
+    assert info["cycle_pgid"] == cpid
+
+
+def test_record_cycle_pid_leaves_a_missing_worker_file_alone(tmp_path):
+    """No claim, no file: the update must not invent one (a file with no
+    pid/tid reads as an abandoned claim to the reaper)."""
+    r = _run_liveness(tmp_path, 'record_cycle_pid 12345; echo done')
+    assert r.returncode == 0, r.stderr
+    assert not (tmp_path / "state" / "workers" / "0.pid").exists()
+    assert "could not record cycle pid" in (tmp_path / "state" / "logs" / "orbit.log").read_text()
+
+
+# ── the loop pid file: "slot N is owned", idle naps included ───────────────
+
+def _run_loop_liveness(tmp_path, tail, slot="0"):
+    state = tmp_path / "state"
+    (state / "logs").mkdir(parents=True, exist_ok=True)
+    script = (f'STATE="$1"; SLOT="$2"; LOGDIR="$STATE/logs"\n'
+              'LOOP_PID_FILE="$STATE/workers/loop-$SLOT.pid"\n'
+              'ts(){ echo TS; }\n'
+              'logf(){ echo "$*" >> "$LOGDIR/orbit.log"; }\n'
+              + _LOOP_LIVENESS + "\n" + tail)
+    return subprocess.run(["bash", "-uo", "pipefail", "-c", script, "bash", str(state), slot],
+                          capture_output=True, text=True, env=dict(os.environ))
+
+
+def test_write_loop_pid_writes_the_shape_the_launcher_reads(tmp_path):
+    r = _run_loop_liveness(tmp_path, 'write_loop_pid; echo "$$"', slot="2")
+    assert r.returncode == 0, r.stderr
+    info = json.loads((tmp_path / "state" / "workers" / "loop-2.pid").read_text())
+    assert info["slot"] == "2"
+    assert isinstance(info["pid"], int) and info["pid"] > 0
+    assert info["started"].endswith("Z") and len(info["started"]) == 20
+
+
+def test_clear_loop_pid_removes_it_and_is_idempotent(tmp_path):
+    r = _run_loop_liveness(tmp_path, 'write_loop_pid; clear_loop_pid; clear_loop_pid')
+    assert r.returncode == 0, r.stderr
+    assert not (tmp_path / "state" / "workers" / "loop-0.pid").exists()
+
+
+def test_loop_pid_file_is_written_at_startup_and_dropped_by_the_exit_trap():
+    """It has to cover the loop's whole life - written before the first
+    iteration, removed on the way out - or an idle slot reads as unowned and
+    Start puts a second process on it."""
+    up_at = RUN_SH.index('log "==== orbit up')
+    assert up_at < RUN_SH.index("write_loop_pid\n")
+    assert RUN_SH.index("write_loop_pid\n") < RUN_SH.index("while true; do")
+    assert "trap 'clear_worker_pid; clear_loop_pid' EXIT" in RUN_SH
+    assert 'LOOP_PID_FILE="$STATE/workers/loop-$SLOT.pid"' in RUN_SH
+
+
+# ── the concurrency bound, clamped in the shell ────────────────────────────
+
+def _run_bound(slots_env):
+    script = ('SLOTS="$1"\n' + _BOUND + '\necho "$SLOTS|$SLOTS_WARN"\n')
+    r = subprocess.run(["bash", "-uo", "pipefail", "-c", script, "bash", slots_env],
+                       capture_output=True, text=True, env=dict(os.environ))
+    assert r.returncode == 0, r.stderr
+    slots, warn = r.stdout.strip().split("|", 1)
+    return slots, warn
+
+
+@pytest.mark.parametrize("given,expect", [("1", "1"), ("2", "2"), ("32", "32")])
+def test_run_sh_leaves_in_range_slot_counts_alone(given, expect):
+    slots, warn = _run_bound(given)
+    assert slots == expect
+    assert warn == ""
+
+
+@pytest.mark.parametrize("given,expect", [("0", "1"), ("33", "32"), ("999", "32"),
+                                          ("", "1"), ("two", "1"), ("1.5", "1")])
+def test_run_sh_clamps_out_of_range_slot_counts_and_warns(given, expect):
+    """ORBIT_SLOTS can be set by hand or by a service unit older than the
+    bound, so config.py validate is not the last line of defence. Clamping
+    beats refusing to boot - but never silently."""
+    slots, warn = _run_bound(given)
+    assert slots == expect
+    assert warn and "clamped" in warn
+
+
 def test_clear_worker_pid_removes_it(tmp_path):
     r = _run_liveness(tmp_path, 'write_worker_pid t1; clear_worker_pid; clear_worker_pid')
     assert r.returncode == 0, r.stderr
@@ -467,33 +592,79 @@ def test_worker_pid_file_is_written_right_after_the_claim_and_released_after():
     run_at = RUN_SH.index('run_cycle "$cyclelog" "$tid"')
     assert claim_at < write_at < run_at, "the pid file must be written between the claim and the cycle"
     assert RUN_SH.count("release_task\n") >= 4, "every post-cycle exit path must release the task"
-    assert "trap 'clear_worker_pid' EXIT" in RUN_SH
+    assert "trap 'clear_worker_pid; clear_loop_pid' EXIT" in RUN_SH
 
 
 def test_no_signal_traps_are_installed():
     """A TERM/INT trap would be run only AFTER the current foreground command
     finishes, so `kill` (or a launchd stop) would have to wait out a `sleep 600`
     or a whole cycle instead of ending the process at once, as it does today. A
-    leaked pid file is harmless by comparison: the reaper only believes one whose
-    pid is still alive."""
+    leaked pid file is harmless by comparison: every reader believes one only
+    while its pid is still alive."""
     traps = [ln.strip() for ln in RUN_SH.splitlines() if ln.strip().startswith("trap ")]
-    assert traps == ["trap 'clear_worker_pid' EXIT"], traps
+    assert traps == ["trap 'clear_worker_pid; clear_loop_pid' EXIT"], traps
 
 
 def test_watchdog_stays_detached_from_the_command_substitution_pipe():
     """Regression guard, NOT a style check: if the watchdog subshell inherits
     one_iteration's stdout pipe, killing it orphans the `sleep` holding the
     pipe's write end open and the whole loop wedges for a full CYCLE_TIMEOUT."""
-    assert ('( sleep "$CYCLE_TIMEOUT"; kill -TERM "$cpid" 2>/dev/null; sleep 10; '
-            'kill -KILL "$cpid" 2>/dev/null ) </dev/null >/dev/null 2>&1 &') in RUN_SH
+    assert ('( sleep "$CYCLE_TIMEOUT"; { kill -TERM -"$cpid" || kill -TERM "$cpid"; } 2>/dev/null; '
+            'sleep 10; { kill -KILL -"$cpid" || kill -KILL "$cpid"; } 2>/dev/null ) '
+            '</dev/null >/dev/null 2>&1 &') in RUN_SH
     assert 'pkill -P "$wpid"' in RUN_SH
 
 
+def test_watchdog_kills_the_cycles_group_with_a_bare_pid_fallback():
+    """The cycle leads its own group now (see the session wrapper), so the
+    watchdog can and must take the whole cycle tree: TERMing only $cpid hits
+    the caffeinate wrapper, which does not forward signals, leaving claude
+    running while the loop believes it killed the cycle. The `||` fallback
+    covers a cycle that leads no group (setsid refused)."""
+    wd = RUN_SH.split("# Watchdog:", 1)[1].split("local wpid", 1)[0]
+    assert 'kill -TERM -"$cpid" || kill -TERM "$cpid"' in wd
+    assert 'kill -KILL -"$cpid" || kill -KILL "$cpid"' in wd
+
+
 def test_stop_is_still_checked_only_at_the_top_of_the_outer_loop():
-    """STOP stops new claims; it must never abort an in-flight cycle."""
-    assert RUN_SH.count('[ -f "$STOP_FILE" ]') == 1
-    top = RUN_SH.split("while true; do", 1)[1]
-    assert '[ -f "$STOP_FILE" ]' in top.split("status=\"$(one_iteration)\"", 1)[0]
+    """STOP stops new claims; it must never abort an in-flight cycle. Two
+    checks now: the outer loop's, and the ONE_SHOT seam's (which is a
+    different admission point, not a second check inside the loop)."""
+    assert RUN_SH.count('[ -f "$STOP_FILE" ]') == 2
+    loop = RUN_SH.split("while true; do", 1)[1]
+    assert loop.count('[ -f "$STOP_FILE" ]') == 1
+    assert '[ -f "$STOP_FILE" ]' in loop.split("status=\"$(one_iteration)\"", 1)[0]
+
+
+def test_one_shot_honors_stop():
+    """F9: ORBIT_ONE_SHOT was the one path that walked past the workspace kill
+    switch. A smoke that wants its iteration disarms STOP explicitly."""
+    one_shot = RUN_SH.split('if [ "$ONE_SHOT" = "1" ]; then', 1)[1].split("while true; do", 1)[0]
+    stop_at = one_shot.index('[ -f "$STOP_FILE" ]')
+    assert stop_at < one_shot.index('one_iteration'), "STOP must be checked BEFORE the iteration"
+    assert 'exit 0' in one_shot[stop_at:]
+
+
+def test_the_cycle_runs_in_its_own_session():
+    """F2/C2: without this the cycle shares the loop's process group, so any
+    signal aimed at the cycle (Abort, the watchdog's group kill) hits the loop
+    too. python3 os.setsid+execvp is the portable mechanism - setsid(1) does
+    not exist on macOS and `set -m` is interactive-only."""
+    assert "os.setsid()" in RUN_SH
+    assert "os.execvp(sys.argv[1], sys.argv[1:])" in RUN_SH
+    assert 'python3 -c "$CYCLE_SESSION_PY" $caff "$CLAUDE_BIN" --print "$prompt"' in RUN_SH
+    # ...and the cycle's identity is recorded where an aborter can find it,
+    # after the spawn (the pid does not exist before it) and before the wait.
+    spawn = RUN_SH.index('local cpid=$!')
+    assert spawn < RUN_SH.index('record_cycle_pid "$cpid"') < RUN_SH.index('wait "$cpid"')
+
+
+def test_slots_max_matches_config_pys_concurrency_bound():
+    """ONE concurrency contract: run.sh clamps to the same ceiling config.py
+    validate refuses above."""
+    sys.path.insert(0, str(ENGINE))
+    import config
+    assert f"SLOTS_MAX={config.CONCURRENCY_MAX}" in RUN_SH
 
 
 def test_the_no_commit_escalation_net_is_keyed_on_ledger_state():

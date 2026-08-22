@@ -33,6 +33,27 @@ REPO="$ORBIT_REPO"
 # (`orbit install`); this script only ever is one of them.
 SLOT="${ORBIT_SLOT:-0}"
 SLOTS="${ORBIT_SLOTS:-${ORBIT_CONCURRENCY:-1}}"
+# --- concurrency bound (extracted verbatim by tests/test_slot_loop.py) --------
+# Clamps $SLOTS to 1..SLOTS_MAX.
+# ONE contract, four enforcement points: config.py's CONCURRENCY_MAX (which
+# `config.py validate` refuses out-of-range values against), the dashboard's
+# Admin patch validator, the launcher's clamp, and this. Here it CLAMPS instead
+# of exiting: ORBIT_SLOTS can be set by hand or by a service unit written
+# before the bound existed, and a loop that refuses to boot is worse than one
+# running the nearest legal slot count. Keep SLOTS_MAX in step with
+# config.py's CONCURRENCY_MAX (tests/test_slot_loop.py asserts they agree).
+SLOTS_MAX=32
+# The WARN is deferred: log() needs $LOGDIR, which is not resolved yet.
+SLOTS_WARN=""
+case "$SLOTS" in
+  ''|*[!0-9]*) SLOTS_WARN="slot count '$SLOTS' is not a number - clamped to 1"; SLOTS=1 ;;
+esac
+if [ "$SLOTS" -lt 1 ]; then
+  SLOTS_WARN="slot count $SLOTS is below the 1..$SLOTS_MAX bound - clamped to 1"; SLOTS=1
+elif [ "$SLOTS" -gt "$SLOTS_MAX" ]; then
+  SLOTS_WARN="slot count $SLOTS is above the 1..$SLOTS_MAX bound - clamped to $SLOTS_MAX"; SLOTS="$SLOTS_MAX"
+fi
+# --- end concurrency bound ---
 # Per-slot worktree. Two slots resetting ONE worktree to origin/<base> would
 # stomp each other's checkout mid-cycle, so the path carries the slot number.
 # AP_WORKTREE still wins (an explicit operator override, unchanged). Slot 0's
@@ -79,6 +100,11 @@ MARKER="$STATE/.current-task-id$SFX"
 CAND_MARKER="$STATE/.cycle-candidate$SFX"
 IDLE_MARKER="$STATE/.idle-reason$SFX"
 WORKER_PID_FILE="$STATE/workers/$SLOT.pid"
+# The LOOP's own file, for this process's whole lifetime (the worker file above
+# exists only while a task is in flight). `loop-` prefixed so the per-cycle
+# glob can tell the two apart by stem: <slot>.pid is a numeric stem, this one
+# never is (command_center.workers_state, launcher._live_workers).
+LOOP_PID_FILE="$STATE/workers/loop-$SLOT.pid"
 export AP_HOME AP_STATE ORBIT_HOME
 export AP_BASE_BRANCH="$ORBIT_BASE_BRANCH"   # the cycle reads this to branch/diff against the right base
 # Children (the cycle, autopromote, anything the cycle shells out to) must see
@@ -103,6 +129,9 @@ log(){ echo "[$(ts)] [slot $SLOT] $*" | tee -a "$LOGDIR/orbit.log"; }
 # word the outer loop dispatches on) and so is claim_first's (the id it won), so
 # any code whose stdout is read by a caller must log with this, never log().
 logf(){ echo "[$(ts)] [slot $SLOT] $*" >> "$LOGDIR/orbit.log"; }
+# Deferred from the slot-identity block above (log() only works once LOGDIR is
+# resolved): say out loud that the requested slot count was not the one used.
+[ -n "$SLOTS_WARN" ] && log "WARN: $SLOTS_WARN"
 today(){ date '+%Y-%m-%d'; }
 DASH="${ORBIT_DASHBOARD_URL:-http://127.0.0.1:8787}"
 notify(){ python3 "$ENGINE/notify.py" "$1" "$2" "${3:-}" >/dev/null 2>&1 || true; }
@@ -177,7 +206,77 @@ PYEOF
   fi
 }
 clear_worker_pid(){ rm -f "$WORKER_PID_FILE" 2>/dev/null || true; }
+# Fold the RUNNING CYCLE's identity into the same file, the instant it exists
+# ($1 = the cycle's pid). This is the only place an Abort can learn which
+# process to kill: before it existed, command_center's Abort had nothing to
+# aim at but the pid in this file - which is the LOOP's pid - so aborting one
+# task killed the whole slot loop. `cycle_pgid` is written ONLY when the cycle
+# really leads its own process group (see run_cycle's session wrapper),
+# because an aborter that killpg'd a cycle sharing the loop's group would take
+# the loop down exactly as before.
+record_cycle_pid() {
+  local json
+  json="$(python3 - "$WORKER_PID_FILE" "$1" <<'PYEOF'
+import json, os, sys, time
+path, cpid = sys.argv[1], int(sys.argv[2])
+rec = json.load(open(path))
+if not isinstance(rec, dict) or not rec.get("pid"):
+    raise SystemExit("worker pid file has no pid")
+rec["cycle_pid"] = cpid
+# The wrapper calls setsid() only after it is exec'd, so the group may not be
+# its own yet the instant the shell hands us $!. Poll briefly (2s ceiling; a
+# cycle runs for minutes) rather than record a pgid that is still the loop's.
+for _ in range(40):
+    try:
+        if os.getpgid(cpid) == cpid:
+            rec["cycle_pgid"] = cpid
+            break
+    except OSError:
+        break          # already gone - nothing to abort, nothing to record
+    time.sleep(0.05)
+print(json.dumps(rec))
+PYEOF
+)"
+  if [ -n "$json" ]; then
+    printf '%s\n' "$json" > "$WORKER_PID_FILE.tmp$$" \
+      && mv -f "$WORKER_PID_FILE.tmp$$" "$WORKER_PID_FILE"
+  else
+    logf "WARN: could not record cycle pid $1 in $WORKER_PID_FILE - Abort will have no cycle to aim at"
+  fi
+}
 # --- end worker liveness ---
+
+# --- loop liveness (extracted verbatim by tests/test_slot_loop.py) ---
+# "Slot <N> of this workspace is OWNED" - written once at startup, removed by
+# the EXIT trap, and true for the loop's WHOLE life, idle naps included. The
+# per-task file above cannot answer that: it is absent between cycles, which
+# is why the launcher used to fall back to guessing from orbit.log + STOP
+# ("this workspace has run before and is not stopped, so it must be running").
+# That guess is what let Start put a SECOND process on a paused-but-live slot.
+# A file left behind by a hard-killed loop is not a hazard: every reader
+# checks the recorded pid for liveness first, so a dead loop's file reads as
+# an unowned slot.
+write_loop_pid() {
+  local json
+  json="$(python3 - "$$" "$SLOT" <<'PYEOF'
+import json, sys
+from datetime import datetime, timezone
+print(json.dumps({"pid": int(sys.argv[1]), "slot": sys.argv[2],
+                  "started": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}))
+PYEOF
+)"
+  if [ -n "$json" ]; then
+    mkdir -p "$(dirname "$LOOP_PID_FILE")" 2>/dev/null || true
+    # tmp+rename for the same reason as the worker file: readers poll it at
+    # arbitrary moments and a torn read parses as "slot not owned".
+    printf '%s\n' "$json" > "$LOOP_PID_FILE.tmp$$" \
+      && mv -f "$LOOP_PID_FILE.tmp$$" "$LOOP_PID_FILE"
+  else
+    logf "WARN: could not write $LOOP_PID_FILE - the launcher may offer to start a second loop on slot $SLOT"
+  fi
+}
+clear_loop_pid(){ rm -f "$LOOP_PID_FILE" 2>/dev/null || true; }
+# --- end loop liveness ---
 
 # Per-slot task markers + this slot's liveness, all dropped together: the task
 # is no longer in flight, so nothing may still name it. Every path out of
@@ -397,6 +496,28 @@ raise_pr() {
   fi
 }
 
+# --- cycle session wrapper (extracted verbatim by tests/test_slot_loop.py) ---
+# The cycle runs in its OWN session (hence its own process group), so a signal
+# aimed at the cycle can never reach this loop - the C2 bug: Abort killed the
+# loop's process group, taking the slot's wrapper down with the task.
+#
+# Mechanism, and why this one: `setsid(1)` does not exist on macOS (util-linux
+# only), and bash's own job control (`set -m`) only creates per-job groups in
+# an INTERACTIVE shell, which the loop never is. What is portable everywhere
+# orbit already requires python3 is a two-line exec wrapper: it calls
+# os.setsid() and then execvp()s the real command, so the process bash records
+# as $! IS the cycle's session leader - exec replaces the process image, so no
+# extra pid, no extra wait(), no orphan. EPERM from setsid() means the process
+# is ALREADY a group leader (an interactive shell with job control started it),
+# which is the isolation we wanted anyway, so it is ignored.
+CYCLE_SESSION_PY='import os, sys
+try:
+    os.setsid()
+except OSError:
+    pass
+os.execvp(sys.argv[1], sys.argv[1:])'
+# --- end cycle session wrapper ---
+
 run_cycle() {
   local out="$1"; cd "$WT" || return 1
   # The task is already claimed by the wrapper, so the cycle is TOLD which one to
@@ -407,12 +528,15 @@ run_cycle() {
   local caff=""; command -v caffeinate >/dev/null 2>&1 && caff="caffeinate -i"
   local mcp_args=()
   [ -n "${MCP_CONFIG:-}" ] && mcp_args=(--mcp-config "$MCP_CONFIG" --strict-mcp-config)
-  $caff "$CLAUDE_BIN" --print "$prompt" \
+  python3 -c "$CYCLE_SESSION_PY" $caff "$CLAUDE_BIN" --print "$prompt" \
       --permission-mode "$PERM" --settings "${CYCLE_SETTINGS:-$SETTINGS}" --model "$MODEL" \
       --add-dir "$REPO" --add-dir "$ORBIT_HOME" \
       "${mcp_args[@]:+"${mcp_args[@]}"}" \
       --output-format stream-json --verbose >"$out" 2>&1 </dev/null &
   local cpid=$!
+  # Tell the pid file which process IS this cycle, before anything can want to
+  # abort it (see record_cycle_pid).
+  record_cycle_pid "$cpid"
   # Watchdog: hard-kill the cycle if it outruns CYCLE_TIMEOUT.
   # CRITICAL: run_cycle executes inside status="$(one_iteration)", whose stdout is a
   # pipe. If the watchdog (and its `sleep`) inherit that pipe, killing the subshell
@@ -420,7 +544,14 @@ run_cycle() {
   # substitution never gets EOF and the whole loop wedges for the full CYCLE_TIMEOUT
   # (~1h). Redirect all of the watchdog's fds off the pipe, and kill its sleep child
   # on teardown so nothing is left holding it.
-  ( sleep "$CYCLE_TIMEOUT"; kill -TERM "$cpid" 2>/dev/null; sleep 10; kill -KILL "$cpid" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
+  # The kill targets the cycle's GROUP (`-$cpid`) first: now that the cycle is
+  # its own session leader, the group is exactly the cycle tree - claude, the
+  # caffeinate wrapper, every node child - and none of this loop. Killing only
+  # $cpid would TERM the caffeinate wrapper and leave claude running (it does
+  # not forward signals), so the watchdog would report a kill it did not make.
+  # The bare-pid fallback covers the one case where setsid() was refused and
+  # $cpid therefore leads no group of its own.
+  ( sleep "$CYCLE_TIMEOUT"; { kill -TERM -"$cpid" || kill -TERM "$cpid"; } 2>/dev/null; sleep 10; { kill -KILL -"$cpid" || kill -KILL "$cpid"; } 2>/dev/null ) </dev/null >/dev/null 2>&1 &
   local wpid=$!
   wait "$cpid"; local rc=$?
   pkill -P "$wpid" 2>/dev/null || true   # kill the watchdog's sleep child first
@@ -676,8 +807,12 @@ set_idle_reason(){ echo "$1 $(( $(date +%s) + ${2:-0} ))" > "$IDLE_MARKER"; }
 # the reaper only believes one whose pid is still ALIVE (ledger.py
 # `_slot_worker_matches`), so a dead slot's file reads as "not live" and its task
 # gets escalated exactly as it should.
-trap 'clear_worker_pid' EXIT
+trap 'clear_worker_pid; clear_loop_pid' EXIT
 log "==== orbit up (pid $$) slot $SLOT of $SLOTS target=$TARGET model=$MODEL base=$ORBIT_BASE_BRANCH ===="
+# Claim the slot for this process's whole lifetime (see the loop liveness
+# block): from here on, anything asking "is slot $SLOT taken?" gets a
+# definitive answer instead of a heuristic.
+write_loop_pid
 # Said once per start, because nothing else will ever mention it again: the
 # pre-slot worktree is now orphaned and no loop will touch it, so an operator
 # reading the log knows both that it is safe to delete and that it is theirs to
@@ -687,11 +822,21 @@ if [ "$WT" != "${REPO}-orbit-worktree" ] && [ -d "${REPO}-orbit-worktree" ]; the
   log "note: ${REPO}-orbit-worktree is the pre-slot worktree and is no longer used — remove it with 'git -C $REPO worktree remove --force ${REPO}-orbit-worktree' once you have checked it holds nothing you want"
 fi
 if [ "$ONE_SHOT" = "1" ]; then
-  # Bypasses STOP/daily-cap admission on purpose - those gate the infinite loop
-  # below, and a one-shot smoke wants THIS iteration to run, not to idle on a
-  # marker meant for an unattended deployment. Bookkeeping (count_cycle) still
-  # runs on OK/FAIL, matching the loop's own accounting, so a smoke's
-  # spend/count files come out exactly as if the normal loop had ticked once.
+  # STOP is honoured here too. It is the workspace kill switch - "claim
+  # nothing here" - and a mode that claimed anyway would be the single path in
+  # the engine that walks past it. A smoke that wants its iteration to happen
+  # disarms STOP explicitly (rm -f "$AP_STATE/STOP"), which is deliberate and
+  # visible, instead of relying on a flag that silently overrides it.
+  if [ -f "$STOP_FILE" ]; then
+    log "STOP present - ORBIT_ONE_SHOT claims nothing (remove $STOP_FILE first)."
+    set_idle_reason "stopped" 60
+    exit 0
+  fi
+  # The DAILY CAP is still bypassed on purpose - that paces an unattended
+  # deployment, it is not a kill switch, and a one-shot run wants THIS
+  # iteration. Bookkeeping (count_cycle) still runs on OK/FAIL, matching the
+  # loop's own accounting, so a smoke's spend/count files come out exactly as
+  # if the normal loop had ticked once.
   status="$(one_iteration)"; status="${status##*$'\n'}"
   case "$status" in OK|FAIL) count_cycle >/dev/null 2>&1 || true ;; esac
   log "ORBIT_ONE_SHOT set - exiting after one iteration (status=$status)."
