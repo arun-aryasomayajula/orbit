@@ -66,8 +66,8 @@ goldens:
     insight: always              # no dedicated card yet — verify-before-done applies
     funnel: always                # no dedicated card yet - verify-before-done applies
     hypothesis: always            # no dedicated card yet - verify-before-done applies
-    survey_design: always         # Task 5 stub - no dedicated card yet
-    survey_analysis: always       # Task 5 stub - no dedicated card yet
+    survey_design: always          # no dedicated card yet - verify-before-done applies
+    survey_analysis: always        # no dedicated card yet - verify-before-done applies
     # dependencies / developer_experience / observability / infrastructure → `always` card only
 
 # category → routing. `policy`: allow = auto-pickable; human = only if forced:true
@@ -156,7 +156,7 @@ categories:
     maker: { agent: analyst, model: opus, effort: high }
     skill: orbit-survey-design      # methodology brief (skills/orbit-survey-design.md)
     tracks: []
-    discipline: design a grounded survey instrument; doc must pass insight_lint
+    discipline: design a grounded survey instrument; writes meta.json + questionnaire.md per the skill contract (not insight_lint-gated - that's the analysis stage's report.md)
 
   survey_analysis:
     policy: allow
