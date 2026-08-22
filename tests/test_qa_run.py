@@ -1039,6 +1039,99 @@ def test_regression_stale_lock_is_replaced_and_sweep_runs(tmp_path):
     assert not lock_path.exists()                  # released after
 
 
+# --- F4: ONE qa.services mutex, shared with the loop's QA gate and the
+# dashboard's Dev session. Distinct from `.qa-running` (which stops two QA
+# RUNS overlapping): this stops two qa.services CONSUMERS fighting over the
+# app's fixed local ports, and most of those consumers are not QA runs. ------
+
+def _cfg_with_services(**kw):
+    return qa_cfg_with_regression(**kw) + (
+        "  services:\n"
+        '    - name: web\n'
+        '      launch: "true"\n')
+
+
+def _hold_services_lock(r):
+    """Hold $AP_STATE/qa/.services.lock from a LIVE child process, the way the
+    loop's QA gate holds it across its claude invocation. A live holder is
+    what makes the sweep's skip meaningful - locks.hold breaks a lock whose
+    recorded pid is dead."""
+    code = textwrap.dedent("""\
+        import sys, time
+        sys.path.insert(0, sys.argv[1])
+        import locks
+        with locks.hold(sys.argv[2], timeout=10):
+            print("held", flush=True)
+            time.sleep(30)
+        """)
+    lock = r / ".autopilot" / "state" / "qa" / ".services.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.Popen([sys.executable, "-c", code, str(ENGINE), str(lock)],
+                            stdout=subprocess.PIPE, text=True)
+    assert proc.stdout.readline().strip() == "held"     # in the critical section
+    return proc, lock
+
+
+def test_regression_skips_cleanly_while_the_qa_gate_holds_the_services_lock(tmp_path):
+    r = repo(tmp_path, _cfg_with_services(timeout_seconds=5))
+    flow_dir = teach_flow(r, name="approved-flow")
+    approve(flow_dir)
+    holder, lock = _hold_services_lock(r)
+    try:
+        agent = fake_agent_by_flow(tmp_path, {})
+        result = run_regression(r, run_cmd=agent)
+        out = result.stdout + result.stderr
+        assert result.returncode == 0, out          # a benign skip, never a failure
+        assert "qa.services consumer holds" in out
+        assert meta(flow_dir)["runs"] == 0          # the agent was never invoked
+        # ...and the run's OWN lock is handed back, so the next tick is free to try
+        assert not (r / ".autopilot" / "state" / "qa" / ".qa-running").exists()
+    finally:
+        holder.terminate()
+        holder.wait(timeout=10)
+
+
+def test_regression_sweeps_once_the_services_lock_is_free(tmp_path):
+    """The other side of the same switch: with nobody holding the mutex the
+    sweep runs normally, and hands the mutex back when it is done."""
+    r = repo(tmp_path, _cfg_with_services(timeout_seconds=5))
+    flow_dir = teach_flow(r, name="approved-flow")
+    approve(flow_dir)
+    agent = fake_agent_by_flow(tmp_path, {})
+    result = run_regression(r, run_cmd=agent)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert meta(flow_dir)["runs"] == 1
+    # locks.hold never unlinks (see its docstring), so the file is expected to
+    # exist - what matters is that it is not HELD any more.
+    lock = r / ".autopilot" / "state" / "qa" / ".services.lock"
+    import locks as _locks
+    with _locks.hold(lock, timeout=2):
+        pass
+
+
+def test_a_target_without_qa_services_never_touches_the_mutex(tmp_path):
+    """No services configured means nothing binds a port, so there is nothing
+    to serialize - and no lock file should appear at all."""
+    r = repo(tmp_path, qa_cfg_with_regression(timeout_seconds=5))
+    flow_dir = teach_flow(r, name="approved-flow")
+    approve(flow_dir)
+    result = run_regression(r, run_cmd=fake_agent_by_flow(tmp_path, {}))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert meta(flow_dir)["runs"] == 1
+    assert not (r / ".autopilot" / "state" / "qa" / ".services.lock").exists()
+
+
+def test_explore_and_generate_take_the_same_services_mutex():
+    """Source-level guard: all three qa_run paths that drive the running app
+    go through the one helper, and it resolves the path from qa_check (the
+    single definition) rather than restating the filename."""
+    src = QA_RUN.read_text()
+    for mode in ("regression", "explore", "generate"):
+        assert f'_services_lock(qa_cfg, ap_state, "{mode}")' in src
+    assert "qa_check.services_lock_path(ap_state)" in src
+    assert src.count('".services.lock"') == 0     # never spelled out here
+
+
 def test_regression_lock_removed_after_a_failing_sweep(tmp_path):
     r = repo(tmp_path, qa_cfg_with_regression())
     flow_dir = teach_flow(r, name="approved-flow")

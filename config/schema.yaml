@@ -15,6 +15,24 @@ permission_mode: "acceptEdits"   # claude --permission-mode. Deletes/push stay d
 interval_seconds: 180        # sleep between cycles
 max_tasks_per_day: 12        # hard daily cap (failed cycles count too)
 cycle_timeout_seconds: 3600  # watchdog kill per cycle
+concurrency: 1               # how many task cycles run in parallel. Each "slot" is one independent
+                             # worker (its own worktree, its own claim); the ledger's exclusive claim
+                             # guarantees no two slots ever work the same task. Must be 1..32.
+                             # 1 = one worker, which is byte-for-byte today's behaviour.
+                             #
+                             # WHAT ACTUALLY STARTS THE SLOTS, today: the installed background
+                             # service (`orbit install`, launchd/systemd) runs SLOT 0 ONLY - it is a
+                             # single unit with no ORBIT_SLOT set, so raising this number does not
+                             # make it start more. The extra slots come from the launcher's per-tab
+                             # Start control (`orbit web`, see README "Concurrency and the
+                             # launcher"), which spawns one process per slot, or from running
+                             # `ORBIT_SLOT=<n> engine/run.sh <target>` by hand. Multi-slot service
+                             # units are planned (M5).
+                             #
+                             # Raising it still changes behaviour with one slot running: auto-feed
+                             # tops the queue up to `concurrency` pickable tasks. Slot 0 is this
+                             # workspace's housekeeper (reap, autoclose, queue regen, sweeps)
+                             # regardless of how many slots run.
 
 # --- where the human gates live ------------------------------------------------
 dashboard_url: "http://127.0.0.1:8787"   # linked from Slack notifications + the digest, so every

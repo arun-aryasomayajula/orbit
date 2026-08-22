@@ -23,12 +23,14 @@ by re-running backlog_to_tasks.py so the loop queue reflects them immediately.
 """
 from __future__ import annotations
 import atexit
+import contextlib
 import hmac
 import json
 import os
 import re
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -78,6 +80,7 @@ STATE = AP_STATE / "STATE.md"
 STOP = AP_STATE / "STOP"
 SKIPS = AP_STATE / "skips.txt"
 MARKER = AP_STATE / ".current-task-id"
+WORKERS_DIR = AP_STATE / "workers"   # per-slot <slot>.pid liveness files (run.sh write_worker_pid)
 FEATURE_BUILDS = AP_STATE / "feature_builds.json"   # dedicated feature-agent builds (outside the loop)
 AUTO_PROMOTE = AP_STATE / "AUTO_PROMOTE"   # presence = auto-feed ON (wrapper reads it)
 LOGDIR = AP_STATE / "logs"
@@ -89,7 +92,16 @@ CONVERTER = ENGINE / "backlog_to_tasks.py"
 # driven by the SAME rules, never a client-side guess.
 sys.path.insert(0, str(ENGINE))
 import lifecycle  # noqa: E402
+import locks  # noqa: E402
+# qa_check resolves its own AP_STATE/AP_HOME at import time, which is why
+# qa_run.py imports it lazily; here those are already resolved above, so a
+# module-level import is safe. Imported for the ONE qa.services mutex
+# (services_lock_path) - the Dev session is one of its consumers.
+import qa_check  # noqa: E402
 from backlog_lint import KNOWN_CATEGORIES  # noqa: E402
+# The ONE concurrency ceiling (see engine/config.py) - imported, never
+# re-stated, so the Admin panel and the loop's preflight can never disagree.
+from config import CONCURRENCY_MAX  # noqa: E402
 
 
 def _resolve_base_branch() -> str:
@@ -238,12 +250,73 @@ def _ts_to_epoch(s: str) -> float | None:
 
 
 def cycle_pids() -> list[int]:
-    """PIDs of the in-flight cycle (claude --print /orbit-cycle + its caffeinate)."""
+    """PIDs of every orbit-cycle process on the MACHINE (claude --print
+    /orbit-cycle + its caffeinate) - a machine-wide pgrep, so it cannot tell
+    ours from an unrelated deployment's, or one slot's from another's. Kept
+    only as a legacy fallback (single-slot deployments, or a state dir from
+    before T4's per-slot pid files existed) - see workers_state()/do_killtask
+    for the identity-aware replacement everything else now prefers."""
     try:
         out = subprocess.run(["pgrep", "-f", "orbit-cycle"], capture_output=True, text=True).stdout
         return [int(x) for x in out.split()]
     except Exception:
         return []
+
+
+def workers_state() -> list | None:
+    """Per-slot worker liveness for the dashboard's workers strip: one entry
+    per $AP_STATE/workers/<slot>.pid file (run.sh's write_worker_pid - {pid,
+    tid, started}, removed the instant a cycle ends), each stamped with
+    `alive` (locks.pid_alive on the recorded pid - the ONLY trustworthy
+    "still in flight" signal per ledger.py's _slot_worker_matches docstring;
+    the loop's own pid outlives any single task).
+
+    None (key omitted from build_state) when there is nothing worth a strip:
+    the dir is empty or missing AND concurrency is 1 - the overwhelming
+    majority of deployments today, which must see a byte-identical
+    /api/state (same discipline as watches_state/qa_services_state). Once
+    concurrency > 1, [] is returned instead of None even with no pid files
+    yet (dir freshly created, nothing claimed) - an operator who just turned
+    on concurrency and is looking for the strip needs to see "no workers
+    right now", not have it vanish.
+
+    Only NUMERIC stems are per-cycle worker files. The same directory also
+    holds run.sh's lifetime `loop-<slot>.pid` files, which say "this slot is
+    owned" rather than "this task is in flight" - counting one as a worker
+    would put a permanent phantom row on the strip and, worse, make `live`
+    (build_state) read as a running cycle for as long as the loop is up."""
+    concurrency = 1
+    try:
+        concurrency = int(_load_cfg().get("concurrency") or 1)
+    except (TypeError, ValueError):
+        pass
+    try:
+        pid_files = sorted(p for p in WORKERS_DIR.glob("*.pid")
+                           if p.stem.isdigit()) if WORKERS_DIR.is_dir() else []
+    except OSError:
+        pid_files = []
+    if not pid_files and concurrency <= 1:
+        return None
+    out = []
+    for p in pid_files:
+        try:
+            info = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue   # a torn tmp+rename read - same tolerance as every other state-file parse here
+        if not isinstance(info, dict):
+            continue
+        pid = info.get("pid")
+        # cycle_pid/cycle_pgid: the CYCLE this slot is running, as opposed to
+        # `pid` (the slot loop). Absent until run.sh's record_cycle_pid has
+        # run; cycle_pgid additionally absent unless the cycle leads its own
+        # process group. do_killtask is the consumer - see its docstring.
+        out.append({"slot": p.stem, "pid": pid, "tid": info.get("tid"),
+                    "started": info.get("started"),
+                    "cycle_pid": info.get("cycle_pid"),
+                    "cycle_pgid": info.get("cycle_pgid"),
+                    "alive": pid is not None and locks.pid_alive(pid)})
+    out.sort(key=lambda w: (int(w["slot"]) if str(w["slot"]).isdigit() else 0, w["slot"]))
+    return out
 
 
 def loop_loaded() -> bool:
@@ -254,22 +327,63 @@ def loop_loaded() -> bool:
         return False
 
 
-def probe_runtime() -> dict:
-    """Everything the live console needs that isn't in backlog/ledger."""
+_CYCLE_LOG_STAMP = re.compile(r"(\d{8}T\d{6})\.log$")
+_CYCLE_LOG_TID = re.compile(r"^cycle-(.+)-\d{8}T\d{6}\.log$")
+
+
+def _cycle_log_stamp(name: str) -> str:
+    """The start stamp in a cycle log's filename, '' if there isn't one. Two
+    shapes exist: the historical cycle-<ts>.log and the slot loop's
+    cycle-<tid>-<ts>.log — whose task id makes a plain lexicographic sort of the
+    filenames meaningless, hence sorting on this instead."""
+    m = _CYCLE_LOG_STAMP.search(name)
+    return m.group(1) if m else ""
+
+
+def _cycle_log_tid(name: str) -> str:
+    """The task id embedded in a slot loop's cycle-<tid>-<ts>.log filename,
+    '' for the historical cycle-<ts>.log shape (no tid at all) or anything
+    that doesn't match."""
+    m = _CYCLE_LOG_TID.match(name)
+    return m.group(1) if m else ""
+
+
+def probe_runtime(workers: list | None = None) -> dict:
+    """Everything the live console needs that isn't in backlog/ledger.
+
+    `workers`: build_state already computed workers_state() for its own
+    `live`/`workers` keys, and every pid file it reads would otherwise be
+    read and liveness-probed a SECOND time here, once per 3-second poll.
+    Pass it in. Omitted (None) means "compute it myself" - the standalone
+    callers and tests that call probe_runtime() on its own."""
+    if workers is None:
+        workers = workers_state()
     pids = cycle_pids()
     running = bool(pids)
-    # Cycle start = the timestamp encoded in the newest cycle-<ts>.log filename
+    # Cycle start = the timestamp encoded in the newest cycle log's filename
     # (created at cycle start; --print only flushes the body at the end, so the
-    # filename is the reliable start clock).
+    # filename is the reliable start clock). The newest stamp across every cycle
+    # log, whichever filename shape it has (see _cycle_log_stamp) - UNLESS pid
+    # files name live workers, in which case narrow to the logs those workers
+    # actually own first: with concurrency>1 every slot writes its own
+    # cycle-<tid>-<ts>.log concurrently, so the single newest timestamp across
+    # ALL of them can belong to a different slot than the one this heuristic is
+    # trying to time (Task 4's interleaving finding). Falls back to the
+    # unfiltered set when no live worker's tid matches any log on disk (e.g. a
+    # legacy single-slot deployment with no workers dir at all).
+    logs = list(LOGDIR.glob("cycle-*.log")) if LOGDIR.exists() else []
+    live_tids = {str(w["tid"]) for w in (workers or []) if w.get("alive") and w.get("tid")}
+    if live_tids:
+        owned = [p for p in logs if _cycle_log_tid(p.name) in live_tids]
+        if owned:
+            logs = owned
     start = None
-    cyclelogs = sorted(LOGDIR.glob("cycle-*.log")) if LOGDIR.exists() else []
-    if cyclelogs:
-        m = re.search(r"cycle-(\d{8}T\d{6})\.log", cyclelogs[-1].name)
-        if m:
-            try:
-                start = datetime.strptime(m.group(1), "%Y%m%dT%H%M%S").timestamp()
-            except Exception:
-                start = None
+    stamps = sorted(s for s in (_cycle_log_stamp(p.name) for p in logs) if s)
+    if stamps:
+        try:
+            start = datetime.strptime(stamps[-1], "%Y%m%dT%H%M%S").timestamp()
+        except Exception:
+            start = None
 
     # Heartbeat + completed-cycle durations from autopilot.log (turnaround time).
     heartbeat = None
@@ -293,6 +407,17 @@ def probe_runtime() -> dict:
                 last_start = None
     recent = durs[-12:]
     avg_cycle = round(sum(recent) / len(recent)) if recent else None
+    # Turnaround is measured by PAIRING a "cycle start" line with the next
+    # terminal line in one shared orbit.log. With several slots interleaving
+    # their lines into that log, the pairing is arbitrary: slot 1's terminal
+    # line closes slot 0's start, and the "duration" is the gap between two
+    # unrelated events. Rather than publish a number that is wrong in a way
+    # nobody can see, suppress it while more than one worker is live (the UI
+    # renders null as "—"). Slot-tagged pairing - the honest fix, since every
+    # line already carries "[slot N]" - is M5.
+    if len(live_tids) > 1:
+        last_dur = avg_cycle = None
+        durs = []
 
     today = datetime.now().strftime("%Y-%m-%d")
     try:
@@ -366,6 +491,50 @@ def _write_blocks(header: str, blocks: list[str]):
     BACKLOG.write_text(header + "".join(blocks))
 
 
+# ── backlog.yaml write lock (dashboard side) ─────────────────────────────────
+# ThreadingHTTPServer serves each request on its own thread, so a plain
+# per-process flock is NOT enough on its own: locks.hold()'s reentrancy guard
+# is keyed by os.getpid() (see locks.py), which is IDENTICAL across every
+# thread in this process - two request-handler threads both calling
+# locks.hold() on the same path at once would not queue on the flock, the
+# second would immediately raise ReentrantLock (indistinguishable, from
+# inside this module, from a real self-deadlock). This threading.Lock
+# serializes route handlers onto the flock one thread at a time; the flock
+# itself still provides the actual cross-process exclusion against
+# autopromote/autoclose/qa_check/backlog_append running in other processes.
+_BACKLOG_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _backlog_txn():
+    """The WHOLE read-modify-write of one dashboard backlog action (its
+    `_read_blocks()` ... `_write_blocks()` span), under ONE acquisition of the
+    shared `<AP_STATE>/.backlog.lock` - the same lock backlog_append.py
+    (append_tasks/append_raw_blocks/set_task_field), autopromote.py,
+    autoclose.py, and qa_check.py (via set_task_field) all take around their
+    own backlog.yaml writes, so a dashboard edit can never lose - or cause the
+    loss of - any of theirs.
+
+    CRITICAL: never call `_run_converter()` (or anything else that shells out)
+    from INSIDE this - `_run_converter()` runs backlog_to_tasks.py, which can
+    itself launch a source-adapter subprocess that calls straight back into
+    backlog_append's NOW lock-protected append_tasks/set_task_field. That
+    child is a DIFFERENT process (not a reentrant same-pid re-entry - locks.py
+    would raise ReentrantLock for that, not deadlock), so it would instead
+    block waiting for the very flock this process is still holding while this
+    process's own `subprocess.run()` blocks waiting for the child to exit - a
+    real deadlock, not just a slow contender. Every caller below acquires this
+    txn ONLY around the read+mutate+write, and calls `_run_converter()` after
+    it exits.
+
+    None of this module's backlog-writing functions call each other or
+    otherwise re-enter this contextmanager while already inside it, so a
+    single acquisition per call never nests (locks.hold() is not reentrant -
+    see locks.py's module docstring)."""
+    with _BACKLOG_LOCK, locks.hold(AP_STATE / ".backlog.lock"):
+        yield
+
+
 def _run_converter():
     subprocess.run(["python3", str(CONVERTER)], cwd=str(ENGINE), capture_output=True)
 
@@ -398,11 +567,57 @@ def do_skip(tid: str):
     _run_converter()
 
 
-def do_killtask() -> str:
-    """Abort the in-flight cycle: SIGTERM the cycle process, then skip the task so
-    the loop won't immediately re-pick it. Reversible by editing skips.txt."""
+def do_killtask(tid: str = "") -> str:
+    """Abort ONE task's in-flight cycle, then skip it so the loop won't
+    immediately re-pick it. Reversible by editing skips.txt.
+
+    Targeted path (concurrency-safe): if `tid` names a LIVE worker in
+    workers_state(), the signal goes to the CYCLE that worker recorded
+    ($AP_STATE/workers/<slot>.pid's `cycle_pid`/`cycle_pgid`, written by
+    run.sh's record_cycle_pid) - never to the worker file's `pid`, which is
+    the slot LOOP's own pid. That was the C2 bug: killpg'ing the loop's group
+    aborted the whole slot along with the one task, so the operator's Abort
+    silently stopped the workspace. Aborting a task must leave its loop
+    running, ready to escalate the task and pick up the next one.
+
+    `cycle_pgid` is only present when the cycle genuinely leads its own
+    process group (run.sh's session wrapper), which is the same leader guard
+    the launcher applies before killpg (do_loop_stop): with it, the whole
+    cycle tree goes - claude, caffeinate, node children; without it, a plain
+    TERM on the cycle pid is all that is safe.
+
+    Legacy fallback: no `tid` given, or it doesn't match any live worker
+    (e.g. a state dir from before T4's per-slot pid files existed) - the
+    original machine-wide behavior, kept only so a single-slot deployment
+    without a populated workers dir still has a working Abort button."""
+    workers = workers_state() or []
+    match = next((w for w in workers if w.get("alive") and str(w.get("tid")) == str(tid)), None) if tid else None
+    if match is not None:
+        cycle_pid, cycle_pgid = match.get("cycle_pid"), match.get("cycle_pgid")
+        if not cycle_pid:
+            # Claimed, but no cycle recorded yet (the window between the claim
+            # and the cycle's first instant), or a pid file written by a run.sh
+            # from before cycle_pid existed. There is nothing safe to signal:
+            # the only other pid on file is the loop's. Skip the task so it is
+            # not re-picked and say plainly that nothing was killed.
+            do_skip(tid)
+            return (f"'{tid}' is claimed by slot {match['slot']} but its cycle process isn't recorded "
+                    f"yet - nothing was stopped. The task is skipped so it won't be retried; if a cycle "
+                    f"really is running, try Abort again in a few seconds. Un-skip by editing skips.txt.")
+        try:
+            if cycle_pgid:
+                os.killpg(cycle_pgid, signal.SIGTERM)
+            else:
+                os.kill(cycle_pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass   # already gone - still skip it below so it isn't re-picked
+        except Exception as e:
+            return f"Could not stop '{tid}' (slot {match['slot']}, cycle pid {cycle_pid}): {e}"
+        do_skip(tid)
+        return (f"Stopped {tid}'s cycle (slot {match['slot']}, cycle pid {cycle_pid}) and skipped it so "
+                f"it won't be retried. That slot's loop is untouched - it will escalate the task, reset "
+                f"its worktree and start a fresh cycle after its backoff. Un-skip by editing skips.txt.")
     pids = cycle_pids()
-    tid = MARKER.read_text().strip() if MARKER.exists() else ""
     if not pids:
         return "No cycle is currently running — nothing to stop."
     for p in pids:
@@ -410,25 +625,30 @@ def do_killtask() -> str:
             os.kill(p, 15)
         except ProcessLookupError:
             pass
-    if tid:
-        do_skip(tid)
-        return (f"Stopped the running cycle (pid {pids[0]}) and skipped '{tid}' so it won't be retried. "
+    # No pid file matched `tid` - fall back to the legacy single-slot marker
+    # so the message (and the skip) still names the right task when there is
+    # no workers dir to consult at all.
+    fallback_tid = tid or (MARKER.read_text().strip() if MARKER.exists() else "")
+    if fallback_tid:
+        do_skip(fallback_tid)
+        return (f"Stopped the running cycle (pid {pids[0]}) and skipped '{fallback_tid}' so it won't be retried. "
                 f"The wrapper will reset the worktree and start a fresh cycle after its backoff. "
                 f"Un-skip by editing skips.txt.")
     return f"Stopped the running cycle (pid {pids[0]}). No task id was claimed yet."
 
 
 def do_priority(tid: str, direction: str) -> str:
-    header, blocks, ids = _read_blocks()
-    if tid not in ids:
-        return f"Task {tid} not found."
-    i = ids.index(tid)
-    cur = (_get_field(blocks[i], "priority") or "medium").strip()
-    idx = PRIORITY_LADDER.index(cur) if cur in PRIORITY_LADDER else 1
-    idx = min(2, idx + 1) if direction == "up" else max(0, idx - 1)
-    new = PRIORITY_LADDER[idx]
-    blocks[i] = _set_field(blocks[i], "priority", new)
-    _write_blocks(header, blocks)
+    with _backlog_txn():
+        header, blocks, ids = _read_blocks()
+        if tid not in ids:
+            return f"Task {tid} not found."
+        i = ids.index(tid)
+        cur = (_get_field(blocks[i], "priority") or "medium").strip()
+        idx = PRIORITY_LADDER.index(cur) if cur in PRIORITY_LADDER else 1
+        idx = min(2, idx + 1) if direction == "up" else max(0, idx - 1)
+        new = PRIORITY_LADDER[idx]
+        blocks[i] = _set_field(blocks[i], "priority", new)
+        _write_blocks(header, blocks)
     _run_converter()
     return f"{tid}: priority {cur} → {new}."
 
@@ -459,43 +679,49 @@ def do_move(tid: str, direction: str) -> str:
     behavior) moved the task past an invisible done/proposed block and the
     visible order never changed. Instead: find the on-screen neighbor and
     relocate this task's block just past the neighbor's block."""
-    header, blocks, ids = _read_blocks()
-    if tid not in ids:
-        return f"Task {tid} not found."
-    order = _next_up_order()
-    disp_ids = [r[0] for r in order]
-    if tid in disp_ids:
-        k = disp_ids.index(tid)
-        nk = k - 1 if direction == "up" else k + 1
-        if nk < 0 or nk >= len(order):
-            return f"{tid} is already at the {'top' if direction=='up' else 'bottom'}."
-        n_tid, n_pri = order[nk]
-        pri = order[k][1]
-        if PRIORITY_RANK.get(n_pri, 1) != PRIORITY_RANK.get(pri, 1):
-            # Order is a tie-break WITHIN a priority band — the picker sorts by
-            # priority first, so no amount of reordering crosses a band.
-            return (f"{tid} is at the {'top' if direction == 'up' else 'bottom'} of its "
-                    f"'{pri}' priority band — use {'⬆ pri' if direction == 'up' else '⬇ pri'} "
-                    f"to move it {'sooner' if direction == 'up' else 'later'}.")
-        if n_tid in ids:
+    moved_before_after = None   # set to n_tid iff the on-screen-neighbor path wrote
+    with _backlog_txn():
+        header, blocks, ids = _read_blocks()
+        if tid not in ids:
+            return f"Task {tid} not found."
+        order = _next_up_order()
+        disp_ids = [r[0] for r in order]
+        if tid in disp_ids:
+            k = disp_ids.index(tid)
+            nk = k - 1 if direction == "up" else k + 1
+            if nk < 0 or nk >= len(order):
+                return f"{tid} is already at the {'top' if direction=='up' else 'bottom'}."
+            n_tid, n_pri = order[nk]
+            pri = order[k][1]
+            if PRIORITY_RANK.get(n_pri, 1) != PRIORITY_RANK.get(pri, 1):
+                # Order is a tie-break WITHIN a priority band — the picker sorts by
+                # priority first, so no amount of reordering crosses a band.
+                return (f"{tid} is at the {'top' if direction == 'up' else 'bottom'} of its "
+                        f"'{pri}' priority band — use {'⬆ pri' if direction == 'up' else '⬇ pri'} "
+                        f"to move it {'sooner' if direction == 'up' else 'later'}.")
+            if n_tid in ids:
+                i = ids.index(tid)
+                blk = blocks.pop(i)
+                ids.pop(i)
+                j = ids.index(n_tid)
+                at = j if direction == "up" else j + 1
+                blocks.insert(at, blk)
+                _write_blocks(header, blocks)
+                moved_before_after = n_tid
+        if moved_before_after is None:
+            # Fallback (task not in the Next-up view, e.g. queue.json missing,
+            # or its on-screen neighbor wasn't found on the backlog): the old
+            # raw file-neighbor swap, so the button still does something sensible.
             i = ids.index(tid)
-            blk = blocks.pop(i)
-            ids.pop(i)
-            j = ids.index(n_tid)
-            at = j if direction == "up" else j + 1
-            blocks.insert(at, blk)
+            j = i - 1 if direction == "up" else i + 1
+            if j < 0 or j >= len(blocks):
+                return f"{tid} is already at the {'top' if direction=='up' else 'bottom'}."
+            blocks[i], blocks[j] = blocks[j], blocks[i]
             _write_blocks(header, blocks)
-            _run_converter()
-            return f"Moved {tid} {direction} (now {'before' if direction == 'up' else 'after'} {n_tid})."
-    # Fallback (task not in the Next-up view, e.g. queue.json missing): the old
-    # raw file-neighbor swap, so the button still does something sensible.
-    i = ids.index(tid)
-    j = i - 1 if direction == "up" else i + 1
-    if j < 0 or j >= len(blocks):
-        return f"{tid} is already at the {'top' if direction=='up' else 'bottom'}."
-    blocks[i], blocks[j] = blocks[j], blocks[i]
-    _write_blocks(header, blocks)
     _run_converter()
+    if moved_before_after is not None:
+        return (f"Moved {tid} {direction} (now "
+                f"{'before' if direction == 'up' else 'after'} {moved_before_after}).")
     return f"Moved {tid} {direction}."
 
 
@@ -505,19 +731,20 @@ def do_promote(tid: str) -> str:
     we set status:queued + autopilot:allow so it lands in Next up and the loop can
     work it. For a HUMAN-ONLY category (security/infra/release/git) we queue it but
     leave the gate — the loop never touches those, so it stays board-tracked."""
-    header, blocks, ids = _read_blocks()
-    if tid not in ids:
-        return f"Task {tid} not found."
-    i = ids.index(tid)
-    blocks[i] = _set_field(blocks[i], "status", "queued")
-    cat = _get_field(blocks[i], "category")
-    if cat in EMITTABLE:
-        blocks[i] = _set_field(blocks[i], "autopilot", "allow")
-        tail = " → now in ⏭ Next up (loop will pick it)."
-    else:
-        tail = (f" Queued, but '{cat}' is human-only — the loop never works it. "
-                f"Handle it manually / via PR.")
-    _write_blocks(header, blocks)
+    with _backlog_txn():
+        header, blocks, ids = _read_blocks()
+        if tid not in ids:
+            return f"Task {tid} not found."
+        i = ids.index(tid)
+        blocks[i] = _set_field(blocks[i], "status", "queued")
+        cat = _get_field(blocks[i], "category")
+        if cat in EMITTABLE:
+            blocks[i] = _set_field(blocks[i], "autopilot", "allow")
+            tail = " → now in ⏭ Next up (loop will pick it)."
+        else:
+            tail = (f" Queued, but '{cat}' is human-only — the loop never works it. "
+                    f"Handle it manually / via PR.")
+        _write_blocks(header, blocks)
     _run_converter()
     return f"Promoted {tid}.{tail}"
 
@@ -528,20 +755,21 @@ def do_force(tid: str) -> str:
     the cycle works it. The loop fixes the code-fixable ones and escalates the rest
     (secret rotation, infra grants, running migrations) back to a human. Auto-feed
     still never touches these — only this explicit action does."""
-    header, blocks, ids = _read_blocks()
-    if tid not in ids:
-        return f"Task {tid} not found."
-    i = ids.index(tid)
-    cat = _get_field(blocks[i], "category")
-    blocks[i] = _set_field(blocks[i], "status", "queued")
-    blocks[i] = _set_field(blocks[i], "autopilot", "allow")
-    if re.search(r"(?m)^  (?:  )?forced: ", blocks[i]):
-        blocks[i] = _set_field(blocks[i], "forced", "true")
-    else:   # insert the field right after the autopilot line, matching its indent
-        blocks[i] = re.sub(r"(?m)^(\s{2,4})(autopilot: .*)$",
-                           lambda m: f"{m.group(1)}{m.group(2)}\n{m.group(1)}forced: true",
-                           blocks[i], count=1)
-    _write_blocks(header, blocks)
+    with _backlog_txn():
+        header, blocks, ids = _read_blocks()
+        if tid not in ids:
+            return f"Task {tid} not found."
+        i = ids.index(tid)
+        cat = _get_field(blocks[i], "category")
+        blocks[i] = _set_field(blocks[i], "status", "queued")
+        blocks[i] = _set_field(blocks[i], "autopilot", "allow")
+        if re.search(r"(?m)^  (?:  )?forced: ", blocks[i]):
+            blocks[i] = _set_field(blocks[i], "forced", "true")
+        else:   # insert the field right after the autopilot line, matching its indent
+            blocks[i] = re.sub(r"(?m)^(\s{2,4})(autopilot: .*)$",
+                               lambda m: f"{m.group(1)}{m.group(2)}\n{m.group(1)}forced: true",
+                               blocks[i], count=1)
+        _write_blocks(header, blocks)
     _run_converter()
     return (f"⚠ Forced {tid} ({cat}) to the agent → now in ⏭ Next up. The loop will attempt a "
             f"fix on the branch for review, or escalate it if it's not code-fixable (rotation/infra).")
@@ -602,29 +830,30 @@ def do_task_new(tid: str, title: str, category: str, priority: str = "medium",
         return ("At least one acceptance criterion is required (one per line) — "
                 "without it the verifier has nothing objective to grade and the "
                 "lint gate would hold the task from the queue anyway.")
-    header, blocks, ids = _read_blocks()
-    if tid in ids:
-        return f"Task {tid} already exists on the backlog — edit it instead."
-    if load_ledger().get(tid):
-        return f"Task id '{tid}' was already worked (see Shipped/Escalated) — pick a fresh id."
-    ind = _block_indent(blocks)
-    status = "queued" if queue_now else "proposed"
-    gate = "allow" if (queue_now and category in EMITTABLE) else "human"
-    lines = [f"{ind}- id: {tid}",
-             f"{ind}  title: {json.dumps(' '.join(title.split()))}",
-             f"{ind}  category: {category}",
-             f"{ind}  autopilot: {gate}",
-             f"{ind}  status: {status}",
-             f"{ind}  priority: {priority if priority in ('high', 'medium', 'low') else 'medium'}",
-             f"{ind}  source: dashboard"]
-    ctx = (context or "").strip()
-    if ctx:
-        lines.append(f"{ind}  context: |")
-        lines += [f"{ind}    {ln}" for ln in ctx.splitlines()]
-    lines.append(f"{ind}  acceptance_criteria:")
-    lines += [f"{ind}    - {json.dumps(a)}" for a in acc]
-    blocks.append("\n".join(lines) + "\n")
-    _write_blocks(header, blocks)
+    with _backlog_txn():
+        header, blocks, ids = _read_blocks()
+        if tid in ids:
+            return f"Task {tid} already exists on the backlog — edit it instead."
+        if load_ledger().get(tid):
+            return f"Task id '{tid}' was already worked (see Shipped/Escalated) — pick a fresh id."
+        ind = _block_indent(blocks)
+        status = "queued" if queue_now else "proposed"
+        gate = "allow" if (queue_now and category in EMITTABLE) else "human"
+        lines = [f"{ind}- id: {tid}",
+                 f"{ind}  title: {json.dumps(' '.join(title.split()))}",
+                 f"{ind}  category: {category}",
+                 f"{ind}  autopilot: {gate}",
+                 f"{ind}  status: {status}",
+                 f"{ind}  priority: {priority if priority in ('high', 'medium', 'low') else 'medium'}",
+                 f"{ind}  source: dashboard"]
+        ctx = (context or "").strip()
+        if ctx:
+            lines.append(f"{ind}  context: |")
+            lines += [f"{ind}    {ln}" for ln in ctx.splitlines()]
+        lines.append(f"{ind}  acceptance_criteria:")
+        lines += [f"{ind}    - {json.dumps(a)}" for a in acc]
+        blocks.append("\n".join(lines) + "\n")
+        _write_blocks(header, blocks)
     _run_converter()
     if status == "queued" and gate == "allow":
         return f"Created {tid} → ⏭ Next up (the loop can pick it)."
@@ -637,41 +866,42 @@ def do_task_edit(tid: str, title: str = "", category: str = "", priority: str = 
                  context: str = "", acc_raw: str = "") -> str:
     """Edit a backlog task's contract in place, comment-preserving. Empty form
     fields mean 'leave unchanged' — the UI can't blank a field by accident."""
-    header, blocks, ids = _read_blocks()
-    if tid not in ids:
-        return f"Task {tid} not found on the backlog."
-    i = ids.index(tid)
-    b = blocks[i]
-    fi = _block_indent(blocks) + "  "
-    changed = []
-    if (title or "").strip():
-        b = _upsert_scalar(b, "title", json.dumps(" ".join(title.split())), fi)
-        changed.append("title")
-    if category:
-        if category not in KNOWN_CATEGORIES:
-            return f"Unknown category '{category}'."
-        b = _upsert_scalar(b, "category", category, fi)
-        changed.append("category")
-    if priority in ("high", "medium", "low"):
-        b = _upsert_scalar(b, "priority", priority, fi)
-        changed.append("priority")
-    if (context or "").strip():
-        b = _strip_field(b, "context")
-        if not b.endswith("\n"):
-            b += "\n"
-        b += f"{fi}context: |\n" + "".join(f"{fi}  {ln}\n" for ln in context.strip().splitlines())
-        changed.append("context")
-    acc = _split_acc(acc_raw)
-    if acc:
-        b = _strip_field(b, "acceptance_criteria")
-        if not b.endswith("\n"):
-            b += "\n"
-        b += f"{fi}acceptance_criteria:\n" + "".join(f"{fi}  - {json.dumps(a)}\n" for a in acc)
-        changed.append("acceptance criteria")
-    if not changed:
-        return f"Nothing to change on {tid} (empty fields keep current values)."
-    blocks[i] = b
-    _write_blocks(header, blocks)
+    with _backlog_txn():
+        header, blocks, ids = _read_blocks()
+        if tid not in ids:
+            return f"Task {tid} not found on the backlog."
+        i = ids.index(tid)
+        b = blocks[i]
+        fi = _block_indent(blocks) + "  "
+        changed = []
+        if (title or "").strip():
+            b = _upsert_scalar(b, "title", json.dumps(" ".join(title.split())), fi)
+            changed.append("title")
+        if category:
+            if category not in KNOWN_CATEGORIES:
+                return f"Unknown category '{category}'."
+            b = _upsert_scalar(b, "category", category, fi)
+            changed.append("category")
+        if priority in ("high", "medium", "low"):
+            b = _upsert_scalar(b, "priority", priority, fi)
+            changed.append("priority")
+        if (context or "").strip():
+            b = _strip_field(b, "context")
+            if not b.endswith("\n"):
+                b += "\n"
+            b += f"{fi}context: |\n" + "".join(f"{fi}  {ln}\n" for ln in context.strip().splitlines())
+            changed.append("context")
+        acc = _split_acc(acc_raw)
+        if acc:
+            b = _strip_field(b, "acceptance_criteria")
+            if not b.endswith("\n"):
+                b += "\n"
+            b += f"{fi}acceptance_criteria:\n" + "".join(f"{fi}  - {json.dumps(a)}\n" for a in acc)
+            changed.append("acceptance criteria")
+        if not changed:
+            return f"Nothing to change on {tid} (empty fields keep current values)."
+        blocks[i] = b
+        _write_blocks(header, blocks)
     _run_converter()
     return f"Updated {tid} ({', '.join(changed)})."
 
@@ -680,50 +910,61 @@ def do_task_delete(tid: str) -> str:
     """Delete an UN-WORKED task's block from the backlog. Worked tasks are
     refused — their block is the contract behind a real ship/escalation; use
     Skip to set them aside instead."""
-    header, blocks, ids = _read_blocks()
-    if tid not in ids:
-        return f"Task {tid} not found on the backlog."
-    led = load_ledger().get(tid) or {}
-    if led.get("state"):
-        return (f"Won't delete {tid}: it was worked (ledger state '{led['state']}') — "
-                f"the block documents a real ship/escalation. Skip it instead.")
-    blocks.pop(ids.index(tid))
-    _write_blocks(header, blocks)
-    if tid in load_skips():
-        kept = [ln for ln in SKIPS.read_text().splitlines() if ln.strip() != tid]
-        SKIPS.write_text("\n".join(kept) + ("\n" if kept else ""))
+    with _backlog_txn():
+        header, blocks, ids = _read_blocks()
+        if tid not in ids:
+            return f"Task {tid} not found on the backlog."
+        led = load_ledger().get(tid) or {}
+        if led.get("state"):
+            return (f"Won't delete {tid}: it was worked (ledger state '{led['state']}') — "
+                    f"the block documents a real ship/escalation. Skip it instead.")
+        blocks.pop(ids.index(tid))
+        _write_blocks(header, blocks)
+        if tid in load_skips():
+            kept = [ln for ln in SKIPS.read_text().splitlines() if ln.strip() != tid]
+            SKIPS.write_text("\n".join(kept) + ("\n" if kept else ""))
     _run_converter()
     return f"Deleted {tid} from the backlog."
 
 
 def do_reap() -> str:
     """Manually reap tasks stuck mid-cycle (the wrapper does this each
-    iteration, but a paused loop never iterates — this button covers that)."""
+    iteration, but a paused loop never iterates — this button covers that).
+    ledger.py's reap is now identity-aware: a stale entry whose slot worker
+    is still alive and on that exact task is skipped rather than escalated
+    (logged on stderr) — surface that count too, so "nothing stalled" is
+    distinguishable from "some entries are stale but their worker is still
+    on it"."""
     r = subprocess.run(["python3", str(ENGINE / "ledger.py"), "reap", str(CYCLE_TIMEOUT + 600)],
                        capture_output=True, text=True)
     if r.returncode != 0:
         return f"Reap failed: {r.stderr.strip()}"
     reaped = r.stdout.strip()
-    return (f"Reaped {reaped.count(' ') + 1} stalled task(s) → Escalated: {reaped}" if reaped
-            else "Nothing stalled — no mid-cycle entry is older than the cycle timeout.")
+    skipped = r.stderr.count("still alive")
+    msg = (f"Reaped {reaped.count(' ') + 1} stalled task(s) → Escalated: {reaped}" if reaped
+           else "Nothing stalled — no mid-cycle entry is older than the cycle timeout.")
+    if skipped:
+        msg += f" ({skipped} skipped — worker still alive on that task)"
+    return msg
 
 
 def do_runnow(tid: str) -> str:
     """Force a task to be the loop's NEXT pick: move it to the top of the backlog,
     set priority high (+ allow if workable), and resume the loop. The agent picks
     it on the next cycle (≤~20s if idle, else after the current cycle finishes)."""
-    header, blocks, ids = _read_blocks()
-    if tid not in ids:
-        return f"Task {tid} not found."
-    i = ids.index(tid)
-    blk = blocks.pop(i)
-    blk = _set_field(blk, "status", "queued")
-    blk = _set_field(blk, "priority", "high")
-    cat = _get_field(blk, "category")
-    if cat in EMITTABLE:
-        blk = _set_field(blk, "autopilot", "allow")
-    blocks.insert(0, blk)
-    _write_blocks(header, blocks)
+    with _backlog_txn():
+        header, blocks, ids = _read_blocks()
+        if tid not in ids:
+            return f"Task {tid} not found."
+        i = ids.index(tid)
+        blk = blocks.pop(i)
+        blk = _set_field(blk, "status", "queued")
+        blk = _set_field(blk, "priority", "high")
+        cat = _get_field(blk, "category")
+        if cat in EMITTABLE:
+            blk = _set_field(blk, "autopilot", "allow")
+        blocks.insert(0, blk)
+        _write_blocks(header, blocks)
     do_resume()           # clear STOP so the loop actually runs
     _run_converter()
     if cat not in EMITTABLE:
@@ -989,50 +1230,55 @@ def do_answer(tid: str, text: str) -> str:
     text = " ".join(text.split())   # single-line: YAML field is one quoted line
     if not text:
         return "Empty answer — nothing done."
-    header, blocks, ids = _read_blocks()
     synthesized = False
-    if tid not in ids:
-        # Orphan escalation (legacy foundry bare-number id, or any ledger-only task
-        # with no backlog block). Instead of refusing — which left the card stuck in
-        # the inbox — synthesize a block from the ledger so the answer IS the
-        # contract. The human answering is the decision to let the loop work it.
-        led = load_ledger().get(tid, {})
-        title = (led.get("title") or f"Answered escalation {tid}").replace('"', "'")
-        reason = (led.get("reason") or "").replace('"', "'")
-        ctx = "Re-queued from an answered escalation that had no backlog block."
-        if reason:
-            ctx += f" Original stop reason: {reason}"
-        new_block = (   # write in the FLAT format the file actually uses
-            f"- id: {tid}\n"
-            f'  title: "{title}"\n'
-            f"  category: bug\n"
-            f"  autopilot: allow\n"
-            f"  status: queued\n"
-            f"  priority: medium\n"
-            f"  source: escalation-answer\n"
-            f"  context: |\n"
-            f"    {ctx}\n"
-            f"  operator_answer: {json.dumps(text)}\n"
-            f"  acceptance_criteria:\n"
-            f"    - {json.dumps(text)}\n"
-        )
-        blocks.append(new_block)
-        ids.append(tid)
-        synthesized = True
-    i = ids.index(tid)
-    blocks[i] = _set_field(blocks[i], "status", "queued")
-    cat = _get_field(blocks[i], "category")
-    if cat in EMITTABLE:
-        blocks[i] = _set_field(blocks[i], "autopilot", "allow")
-    quoted = json.dumps(text)   # safe one-line double-quoted YAML scalar
-    if re.search(r"(?m)^\s{2,4}operator_answer: ", blocks[i]):
-        blocks[i] = re.sub(r"(?m)^(\s{2,4})operator_answer: .*$",
-                           lambda m: f"{m.group(1)}operator_answer: {quoted}", blocks[i], count=1)
-    else:
-        blocks[i] = re.sub(r"(?m)^(\s{2,4})(autopilot: .*)$",
-                           lambda m: f"{m.group(1)}{m.group(2)}\n{m.group(1)}operator_answer: {quoted}",
-                           blocks[i], count=1)
-    _write_blocks(header, blocks)
+    with _backlog_txn():
+        header, blocks, ids = _read_blocks()
+        if tid not in ids:
+            # Orphan escalation (legacy foundry bare-number id, or any ledger-only task
+            # with no backlog block). Instead of refusing — which left the card stuck in
+            # the inbox — synthesize a block from the ledger so the answer IS the
+            # contract. The human answering is the decision to let the loop work it.
+            led = load_ledger().get(tid, {})
+            title = (led.get("title") or f"Answered escalation {tid}").replace('"', "'")
+            reason = (led.get("reason") or "").replace('"', "'")
+            ctx = "Re-queued from an answered escalation that had no backlog block."
+            if reason:
+                ctx += f" Original stop reason: {reason}"
+            new_block = (   # write in the FLAT format the file actually uses
+                f"- id: {tid}\n"
+                f'  title: "{title}"\n'
+                f"  category: bug\n"
+                f"  autopilot: allow\n"
+                f"  status: queued\n"
+                f"  priority: medium\n"
+                f"  source: escalation-answer\n"
+                f"  context: |\n"
+                f"    {ctx}\n"
+                f"  operator_answer: {json.dumps(text)}\n"
+                f"  acceptance_criteria:\n"
+                f"    - {json.dumps(text)}\n"
+            )
+            blocks.append(new_block)
+            ids.append(tid)
+            synthesized = True
+        i = ids.index(tid)
+        blocks[i] = _set_field(blocks[i], "status", "queued")
+        cat = _get_field(blocks[i], "category")
+        if cat in EMITTABLE:
+            blocks[i] = _set_field(blocks[i], "autopilot", "allow")
+        quoted = json.dumps(text)   # safe one-line double-quoted YAML scalar
+        if re.search(r"(?m)^\s{2,4}operator_answer: ", blocks[i]):
+            blocks[i] = re.sub(r"(?m)^(\s{2,4})operator_answer: .*$",
+                               lambda m: f"{m.group(1)}operator_answer: {quoted}", blocks[i], count=1)
+        else:
+            blocks[i] = re.sub(r"(?m)^(\s{2,4})(autopilot: .*)$",
+                               lambda m: f"{m.group(1)}{m.group(2)}\n{m.group(1)}operator_answer: {quoted}",
+                               blocks[i], count=1)
+        _write_blocks(header, blocks)
+    # Both below are subprocess/file side effects best-effort-sequenced AFTER
+    # the backlog lock is released - ledger.py's `clear` takes ITS OWN lock
+    # (a different lock domain; see ledger.py's `_locked_update`), and neither
+    # needs to be inside the backlog critical section above.
     subprocess.run(["python3", str(ENGINE / "ledger.py"), "clear", tid], capture_output=True)
     if tid in load_skips():
         kept = [ln for ln in SKIPS.read_text().splitlines() if ln.strip() != tid]
@@ -1049,15 +1295,16 @@ def do_answer(tid: str, text: str) -> str:
 def do_lintok(tid: str) -> str:
     """Waive the backlog linter's hard gate for one task (sets lint_ok: true).
     Use when the thin contract is intentional (e.g. a trivial chore)."""
-    header, blocks, ids = _read_blocks()
-    if tid not in ids:
-        return f"Task {tid} not found."
-    i = ids.index(tid)
-    if re.search(r"(?m)^    lint_ok: ", blocks[i]):
-        blocks[i] = _set_field(blocks[i], "lint_ok", "true")
-    else:
-        blocks[i] = re.sub(r"(?m)^(    category: .*)$", r"\1\n    lint_ok: true", blocks[i], count=1)
-    _write_blocks(header, blocks)
+    with _backlog_txn():
+        header, blocks, ids = _read_blocks()
+        if tid not in ids:
+            return f"Task {tid} not found."
+        i = ids.index(tid)
+        if re.search(r"(?m)^    lint_ok: ", blocks[i]):
+            blocks[i] = _set_field(blocks[i], "lint_ok", "true")
+        else:
+            blocks[i] = re.sub(r"(?m)^(    category: .*)$", r"\1\n    lint_ok: true", blocks[i], count=1)
+        _write_blocks(header, blocks)
     _run_converter()
     return f"Lint gate waived for {tid} — it can now be emitted despite the thin contract."
 
@@ -1803,7 +2050,30 @@ def _do_generate_reject(name: str) -> dict:
 # check, "is this thread's own bring-up still wanted" reduces to "is the
 # state still 'starting'".
 _QA_SERVICES_LOCK = threading.Lock()
-_QA_SERVICES = {"state": "stopped", "handles": None, "error": None}
+# `ports` holds the workspace-wide qa.services mutex (qa_check's
+# SERVICES_LOCK_NAME) for the session's WHOLE lifetime - see
+# do_qa_services_start.
+_QA_SERVICES = {"state": "stopped", "handles": None, "error": None, "ports": None}
+# How long a Start waits for the mutex before telling the operator the ports
+# are busy. Short on purpose: whoever holds it is a loop QA gate or a
+# sweep/explore/generate run that lasts minutes, so waiting would just hang
+# the request; a click is better answered with "busy, try again".
+QA_SERVICES_LOCK_WAIT = 2
+
+
+def _qa_services_release_ports() -> None:
+    """Drop the qa.services mutex if this session holds it. Idempotent, and
+    never raises - a release failure must not break the Stop path. (Process
+    death releases it too: flock lives on the fd, which the kernel tears down
+    on exit, so a crashed dashboard never wedges the lock.)"""
+    with _QA_SERVICES_LOCK:
+        stack = _QA_SERVICES.get("ports")
+        _QA_SERVICES["ports"] = None
+    if stack is not None:
+        try:
+            stack.close()
+        except Exception:
+            pass
 
 
 def _qa_services_bring_up(qa_cfg: dict, log_dir: Path) -> None:
@@ -1823,6 +2093,10 @@ def _qa_services_bring_up(qa_cfg: dict, log_dir: Path) -> None:
                 _QA_SERVICES["state"] = "error"
                 _QA_SERVICES["error"] = f"could not bring qa.services up ({e})"
                 _QA_SERVICES["handles"] = None
+        # Nothing is bound any more (qa_env.up tore down what it started), so
+        # the mutex must go back - otherwise a failed Start would lock every
+        # other qa.services consumer out until the dashboard restarts.
+        _qa_services_release_ports()
         return
 
     with _QA_SERVICES_LOCK:
@@ -1833,6 +2107,9 @@ def _qa_services_bring_up(qa_cfg: dict, log_dir: Path) -> None:
             _QA_SERVICES["error"] = None
     if cancelled:
         qa_env.down(handles)   # stopped while services were coming up
+        # The Stop that cancelled us already released the mutex; this is the
+        # belt-and-braces call for the ordering where it had not yet.
+        _qa_services_release_ports()
 
 
 def do_qa_services_start() -> dict:
@@ -1843,17 +2120,20 @@ def do_qa_services_start() -> dict:
     already running/starting just reports so — a double-click (or a stale
     tab re-posting) must never spawn a second overlapping set of services.
 
-    Port-sharing note (contained, not corruption — noted, not solved here):
-    this isn't the only thing that can bind qa.services' ports. The loop's
-    own QA gate (qa_check.py) and a manual --regression/--explore sweep
-    each bring qa.services up/down themselves, independent of
-    _QA_SERVICES, so one of those running against this same target while
-    this session is up races for the same ports. An un-attached `orbit
-    teach` mid-recording holds those same ports too (see
-    _qa_teach_bring_up's non-attached branch, which brings its own
-    qa.services up and only tears them down when recording finishes) — so
-    clicking Start here while a stopped-session teach is still recording
-    can bind-conflict the same way."""
+    Ports: this is NOT the only thing that can bind qa.services' fixed
+    ports. The loop's own QA gate (qa_check.py) and a manual
+    --regression/--explore/--generate run each bring qa.services up and down
+    themselves. All of them - this route included - now serialize on the one
+    workspace mutex (qa_check.SERVICES_LOCK_NAME), so the loser is told the
+    ports are busy instead of racing for the bind. This session holds that
+    mutex from Start until Stop, because that is exactly how long the ports
+    stay bound.
+
+    Still uncovered, and deliberately so: an un-attached `orbit teach`
+    mid-recording brings its OWN qa.services up (see _qa_teach_bring_up's
+    non-attached branch) and is not on this mutex, because a teach recording
+    is an interactive session an operator is watching, not an unattended
+    consumer to be silently skipped."""
     with _QA_SERVICES_LOCK:
         if _QA_SERVICES["state"] in ("running", "starting"):
             return {"ok": True, "msg": f"already {_QA_SERVICES['state']}"}
@@ -1863,6 +2143,21 @@ def do_qa_services_start() -> dict:
             return {"ok": False,
                     "msg": "no 'qa: services' configured in .autopilot/config.yaml — "
                            "see config/schema.yaml's qa.services block and add one first"}
+        # Take the workspace's qa.services mutex BEFORE promising the operator
+        # anything. ExitStack is the stdlib way to hold a context manager open
+        # past the block that entered it: the flock lives on the fd (not the
+        # thread), so entering here and closing on the Stop request is sound.
+        lock_path = qa_check.services_lock_path(AP_STATE)
+        stack = contextlib.ExitStack()
+        try:
+            stack.enter_context(locks.hold(lock_path, timeout=QA_SERVICES_LOCK_WAIT,
+                                           break_stale=True))
+        except locks.LockTimeout:
+            return {"ok": False,
+                    "msg": "your app's ports are busy - the loop's QA gate or a QA "
+                           "sweep/explore/generate run is using them right now. "
+                           "Try again once it finishes."}
+        _QA_SERVICES["ports"] = stack
         _QA_SERVICES["state"] = "starting"
         _QA_SERVICES["error"] = None
         _QA_SERVICES["handles"] = None
@@ -1887,6 +2182,9 @@ def do_qa_services_stop() -> dict:
         _QA_SERVICES["error"] = None
     if handles:
         qa_env.down(handles)
+    # Ports first freed, mutex released after: the next consumer must never be
+    # let in while this session's services are still tearing down.
+    _qa_services_release_ports()
     return {"ok": True, "msg": "app stopped"}
 
 
@@ -1947,6 +2245,12 @@ def do_qa_services_restart(payload: dict) -> dict:
                 # partially started before raising — nothing from the old
                 # set survives to track.
                 _QA_SERVICES["handles"] = None
+        if not service:
+            # Nothing of this session is bound any more, so hand the ports
+            # mutex back instead of holding it in `error` until someone
+            # remembers to click Stop. A NAMED-service failure keeps it: the
+            # other services are still up and still own their ports.
+            _qa_services_release_ports()
         return {"ok": False, "msg": f"restart failed: {e}"}
 
     with _QA_SERVICES_LOCK:
@@ -1961,6 +2265,7 @@ def do_qa_services_restart(payload: dict) -> dict:
             _QA_SERVICES["error"] = None
     if stopped_meanwhile:
         qa_env.down(new_handles)
+        _qa_services_release_ports()   # the Stop released it already; idempotent
         return {"ok": True, "msg": "app was stopped while restarting — nothing to do"}
     return {"ok": True, "msg": f"restarted {service or 'all services'}"}
 
@@ -2624,7 +2929,10 @@ def cycletail(max_lines: int = 120) -> dict:
     """Human-readable live tail of the newest cycle log. stream-json logs are
     parsed into narrator lines (agent text, tool calls, final cost); legacy
     plain-text logs pass through as-is."""
-    logs = sorted(LOGDIR.glob("cycle-*.log")) if LOGDIR.exists() else []
+    # Newest by the stamp in the filename, not by the filename itself: a
+    # cycle-<tid>-<ts>.log sorts by its task id otherwise (see _cycle_log_stamp).
+    logs = sorted(LOGDIR.glob("cycle-*.log"), key=lambda p: _cycle_log_stamp(p.name)) \
+        if LOGDIR.exists() else []
     if not logs:
         return {"file": None, "lines": []}
     p = logs[-1]
@@ -3271,7 +3579,15 @@ def _validate_config(d: dict) -> list:
         if k in d and (not isinstance(d[k], str) or not d[k].strip()):
             errs.append(f"{k} must be a non-empty string")
     _nonempty("base_branch"); _nonempty("model"); _nonempty("permission_mode"); _nonempty("repo")
+    def _bounded_int(k, lo, hi):
+        if k in d and (not isinstance(d[k], int) or isinstance(d[k], bool)
+                       or d[k] < lo or d[k] > hi):
+            errs.append(f"{k} must be an integer between {lo} and {hi}")
     _posint("interval_seconds"); _posint("max_tasks_per_day"); _posint("cycle_timeout_seconds")
+    # ONE concurrency contract (see engine/config.py's CONCURRENCY_MAX): the
+    # Admin panel must refuse exactly what `config.py validate` refuses, or a
+    # value saved here would fail the loop's own preflight instead.
+    _bounded_int("concurrency", 1, CONCURRENCY_MAX)
     if "git_host" in d and d["git_host"] not in HOSTS_ALL:
         errs.append("git_host must be one of " + ", ".join(HOSTS_ALL))
     if "pull_requests" in d and d["pull_requests"] not in ("off", "github"):
@@ -3291,6 +3607,8 @@ def _validate_config(d: dict) -> list:
                     errs.append(f"gate '{name}' needs a non-empty cmd")
     if "mcp" in d and d["mcp"] is not None and not isinstance(d["mcp"], dict):
         errs.append("mcp must be an object of server-name -> {transport, url/command, tools}")
+    if "watches" in d and d["watches"] is not None and not isinstance(d["watches"], list):
+        errs.append("watches must be a list of {name, question, cadence_hours, category}")
     return errs
 
 
@@ -3764,7 +4082,21 @@ def build_state() -> dict:
                 "acceptance_criteria": [a for a in (meta.get("acceptance_criteria") or [])
                                         if isinstance(a, str)]}
 
-    live = bool(cycle_pids())   # is a real cycle process actually running right now?
+    workers = workers_state()   # None only when unconfigured/empty AND concurrency==1 - see workers_state()
+    if WORKERS_DIR.is_dir():
+        # T4 always mkdir -p's this dir before its first iteration, so its
+        # presence means the pid-file contract is in force - trust it
+        # completely, including "empty = nothing live right now" (a
+        # concurrency>1 deployment between cycles is genuinely idle, not a
+        # reason to fall back to a machine-wide pgrep).
+        live = any(w.get("alive") for w in (workers or []))
+    else:
+        # Legacy fallback ONLY when the workers dir has never existed at all
+        # (a pre-T4 state dir, or the dashboard polled before the loop's very
+        # first iteration) - cycle_pids() is a machine-wide pgrep and would
+        # misattribute liveness to an unrelated orbit-cycle process elsewhere
+        # on the box, but it's the only signal available until then.
+        live = bool(cycle_pids())   # is a real cycle process actually running right now?
     cur_marker = MARKER.read_text().strip() if MARKER.exists() else ""
     mm = merged_map()
     running, done, escalated = [], [], []
@@ -3987,7 +4319,9 @@ def build_state() -> dict:
         )
         _b["pr_open"] = bool(_real_pr)
 
-    rt = probe_runtime()
+    # `workers` was computed at the top of build_state (for `live`) - hand it
+    # over so one poll reads the pid files ONCE, not twice.
+    rt = probe_runtime(workers)
     rt.update({"running": running, "next_up": next_up, "board": board, "skipped": skipped,
                "auto_feed": AUTO_PROMOTE.exists(), "metrics": agent_metrics(), "history": hist["days"],
                "funnel": funnel,
@@ -4029,6 +4363,11 @@ def build_state() -> dict:
     insight_docs = insight_docs_state()
     if insight_docs is not None:
         rt["insight_docs"] = insight_docs
+    # Same discipline again: `workers` (computed above, for `live`) is present
+    # only when workers_state() has something worth a strip - see its
+    # docstring for the exact None-vs-[] contract.
+    if workers is not None:
+        rt["workers"] = workers
     rt["onboarding"] = onboarding_state()
     return rt
 
@@ -4209,7 +4548,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/resume":
                 do_resume(); msg = "Loop resumed."
             elif path == "/killtask":
-                msg = do_killtask()
+                msg = do_killtask(tid)
             elif path == "/skip":
                 do_skip(tid); msg = f"Skipped {tid} — moved to the Skipped section."
             elif path == "/unskip":

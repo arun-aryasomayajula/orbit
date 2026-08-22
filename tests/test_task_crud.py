@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -109,3 +110,40 @@ def test_mark_force_flows_through_with_reason_and_is_stamped(cc):
     assert "marked merged" in ok
     e = json.loads((st / "ledger.json").read_text())["entries"]["t1"]
     assert e["state"] == "merged" and e["forced"] is True
+
+
+# --- Task 3 follow-up: _backlog_txn's threading.Lock is not decorative -----
+#
+# locks.hold()'s reentrancy guard (engine/locks.py) is keyed by os.getpid(),
+# which is IDENTICAL across every thread in one process. ThreadingHTTPServer
+# serves each dashboard request on its own thread, so without a same-process
+# threading.Lock serializing routes onto the flock, two concurrent
+# backlog-writing requests would not queue on the flock - the second thread
+# to call locks.hold() on .backlog.lock would immediately raise
+# ReentrantLock (indistinguishable, from inside that thread, from a real
+# self-deadlock). This pins that a future "simplification" that drops
+# command_center._BACKLOG_LOCK would be caught here: two real THREADS
+# driving do_task_new concurrently must both succeed and both land, never
+# raise ReentrantLock.
+def test_concurrent_dashboard_writes_from_two_threads_do_not_raise_reentrant_lock(cc):
+    results, errors = {}, []
+
+    def make(tid):
+        try:
+            results[tid] = cc.do_task_new(tid, f"task {tid}", "bug", acc_raw="done")
+        except Exception as e:            # locks.ReentrantLock, most notably
+            errors.append(e)
+
+    t1 = threading.Thread(target=make, args=("thread-a",))
+    t2 = threading.Thread(target=make, args=("thread-b",))
+    t1.start()
+    t2.start()
+    t1.join(5)
+    t2.join(5)
+
+    assert not errors, f"concurrent dashboard writes raised: {errors!r}"
+    assert results.get("thread-a", "").startswith("Created thread-a")
+    assert results.get("thread-b", "").startswith("Created thread-b")
+    text = _backlog()
+    assert "- id: thread-a" in text
+    assert "- id: thread-b" in text

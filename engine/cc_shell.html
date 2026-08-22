@@ -438,6 +438,15 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
   background:linear-gradient(0deg,var(--void) 55%,transparent);padding:14px 0 6px;margin-top:4px}
 .set-meta{font:500 11px/1.7 var(--mono);color:var(--faint)}
 .set-meta code{color:var(--dim)}
+.watchrows{display:flex;flex-direction:column;gap:8px;margin-bottom:10px}
+.watchrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.watchrow input,.watchrow select{background:var(--void);border:1px solid var(--line2);border-radius:8px;
+  padding:7px 10px;color:var(--ink);font:500 12px var(--mono)}
+.watchrow input:focus,.watchrow select:focus{outline:2px solid var(--blue);outline-offset:1px}
+.watchrow .w-name{flex:0 0 150px}
+.watchrow .w-question{flex:2 1 220px}
+.watchrow .w-cadence{flex:0 0 90px}
+.watchrow .w-category{flex:0 0 110px}
 .secrets-list{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}
 .secret-row{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--line2);
   border-radius:8px;padding:7px 11px;font:500 12px var(--mono)}
@@ -457,11 +466,16 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
 .projsw-car{flex:none;color:var(--faint);font-size:9px}
 .projsw-menu{position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--card2);border:1px solid var(--line2);
   border-radius:8px;box-shadow:0 12px 28px rgba(0,0,0,.5);z-index:30;max-height:280px;overflow-y:auto}
-.projsw-item{padding:8px 10px;font:500 11.5px var(--mono);color:var(--ink);cursor:pointer;border-bottom:1px solid var(--line)}
+.projsw-item{display:flex;align-items:center;gap:6px;padding:8px 10px;font:500 11.5px var(--mono);color:var(--ink);cursor:pointer;border-bottom:1px solid var(--line)}
 .projsw-item:last-child{border-bottom:0}
 .projsw-item:hover{background:var(--card)}
 .projsw-item.mut{color:var(--faint);cursor:default}
 .projsw-item .live-dot{color:var(--green);margin-left:4px}
+.projsw-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.projsw-mini{flex:none;background:transparent;border:1px solid var(--line2);border-radius:5px;color:var(--dim);
+  font:600 10px var(--disp);padding:2px 6px;cursor:pointer}
+.projsw-mini:hover{color:var(--ink);border-color:var(--faint)}
+.projsw-mini:disabled{opacity:.4;cursor:not-allowed}
 .rail-collapsed .projsw{display:none}
 </style></head><body>
 
@@ -692,6 +706,12 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
         <button class="btn btn-go btn-mini" id="qaDevStartBtn" onclick="qaServicesStart()">▶ Start app</button>
         <button class="btn btn-stop btn-mini" id="qaDevStopBtn" style="display:none" onclick="qaServicesStop()">■ Stop app</button>
       </div>
+      <!-- Workers strip (Task 7) - one row per $AP_STATE/workers/<slot>.pid,
+           concurrency's per-slot answer to "what is actually running right
+           now". Independent of qa.services: renders whenever build_state
+           served a `workers` key at all, self-hides otherwise (see
+           renderWorkers). -->
+      <div id="workersStrip" style="display:none;margin-top:10px"></div>
     </div>
     <!-- ── New test / Record — the web equivalent of `orbit teach` ── -->
     <div class="band" id="qaTeachBand" style="display:none">
@@ -977,7 +997,7 @@ function card(t,kind){
   if(kind==='run'){live='live';
     timer=`<div class="meta"><span class="orbmark orbmark-sm" aria-hidden="true"></span> ${S&&S.stopped?'⏸ pause pending — finishing this cycle':'in orbit'} <span class="timer" data-start="${t._start||''}">…</span>`+
       `<div class="wd"><i data-wd="${t._start||''}" style="width:0%"></i></div></div>`;
-    btns=`<button class="btn btn-stop btn-mini" onclick="if(confirm('Abort the running cycle and set ${esc(t.id)} aside?'))post('/killtask',{})">Abort &amp; skip</button>`;
+    btns=`<button class="btn btn-stop btn-mini" onclick="if(confirm('Abort the running cycle and set ${esc(t.id)} aside?'))post('/killtask',{id:'${esc(t.id)}'})">Abort &amp; skip</button>`;
   }else if(kind==='next'){
     btns=`<button class="btn btn-go btn-mini" title="move it to the front and resume the loop" onclick="post('/runnow',{id:'${esc(t.id)}'})">Run this next</button>
       <button class="btn btn-mini" title="move up in the queue" onclick="post('/move',{id:'${esc(t.id)}',dir:'up'})">▲</button>
@@ -1155,7 +1175,7 @@ function renderTop(){
   document.getElementById('heroBtns').innerHTML=
     (r.stopped?`<button class="btn btn-go" onclick="post('/resume',{})">Resume loop</button>`
              :`<button class="btn btn-stop" onclick="post('/stop',{})">Pause loop</button>`)+
-    (r.cycle_running?`<button class="btn" onclick="if(confirm('Abort the running cycle? The task is set aside, not retried.'))post('/killtask',{})">Abort cycle</button>`:'');
+    (r.cycle_running?`<button class="btn" onclick="if(confirm('Abort the running cycle? The task is set aside, not retried.'))post('/killtask',{id:'${escJsAttr(r.current_task||'')}'})">Abort cycle</button>`:'');
   // rail buttons + meter
   const lb=document.getElementById('loopBtn');
   lb.innerHTML=r.stopped?'<span class="fi">▶</span><span class="lbl">Resume</span>':'<span class="fi">⏸</span><span class="lbl">Pause</span>';
@@ -1735,27 +1755,61 @@ function qaDevServiceRow(s){
   return `<div class=brow><code>${esc(s.name)}</code>${s.ready?` <span class=aside>${esc(s.ready)}</span>`:''}<span class=spacer></span>
     <button class="btn btn-mini" onclick="qaServicesRestart('${escJsAttr(s.name)}')">↻ Restart</button></div>`;
 }
+function workerRow(w){
+  return `<div class=brow><code>slot ${esc(w.slot)}</code> <span class=aside>${w.tid?esc(w.tid):'no task'}</span>
+    <span class=aside>${w.started?esc(w.started):''}</span><span class=spacer></span>${badge(w.alive?'alive':'gone',w.alive?'ok':'muted')}</div>`;
+}
+function renderWorkers(){
+  // Independent of qa.services - this is per-slot concurrency liveness
+  // (Task 7), not the dev-session app. Self-hides on its own whenever
+  // build_state omitted `workers` entirely (unconfigured, concurrency==1
+  // with nothing running); see workers_state()'s docstring for the exact
+  // absent-vs-empty contract.
+  const el=document.getElementById('workersStrip');
+  if(!el)return;
+  const workers=S&&S.workers;
+  if(!workers){el.style.display='none';el.innerHTML='';return;}
+  el.style.display='';
+  el.innerHTML=`<div class=bandhead style="margin:0 0 4px"><h3 style="font-size:12px">Workers</h3></div>`+
+    (workers.length?workers.map(workerRow).join(''):`<div class=empty>No workers running right now.</div>`);
+}
 function renderQaDev(){
   const band=document.getElementById('qaDevBand');
   if(!band)return;
   const qs=S&&S.qa_services;
-  if(!qs){band.style.display='none';return;}
+  const workers=S&&S.workers;
+  // The band itself now serves two independent stories (dev-session app,
+  // per-slot workers) - show it if EITHER has something to say, so a
+  // concurrency>1 target with no qa.services still sees its workers strip.
+  if(!qs&&!workers){band.style.display='none';return;}
   band.style.display='';
-  const stLabel={stopped:'stopped',starting:'starting…',running:'running',error:'error'}[qs.state]||qs.state;
-  const stClass={stopped:'muted',starting:'warn',running:'ok',error:'stop'}[qs.state]||'muted';
   const stateEl=document.getElementById('qaDevState');
-  if(stateEl)stateEl.innerHTML=badge(stLabel,stClass);
   const noteEl=document.getElementById('qaDevNote');
-  if(noteEl)noteEl.textContent=qs.state==='running'
-    ? 'Tests run against the warm app (attach) — no reboot.'
-    : qs.state==='error' ? (qs.error||'could not bring the app up')
-    : 'Bring the app up once, then flows/teach attach instead of relaunching it every run.';
   const svcEl=document.getElementById('qaDevServices');
-  if(svcEl)svcEl.innerHTML=(qs.services||[]).map(qaDevServiceRow).join('');
-  const busy=qs.state==='running'||qs.state==='starting';
   const startBtn=document.getElementById('qaDevStartBtn'),stopBtn=document.getElementById('qaDevStopBtn');
-  if(startBtn)startBtn.style.display=busy?'none':'';
-  if(stopBtn)stopBtn.style.display=busy?'':'none';
+  if(qs){
+    const stLabel={stopped:'stopped',starting:'starting…',running:'running',error:'error'}[qs.state]||qs.state;
+    const stClass={stopped:'muted',starting:'warn',running:'ok',error:'stop'}[qs.state]||'muted';
+    if(stateEl)stateEl.innerHTML=badge(stLabel,stClass);
+    if(noteEl)noteEl.textContent=qs.state==='running'
+      ? 'Tests run against the warm app (attach) — no reboot.'
+      : qs.state==='error' ? (qs.error||'could not bring the app up')
+      : 'Bring the app up once, then flows/teach attach instead of relaunching it every run.';
+    if(svcEl)svcEl.innerHTML=(qs.services||[]).map(qaDevServiceRow).join('');
+    const busy=qs.state==='running'||qs.state==='starting';
+    if(startBtn)startBtn.style.display=busy?'none':'';
+    if(stopBtn)stopBtn.style.display=busy?'':'none';
+  }else{
+    // No qa.services configured on this target - the dev-session-specific
+    // controls have nothing to show; the workers strip below still renders
+    // on its own.
+    if(stateEl)stateEl.innerHTML='';
+    if(noteEl)noteEl.textContent='';
+    if(svcEl)svcEl.innerHTML='';
+    if(startBtn)startBtn.style.display='none';
+    if(stopBtn)stopBtn.style.display='none';
+  }
+  renderWorkers();
 }
 function renderQa(){
   renderQaDev();
@@ -2782,9 +2836,62 @@ function escAttr(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/"
 function postJSON(path,obj){return fetch(path,{method:'POST',
   headers:{'Content-Type':'application/json','X-CC-Token':TOKEN},body:JSON.stringify(obj)}).then(r=>r.json());}
 function collectChecks(id){return [...document.querySelectorAll('#set-'+id+' input:checked')].map(i=>i.value);}
+/* Working copy of cfg.watches while Settings is open, edited as structured
+   rows (name/question/cadence_hours/category) rather than a JSON textarea -
+   the mcp/gates/qa/plan/knowledge cards stay raw JSON, but watches has a
+   small enough fixed shape (config.py's own watches[i] schema) to earn a
+   real form. Sanitized on load the same way command_center.watches_state
+   is corrupt-tolerant server-side: a non-dict entry or a dict missing keys
+   in a hand-edited config.yaml renders as a blank/defaulted row instead of
+   throwing. */
+let watchRows=[];
+function _sanitizeWatchRow(w){
+  w=(w&&typeof w==='object')?w:{};
+  const cats=['insight','funnel','hypothesis'];
+  return {name:typeof w.name==='string'?w.name:'',
+          question:typeof w.question==='string'?w.question:'',
+          cadence_hours:(Number.isInteger(w.cadence_hours)&&w.cadence_hours>0)?w.cadence_hours:168,
+          category:cats.includes(w.category)?w.category:'insight'};
+}
+function watchRowHtml(w,i){
+  const cats=['insight','funnel','hypothesis'];
+  return `<div class=watchrow data-i="${i}">
+    <input class=w-name placeholder="name (slug)" value="${escAttr(w.name)}" oninput="watchRows[${i}].name=this.value">
+    <input class=w-question placeholder="question" value="${escAttr(w.question)}" oninput="watchRows[${i}].question=this.value">
+    <input class=w-cadence type=number min=1 placeholder="cadence (h)" value="${escAttr(w.cadence_hours)}" oninput="watchRows[${i}].cadence_hours=parseInt(this.value,10)">
+    <select class=w-category onchange="watchRows[${i}].category=this.value">${cats.map(o=>`<option value="${o}" ${w.category===o?'selected':''}>${esc(o)}</option>`).join('')}</select>
+    <button class="btn btn-stop btn-mini" onclick="removeWatchRow(${i})">Remove</button></div>`;
+}
+function renderWatchesCard(){
+  const el=document.getElementById('watchRowsList');if(!el)return;
+  el.innerHTML=watchRows.length?watchRows.map(watchRowHtml).join('')
+    :'<div class=meta style="padding:2px 0 6px">No watches yet.</div>';
+}
+function addWatchRow(){watchRows.push(_sanitizeWatchRow(null));renderWatchesCard();}
+function removeWatchRow(i){watchRows.splice(i,1);renderWatchesCard();}
+// Client-side mirror of config.py's watches[i] rules (name slug, non-empty
+// question, positive cadence) - same discipline as the mcp card's "deep
+// validation runs on save" hint: this just saves an operator the round trip
+// to find out a typo'd row will bounce. Server-side shape check is
+// _validate_config's "watches must be a list"; per-row deep validation is
+// config.py's `validate` either way, so a bypass of this client check still
+// can't corrupt config.yaml.
+const _watchNameRe=/^[a-z0-9][a-z0-9-]*$/;
+function validateWatchRows(){
+  const rows=[];
+  for(let i=0;i<watchRows.length;i++){
+    const w=watchRows[i], n=i+1, name=(w.name||'').trim(), question=(w.question||'').trim();
+    if(!_watchNameRe.test(name))return{err:`Watch row ${n}: name must be a lowercase slug (e.g. wow-signup)`};
+    if(!question)return{err:`Watch row ${n}: question is required`};
+    if(!Number.isInteger(w.cadence_hours)||w.cadence_hours<=0)return{err:`Watch row ${n}: cadence must be a positive integer`};
+    rows.push({name,question,cadence_hours:w.cadence_hours,category:w.category||'insight'});
+  }
+  return{rows};
+}
 function loadSettings(){
   fetch('/api/config',{headers:{'X-CC-Token':TOKEN}}).then(r=>r.json()).then(function(d){
     const c=d.config||{}, m=d.meta||{};
+    watchRows=(Array.isArray(c.watches)?c.watches:[]).map(_sanitizeWatchRow);
     const txt=(id,label,val,hint)=>`<div class=field><label>${label}</label><input id="set-${id}" value="${escAttr(val)}">${hint?`<div class=hint>${hint}</div>`:''}</div>`;
     const num=(id,label,val,hint)=>`<div class=field><label>${label}</label><input id="set-${id}" type="number" min="1" value="${escAttr(val)}">${hint?`<div class=hint>${hint}</div>`:''}</div>`;
     const sel=(id,label,val,opts)=>`<div class=field><label>${label}</label><select id="set-${id}">`+opts.map(o=>`<option value="${escAttr(o)}" ${o===val?'selected':''}>${esc(o)}</option>`).join('')+`</select></div>`;
@@ -2804,10 +2911,15 @@ function loadSettings(){
         <div class=grid2>${txt('model','Model',c.model)}${sel('permission_mode','Permission mode',c.permission_mode,['acceptEdits','plan','bypassPermissions','default'])}</div></div>
       <div class=setcard><h3>Cadence</h3>
         <div class=grid2>${num('interval_seconds','Poll interval (s)',c.interval_seconds)}${num('max_tasks_per_day','Max tasks / day',c.max_tasks_per_day)}</div>
-        ${num('cycle_timeout_seconds','Cycle timeout (s)',c.cycle_timeout_seconds)}</div>
+        ${num('cycle_timeout_seconds','Cycle timeout (s)',c.cycle_timeout_seconds)}
+        ${num('concurrency','Concurrent slots',c.concurrency,'how many task cycles the loop may run in parallel - each slot polls and claims independently; 1 = today\'s single worker')}</div>
       <div class=setcard><h3>Discovery</h3>
         ${checks('sources','Task sources',m.sources_all||[],c.sources||[],'where the loop pulls work from')}
         ${checks('workable_categories','Auto-workable categories',m.categories_all||[],c.workable_categories||[],'categories the loop may build unattended')}</div>
+      <div class=setcard><h3>Watches <span style="font-weight:500;text-transform:none;letter-spacing:0">(optional)</span></h3>
+        <div class=watchrows id=watchRowsList></div>
+        <button class="btn btn-mini" onclick="addWatchRow()">Add row</button>
+        <div class=hint>standing metric questions re-filed into a fresh insight past cadence - name is a lowercase slug, cadence is in hours, category drives the filed task's category. Leave empty to opt out.</div></div>
       <div class=setcard><h3>Verification gates</h3>
         <div class=field><label>Gates — JSON: name → { cmd, cwd, needs: [] }</label>
           <textarea id="set-gates" spellcheck="false">${esc(JSON.stringify(c.gates||{},null,2))}</textarea>
@@ -2846,6 +2958,7 @@ function loadSettings(){
         <button class="btn btn-amber" onclick="if(confirm('Restart the loop to apply saved config? Any in-flight cycle is aborted.'))post('/restart-loop',{})">Restart loop</button>
         <button class="btn" onclick="if(confirm('Restart the dashboard? The page will blink — hard-refresh after ~2s.'))post('/restart-dashboard',{})">Restart dashboard</button>
         <span class=set-meta>Save writes config.yaml · Restart loop applies it to the running loop</span></div>`;
+    renderWatchesCard();
     loadSecrets();
   }).catch(e=>{document.getElementById('settingsBody').innerHTML=`<div class=empty>Could not load settings: ${esc(String(e))}</div>`;});
 }
@@ -2880,13 +2993,25 @@ function saveSettings(){
     try{blocks[id]=JSON.parse(document.getElementById('set-'+id).value||'{}');}
     catch(e){toast(labels[id]+' is not valid JSON: '+e.message);return;}
   }
+  const wv=validateWatchRows();
+  if(wv.err){toast(wv.err);return;}
   const v=id=>document.getElementById('set-'+id).value.trim();
   const n=id=>parseInt(document.getElementById('set-'+id).value,10);
   const payload={
     repo:v('repo'),base_branch:v('base_branch'),branch_prefix:v('branch_prefix'),
     git_host:v('git_host'),git_repo:v('git_repo'),model:v('model'),permission_mode:v('permission_mode'),
     interval_seconds:n('interval_seconds'),max_tasks_per_day:n('max_tasks_per_day'),cycle_timeout_seconds:n('cycle_timeout_seconds'),
+    concurrency:n('concurrency'),
     sources:collectChecks('sources'),workable_categories:collectChecks('workable_categories'),
+    // watches is always sent as a list, never omitted - same as sources/
+    // workable_categories above. cfg.update()'s server-side merge (Task 8)
+    // is shallow: omitting the key on an empty edit would leave a STALE
+    // watches: block on disk after every row is removed, since nothing else
+    // would ever clear it. Sending [] is what actually round-trips "no
+    // watches" - it also matches watches_state's own present-but-empty
+    // reading (band shows "No watches configured." rather than vanishing),
+    // which is the correct fact once this editor has touched the block.
+    watches:wv.rows,
     spec:v('spec'),commit_trailer:v('commit_trailer'),gates:blocks.gates,qa:blocks.qa,plan:blocks.plan,knowledge:blocks.knowledge,
     mcp:blocks.mcp,pull_requests:v('pull_requests')
   };
@@ -2904,17 +3029,56 @@ function initProjectSwitcher(){
     sw.style.display='';
     document.getElementById('projSwName').textContent=j.active_name||'project';
     sw.dataset.projects=JSON.stringify(j.projects||[]);
+    // Keep an OPEN menu in sync (a loop action re-runs this) - a stale menu
+    // would keep offering Start for a loop that is already up.
+    const menu=document.getElementById('projSwMenu');
+    if(menu&&menu.style.display!=='none')renderProjMenu();
   }).catch(()=>{});
 }
-function toggleProjMenu(){
+function renderProjMenu(){
   const sw=document.getElementById('projSwitcher'),menu=document.getElementById('projSwMenu');
   if(!sw||!menu)return;
-  if(menu.style.display!=='none'){menu.style.display='none';return;}
   let projects=[];try{projects=JSON.parse(sw.dataset.projects||'[]');}catch(e){}
-  menu.innerHTML=projects.length?projects.map(p=>
-    `<div class="projsw-item" onclick="switchProject('${escJsAttr(p.path)}')">${esc(p.name)}${p.has_autopilot?'':' <span class=mut>(not initialized)</span>'}${p.loop_running?' <span class=live-dot>●</span>':''}</div>`
-  ).join(''):'<div class="projsw-item mut">No other projects</div>';
+  // Row = switch target (the whole row) + this workspace's loop controls.
+  // Start is disabled only at FULL (every configured slot live): the launcher
+  // refuses to put a second process on a live slot but does start the free
+  // ones, which is the only way to top a crashed slot back up without
+  // stopping the working ones.
+  // Both minis stopPropagation, or clicking one would also switch project.
+  menu.innerHTML=projects.length?projects.map(p=>{
+    const slots=p.loop_running&&p.loop_slots>1?` <span class=mut>${p.loop_tracked}/${p.loop_slots}</span>`:'';
+    const full=p.loop_slots>0&&p.loop_tracked>=p.loop_slots;
+    const acts=p.has_autopilot?
+      `<button class="projsw-mini" ${full?'disabled':''} title="${full?`All ${p.loop_slots} slot(s) already running`:p.loop_running?`Start the remaining slot(s) (${p.loop_tracked}/${p.loop_slots} running)`:'Start this workspace loop'}"
+               onclick="event.stopPropagation();loopAction('start','${escJsAttr(p.path)}')">▶</button>
+       <button class="projsw-mini" title="Stop this workspace loop (stays stopped)"
+               onclick="event.stopPropagation();loopAction('stop','${escJsAttr(p.path)}')">■</button>`:'';
+    return `<div class="projsw-item" onclick="switchProject('${escJsAttr(p.path)}')">`
+      +`<span class="projsw-name">${esc(p.name)}${p.has_autopilot?'':' <span class=mut>(not initialized)</span>'}`
+      +`${p.loop_running?' <span class=live-dot>●</span>':''}${slots}</span>${acts}</div>`;
+  }).join(''):'<div class="projsw-item mut">No other projects</div>';
+}
+function toggleProjMenu(){
+  const menu=document.getElementById('projSwMenu');
+  if(!menu)return;
+  if(menu.style.display!=='none'){menu.style.display='none';return;}
+  renderProjMenu();
   menu.style.display='';
+}
+function loopAction(which,path){
+  // Routes spelled out, not concatenated: a grep for '/_launcher/loop-start'
+  // must find every caller (that is how shell/route parity gets checked).
+  const route=which==='start'?'/_launcher/loop-start':'/_launcher/loop-stop';
+  postJSON(route,{path:path}).then(j=>{
+    toast(j.msg||(j.ok?'done':'failed'));
+    // Re-read /_launcher/state so the badge tells the truth. Twice: a stop
+    // returns as soon as it has SIGNALLED the slots, and a signalled process
+    // is still alive (so still "running") for a beat after that. This menu
+    // has no poll of its own, so without the second read the badge would sit
+    // there claiming the loop is up until the operator reopened it.
+    initProjectSwitcher();
+    setTimeout(initProjectSwitcher,2500);
+  }).catch(e=>toast('Loop '+which+' failed: '+e));
 }
 function switchProject(path){
   // /_launcher/* is a launcher-owned namespace and takes a JSON body (unlike
@@ -2932,7 +3096,7 @@ document.addEventListener('click',e=>{
 });
 
 /* ── render pipeline ────────────────────────────────────────────────────── */
-function sig(r){return JSON.stringify([r.running,r.next_up,r.done,r.board,r.skipped,r.escalated,r.runlog,r.history,r.funnel,r.feature_builds,r.spend_history,r.branches,r.epics,r.qa_flows,r.qa_services,r.onboarding,r.prd,r.watches,r.surveys,r.insight_docs]);}
+function sig(r){return JSON.stringify([r.running,r.next_up,r.done,r.board,r.skipped,r.escalated,r.runlog,r.history,r.funnel,r.feature_builds,r.spend_history,r.branches,r.epics,r.qa_flows,r.qa_services,r.onboarding,r.prd,r.watches,r.surveys,r.insight_docs,r.workers]);}
 function renderViews(){
   // Preserve column scroll positions across rebuilds.
   const colsEl=document.getElementById('queueCols');

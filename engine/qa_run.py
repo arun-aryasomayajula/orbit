@@ -110,6 +110,16 @@ Regression sweeps (Task 27, `--regression [--if-changed]`):
     is attempted in a finally around the whole sweep either way — including
     when a flow's own verdict is "fail", and even if the sweep itself raises.
 
+    The SECOND, separate lock (`--regression`, `--explore` and `--generate`
+    all take it, see `_services_lock`): $AP_STATE/qa/.services.lock, THE
+    workspace qa.services mutex, shared with the loop's own QA gate
+    (qa_check.py) and the dashboard's persistent Dev session. `.qa-running`
+    keeps two QA RUNS from overlapping; this one keeps two qa.services
+    CONSUMERS from fighting over the app's fixed local ports, and most of
+    those consumers are not QA runs. A busy mutex skips the run with a WARN
+    (exit 0, agent never invoked, cursor untouched), the same benign posture
+    as a busy `.qa-running`.
+
     Sweep deadline: `_sweep` stops LAUNCHING new flows once its own elapsed
     time exceeds `SWEEP_DEADLINE_MULTIPLIER (2) x qa.timeout_seconds` — a
     flow already in flight still gets its own full per-flow timeout; only
@@ -290,6 +300,7 @@ Usage: qa_run.py <target> --flow <name> [--timeout N] [--attach]
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -303,6 +314,7 @@ from pathlib import Path
 
 import yaml
 
+import locks
 from backlog_append import SLUG_RE
 from qa_teach import _bad_flows_dir_reason
 
@@ -335,6 +347,12 @@ LOCK_STALE_MARGIN_SECONDS = 60
 # still gets its own full per-flow timeout; only flows not yet STARTED are
 # ever dropped by the deadline, and always with a logged line (see _sweep).
 SWEEP_DEADLINE_MULTIPLIER = 2
+# How long to wait for THE workspace qa.services mutex before skipping the run
+# (see _services_lock). Short on purpose: whoever holds it is a loop QA gate,
+# a Dev session, or another sweep - all of which last minutes - so waiting it
+# out would just stall a loop iteration. A couple of seconds only covers the
+# case where the holder is milliseconds from releasing.
+SERVICES_LOCK_WAIT_SECONDS = 2
 
 USAGE = ("usage: qa_run.py <target> --flow <name> [--timeout N] [--attach]\n"
          "       qa_run.py <target> --regression [--if-changed] [--timeout N]\n"
@@ -1058,6 +1076,42 @@ def _touch_lock(lock_path: Path) -> None:
         pass
 
 
+@contextlib.contextmanager
+def _services_lock(qa_cfg, ap_state: Path, mode: str):
+    """Hold THE workspace qa.services mutex (qa_check.SERVICES_LOCK_NAME)
+    across an agent run that will bind qa.services' fixed ports, and yield
+    whether the run may proceed.
+
+    Distinct from `.qa-running` and NOT a replacement for it: `.qa-running`
+    stops two QA RUNS overlapping in this workspace, while this stops two
+    qa.services CONSUMERS fighting for the same local ports - and the other
+    consumers are not QA runs at all (the loop's own gate in qa_check.py, and
+    the dashboard's persistent Dev session). One lock cannot do both jobs
+    because the sets do not nest.
+
+    Yields True when the mutex is held (or when there are no services to
+    serialize, in which case there is nothing to hold), False when another
+    consumer has it - the caller then skips the run with a WARN rather than
+    racing it for the bind and getting a half-up app.
+    """
+    if not (isinstance(qa_cfg, dict) and qa_cfg.get("services")):
+        yield True          # nothing binds a port - nothing to serialize
+        return
+    # Lazy import for the same reason as _flow_mcp_config's: qa_check resolves
+    # AP_STATE/AP_HOME at import time, and this run's values are only in the
+    # environment by now.
+    import qa_check
+    lock_path = qa_check.services_lock_path(ap_state)
+    try:
+        with locks.hold(lock_path, timeout=SERVICES_LOCK_WAIT_SECONDS, break_stale=True):
+            yield True
+    except locks.LockTimeout:
+        print(f"WARN: {mode}: another qa.services consumer holds {lock_path} "
+              f"(the loop's QA gate, a Dev session, or another QA run) - skipping "
+              f"this run rather than racing it for the app's ports")
+        yield False
+
+
 def _release_lock(lock_path: Path) -> None:
     """Ownership-checked release: unlinks the lock ONLY if its recorded pid
     is still ours. Between our own acquire/touch calls, another process can
@@ -1278,9 +1332,16 @@ def _run_regression(target: Path, ap_home: Path, cfg_all: dict, qa_cfg: dict,
 
     swept_ok = False
     try:
-        rc = _sweep(target, ap_home, ap_state, cfg_all, qa_cfg, flows_root, max_flows,
-                    timeout_arg, timeout_seconds, lock_path)
-        swept_ok = True
+        # The sweep's flows drive a real browser against qa.services, so it is
+        # one of the mutex's consumers (see _services_lock). A busy mutex skips
+        # the sweep exactly as a busy `.qa-running` lock does - the cursor is
+        # left untouched, so the next tick tries again.
+        with _services_lock(qa_cfg, ap_state, "regression") as have_ports:
+            if not have_ports:
+                return OK
+            rc = _sweep(target, ap_home, ap_state, cfg_all, qa_cfg, flows_root, max_flows,
+                        timeout_arg, timeout_seconds, lock_path)
+            swept_ok = True
     except Exception as e:                       # noqa: BLE001 — loop safety: never let a
         # sweep-level crash propagate past this module — see the "infra"
         # exit-1 bucket in the module docstring.
@@ -1448,7 +1509,13 @@ def _run_explore(target: Path, ap_home: Path, cfg_all: dict, qa_cfg, timeout_arg
     try:
         mcp_path = _explore_mcp_config(qa_cfg, ap_state)
         start = time.time()
-        launch_rc = _run_explore_agent(qa_cfg, cfg_all, target, mcp_path, timeout, ap_home, ap_state)
+        # The crawl binds qa.services' ports for the length of the agent call,
+        # so it takes the workspace mutex too (see _services_lock).
+        with _services_lock(qa_cfg, ap_state, "explore") as have_ports:
+            if not have_ports:
+                return OK
+            launch_rc = _run_explore_agent(qa_cfg, cfg_all, target, mcp_path, timeout,
+                                           ap_home, ap_state)
         if launch_rc is not None:
             return launch_rc
 
@@ -1632,8 +1699,13 @@ def _run_generate(target: Path, ap_home: Path, cfg_all: dict, qa_cfg, timeout_ar
     try:
         mcp_path = _generate_mcp_config(qa_cfg, ap_state)
         start = time.time()
-        launch_rc = _run_generate_agent(qa_cfg, cfg_all, target, mcp_path, timeout, ap_home,
-                                         ap_state, max_candidates, attach=attach)
+        # Same as --regression/--explore: the generate agent drives the running
+        # app, so it takes the workspace qa.services mutex (see _services_lock).
+        with _services_lock(qa_cfg, ap_state, "generate") as have_ports:
+            if not have_ports:
+                return OK
+            launch_rc = _run_generate_agent(qa_cfg, cfg_all, target, mcp_path, timeout, ap_home,
+                                            ap_state, max_candidates, attach=attach)
         if launch_rc is not None:
             return launch_rc
 

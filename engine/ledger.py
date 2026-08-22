@@ -16,10 +16,37 @@ the picker so a task is never re-worked while its branch awaits review. Clear an
 Every state-writing verb is gated by the lifecycle state machine (lifecycle.py —
 the single source of truth for legal transitions). An illegal transition prints
 why and exits 3, writing nothing. `--force` overrides the gate and stamps
-`forced: true` on the entry, so overrides stay auditable.
+`forced: true` on the entry, so overrides stay auditable. Every state-writing
+verb also goes through one shared lock (`_locked_update`, below) around its
+whole load-modify-save cycle, so two concurrent ledger.py invocations can
+never lose one's update to the other's whole-file rewrite.
+
+Other exit codes: 2 (bad arguments — nothing written), 5 (`claim --exclusive`
+refused a non-reclaimable entry — nothing written), 6 (could not acquire the
+ledger lock within its timeout — nothing written; some other holder is
+either alive and slow, or genuinely wedged).
 
 Usage:
   ledger.py claim <id> <title>          # mark in_progress
+  ledger.py claim <id> <title> --exclusive --pid P --slot S
+                                         # pid-aware exclusive claim: under a
+                                         # real flock on the ledger, refuses
+                                         # (exit 5, nothing written) a tid
+                                         # that already has a non-reclaimable
+                                         # entry (in_progress with a live pid,
+                                         # committed, pushed, merged, ...); an
+                                         # in_progress entry whose worker_pid
+                                         # is dead IS reclaimable (takeover -
+                                         # a sanctioned `reclaim` lifecycle
+                                         # event; records the new pid/slot,
+                                         # resets claimed_at, and appends to
+                                         # a reclaimed_from list). --pid and
+                                         # --slot require --exclusive (exit 2
+                                         # otherwise). Non-exclusive claim (no
+                                         # --exclusive) is unchanged except
+                                         # that re-claiming an in_progress
+                                         # task now needs --force (see
+                                         # lifecycle.py).
   ledger.py committed <id> <branch> <sha>  # mark committed (atomic local commit made)
   ledger.py pushed <id> <remote_ref>    # mark pushed (on remote branch, awaiting review)
   ledger.py escalate <id> <reason>      # mark escalated (needs a human)
@@ -39,6 +66,7 @@ Usage:
   ledger.py show                        # human-readable dump
   (any state-writing verb accepts --force to override the lifecycle gate)
 """
+import contextlib
 import json
 import os
 import sys
@@ -47,6 +75,12 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lifecycle
+import locks
+
+# locks.pid_alive is the public name (a parallel fix promoted it from the
+# private _pid_alive this module originally called); fall back to the
+# private name so this keeps working regardless of which lands first.
+_pid_alive = getattr(locks, "pid_alive", None) or locks._pid_alive
 
 
 def _ap_state():
@@ -63,6 +97,7 @@ def _ap_state():
 
 
 LEDGER = os.path.join(_ap_state(), "ledger.json")
+LEDGER_LOCK = os.path.join(os.path.dirname(LEDGER), ".ledger.lock")
 
 
 def _now():
@@ -121,65 +156,157 @@ def _gate(data, tid, event, force):
     sys.exit(3)
 
 
-def cmd_claim(tid, title, force=False):
-    # Record a task as in_progress at claim time.
-    data = _load()
-    forced = _gate(data, tid, "claim", force)
-    e = _entry(data, tid)
-    e.update(state="in_progress", title=title,
-             claimed_at=e.get("claimed_at") or _now(), updated_at=_now())
-    if forced:
-        e["forced"] = True
-    _save(data)
+@contextlib.contextmanager
+def _locked_update():
+    # The one lock chokepoint every ledger state-writing verb goes through:
+    # holds a real flock (locks.hold) around a load-modify-save cycle so two
+    # concurrent ledger.py invocations can never lose an update to a
+    # whole-file rewrite (_save always replaces the ENTIRE file, so two
+    # overlapping load-then-save cycles racing on DIFFERENT tids would
+    # otherwise silently drop whichever one wrote first). Yields the loaded
+    # ledger dict for the caller to mutate in place; saves ONLY on a clean
+    # exit — any exception (including the sys.exit a lifecycle refusal
+    # raises) skips the save, matching every verb's "illegal -> nothing
+    # written" contract. Callers must stay millisecond-fast in here and
+    # NEVER invoke a subprocess (see locks.py's module docstring on why
+    # holding a lock across a long-lived child is dangerous).
+    with locks.hold(LEDGER_LOCK):
+        data = _load()
+        yield data
+        _save(data)
+
+
+def _slot_worker_matches(slot, tid):
+    # True iff $AP_STATE/workers/<slot>.pid names a LIVE pid that is, right
+    # now, recorded as working THIS exact tid. The slot loop (co-owned by a
+    # later task) writes/refreshes this file immediately after claiming a
+    # task, so it is the only signal that actually answers "is this specific
+    # task still in flight" — an entry's claim-time worker_pid is the loop's
+    # own long-lived pid, which stays alive across many tasks and would make
+    # the reaper a permanent no-op if trusted directly (the bug an
+    # adversarial review caught in the slot loop's wiring). A missing file,
+    # a dead pid, or a pid file naming a DIFFERENT tid (the slot moved on;
+    # this one is orphaned) all mean "not verified live".
+    if slot is None:
+        return False
+    path = os.path.join(_ap_state(), "workers", f"{slot}.pid")
+    try:
+        with open(path) as f:
+            info = json.load(f)
+    except (OSError, ValueError):
+        return False
+    pid = info.get("pid")
+    if pid is None or not _pid_alive(pid):
+        return False
+    return str(info.get("tid")) == str(tid)
+
+
+def cmd_claim(tid, title, force=False, exclusive=False, pid=None, slot=None):
+    # Record a task as in_progress at claim time. Non-exclusive (no --pid):
+    # today's behavior exactly, unchanged except that lifecycle.py now makes
+    # re-claiming an in_progress task illegal by default (see its docstring).
+    if not exclusive:
+        with _locked_update() as data:
+            forced = _gate(data, tid, "claim", force)
+            e = _entry(data, tid)
+            e.update(state="in_progress", title=title,
+                     claimed_at=e.get("claimed_at") or _now(), updated_at=_now())
+            if forced:
+                e["forced"] = True
+        return
+    cmd_claim_exclusive(tid, title, pid, slot, force=force)
+
+
+def cmd_claim_exclusive(tid, title, pid, slot, force=False):
+    # Exclusive, pid-aware claim: the whole point is a single winner when two
+    # workers race the same tid, so the check-then-write has to happen under
+    # a real lock with the ledger reloaded INSIDE it (a load taken before the
+    # lock could be stale by the time we act on it). Refuses (exit 5, nothing
+    # written) a tid that already has a non-reclaimable entry: in_progress
+    # with a live worker_pid, or any reviewable/terminal state (committed,
+    # pushed, merged, ...). An in_progress entry whose recorded worker_pid is
+    # dead IS reclaimable — takeover, not refusal — since the loop invariant
+    # this exists to protect ("at most one live worker per tid") already
+    # holds; it just needs the entry updated to the new worker. The takeover
+    # is routed through lifecycle as a sanctioned `reclaim` event (legal only
+    # from in_progress) rather than a bare field mutation, so "every
+    # state-writing verb is gated" stays true.
+    if pid is None:
+        print("claim --exclusive requires --pid P", file=sys.stderr)
+        sys.exit(2)
+    with _locked_update() as data:
+        e = data["entries"].get(str(tid))
+        reclaimed_from = None
+        if e is not None:
+            state = e.get("state")
+            live_pid = e.get("worker_pid")
+            reclaimable = state == "in_progress" and live_pid is not None \
+                and not _pid_alive(live_pid)
+            if not reclaimable:
+                detail = (f"in_progress, worker_pid {live_pid} still live" if state == "in_progress"
+                          else f"state '{state}'")
+                if force:
+                    print(f"task {tid}: FORCED exclusive claim over a non-reclaimable entry "
+                          f"({detail})", file=sys.stderr)
+                else:
+                    print(f"task {tid}: exclusive claim refused — non-reclaimable entry "
+                          f"({detail}) (--force to take over anyway)", file=sys.stderr)
+                    sys.exit(5)
+            else:
+                reclaimed_from = live_pid
+                _gate(data, tid, "reclaim", force=False)  # asserts the event's legality (always true here)
+        entry = _entry(data, tid)
+        claimed_at = _now() if reclaimed_from is not None else (entry.get("claimed_at") or _now())
+        entry.update(state="in_progress", title=title, worker_pid=pid, slot=slot,
+                     claimed_at=claimed_at, updated_at=_now())
+        if reclaimed_from is not None:
+            entry.setdefault("reclaimed_from", []).append(reclaimed_from)
+        if force and e is not None and reclaimed_from is None:
+            entry["forced"] = True
 
 
 def cmd_committed(tid, branch, sha, force=False):
     # Mark a task committed: an atomic local commit was made on its per-task branch.
-    data = _load()
-    forced = _gate(data, tid, "committed", force)
-    e = _entry(data, tid)
-    e.update(state="committed", branch=branch, sha=sha, updated_at=_now())
-    if forced:
-        e["forced"] = True
-    _save(data)
+    with _locked_update() as data:
+        forced = _gate(data, tid, "committed", force)
+        e = _entry(data, tid)
+        e.update(state="committed", branch=branch, sha=sha, updated_at=_now())
+        if forced:
+            e["forced"] = True
 
 
 def cmd_pushed(tid, remote_ref, force=False):
     # Mark a task pushed: its per-task branch is on the remote, awaiting review.
-    data = _load()
-    forced = _gate(data, tid, "pushed", force)
-    e = _entry(data, tid)
-    e.update(state="pushed", remote_ref=remote_ref, updated_at=_now())
-    if forced:
-        e["forced"] = True
-    _save(data)
+    with _locked_update() as data:
+        forced = _gate(data, tid, "pushed", force)
+        e = _entry(data, tid)
+        e.update(state="pushed", remote_ref=remote_ref, updated_at=_now())
+        if forced:
+            e["forced"] = True
 
 
 def cmd_escalate(tid, reason, force=False):
     # Mark a task escalated: stopped, needs a human (see NEEDS_YOU.md).
-    data = _load()
-    forced = _gate(data, tid, "escalate", force)
-    e = _entry(data, tid)
-    e.update(state="escalated", reason=reason, updated_at=_now())
-    if forced:
-        e["forced"] = True
-    _save(data)
+    with _locked_update() as data:
+        forced = _gate(data, tid, "escalate", force)
+        e = _entry(data, tid)
+        e.update(state="escalated", reason=reason, updated_at=_now())
+        if forced:
+            e["forced"] = True
 
 
 def cmd_pr(tid, url):
     # Record the PR the wrapper opened for this ship (state unchanged — the PR
     # is metadata on the pushed branch; review outcome still comes via `mark`).
-    data = _load()
-    _entry(data, tid).update(pr_url=url, updated_at=_now())
-    _save(data)
+    with _locked_update() as data:
+        _entry(data, tid).update(pr_url=url, updated_at=_now())
 
 
 def cmd_attach_patch(tid, path):
     # Record the patch path the wrapper captured for this task (best-effort).
-    data = _load()
-    if str(tid) in data["entries"]:
-        data["entries"][str(tid)].update(patch=path, updated_at=_now())
-        _save(data)
+    with _locked_update() as data:
+        if str(tid) in data["entries"]:
+            data["entries"][str(tid)].update(patch=path, updated_at=_now())
 
 
 ATTACHMENT_KINDS = ("screenshot", "log", "report")
@@ -194,13 +321,12 @@ def cmd_attach(tid, kind, path, label=""):
     if kind not in ATTACHMENT_KINDS:
         print(f"invalid attachment kind '{kind}' ({'|'.join(ATTACHMENT_KINDS)})", file=sys.stderr)
         sys.exit(2)
-    data = _load()
-    if str(tid) in data["entries"]:
-        e = data["entries"][str(tid)]
-        e.setdefault("attachments", []).append(
-            {"kind": kind, "path": path, "label": label, "at": _now()})
-        e["updated_at"] = _now()
-        _save(data)
+    with _locked_update() as data:
+        if str(tid) in data["entries"]:
+            e = data["entries"][str(tid)]
+            e.setdefault("attachments", []).append(
+                {"kind": kind, "path": path, "label": label, "at": _now()})
+            e["updated_at"] = _now()
 
 
 def cmd_qa_verdict(tid, verdict, summary=""):
@@ -210,12 +336,11 @@ def cmd_qa_verdict(tid, verdict, summary=""):
     if verdict not in QA_VERDICTS:
         print(f"invalid qa verdict '{verdict}' ({'|'.join(QA_VERDICTS)})", file=sys.stderr)
         sys.exit(2)
-    data = _load()
-    if str(tid) in data["entries"]:
-        e = data["entries"][str(tid)]
-        e["qa"] = {"verdict": verdict, "summary": summary, "at": _now()}
-        e["updated_at"] = _now()
-        _save(data)
+    with _locked_update() as data:
+        if str(tid) in data["entries"]:
+            e = data["entries"][str(tid)]
+            e["qa"] = {"verdict": verdict, "summary": summary, "at": _now()}
+            e["updated_at"] = _now()
 
 
 def cmd_mark(tid, outcome, note="", force=False):
@@ -225,15 +350,14 @@ def cmd_mark(tid, outcome, note="", force=False):
     if outcome not in ("merged", "rejected"):
         print(f"invalid outcome '{outcome}' (merged|rejected)", file=sys.stderr)
         sys.exit(2)
-    data = _load()
-    forced = _gate(data, tid, outcome, force)
-    e = _entry(data, tid)
-    e.update(state=outcome, reviewed_at=_now(), updated_at=_now())
-    if note:
-        e["review_note"] = note
-    if forced:
-        e["forced"] = True
-    _save(data)
+    with _locked_update() as data:
+        forced = _gate(data, tid, outcome, force)
+        e = _entry(data, tid)
+        e.update(state=outcome, reviewed_at=_now(), updated_at=_now())
+        if note:
+            e["review_note"] = note
+        if forced:
+            e["forced"] = True
     print(f"task {tid} → {outcome}")
 
 
@@ -241,15 +365,14 @@ def cmd_reverted(tid, note="", force=False):
     # Record that the operator reverted this ship after merge. State is kept
     # (the original sha stays an ancestor of base, so `merged` categorization
     # still holds) — this adds the WHY, which the calibration miner feeds on.
-    data = _load()
-    forced = _gate(data, tid, "reverted", force)
-    e = _entry(data, tid)
-    e.update(reverted_at=_now(), updated_at=_now())
-    if note:
-        e["revert_note"] = note
-    if forced:
-        e["forced"] = True
-    _save(data)
+    with _locked_update() as data:
+        forced = _gate(data, tid, "reverted", force)
+        e = _entry(data, tid)
+        e.update(reverted_at=_now(), updated_at=_now())
+        if note:
+            e["revert_note"] = note
+        if forced:
+            e["forced"] = True
     print(f"task {tid} → reverted recorded")
 
 
@@ -261,31 +384,59 @@ def cmd_reap(max_age_seconds):
     # Escalating is the lifecycle-legal way out — the operator's answer re-queues.
     # Prints the reaped ids space-separated (empty output = nothing reaped) so the
     # wrapper can notify. Entries without a parseable updated_at are left alone.
+    #
+    # Identity-aware (NOT pid-alone): an entry's claim-time worker_pid is the
+    # slot LOOP's own long-lived pid, which keeps running across many tasks —
+    # trusting it directly here would make the reaper a permanent no-op for
+    # as long as that loop is alive, whether or not it is still working THIS
+    # task (the bug an adversarial review caught in the slot loop's wiring).
+    # The only signal that answers "is this specific task still in flight" is
+    # $AP_STATE/workers/<slot>.pid: the slot loop writes/refreshes it right
+    # after claiming, naming both its pid and the tid it's currently on
+    # (see _slot_worker_matches). A match → skip (logged, not escalated). A
+    # mismatch, dead pid, or missing file → escalate immediately, same as a
+    # legacy entry with no slot at all (no verified signal, no benefit of
+    # the doubt). Documented invariant change from Task 2's original
+    # worker_pid-trusting version; full docs land in T10.
+    #
+    # Unconditional backstop: past 3x max_age, escalate regardless of any
+    # liveness signal — a wedged or endlessly-refreshed pid file must not be
+    # able to keep an entry in limbo forever.
     try:
         max_age = int(max_age_seconds)
     except (TypeError, ValueError):
         print(f"reap: max_age_seconds must be an integer, got '{max_age_seconds}'", file=sys.stderr)
         sys.exit(2)
-    data = _load()
     now = datetime.now(timezone.utc)
     reaped = []
-    for tid, e in data["entries"].items():
-        state = e.get("state")
-        if state not in ("in_progress", "committed"):
-            continue
-        try:
-            ts = datetime.strptime(e.get("updated_at", ""), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-        age = (now - ts).total_seconds()
-        if age <= max_age:
-            continue
-        e.update(state="escalated", updated_at=_now(),
-                 reason=f"reaper: cycle died mid-flight (stuck at '{state}' for {int(age)}s; "
-                        f"answer to re-queue, or clear to re-pick)")
-        reaped.append(tid)
+    with _locked_update() as data:
+        for tid, e in data["entries"].items():
+            state = e.get("state")
+            if state not in ("in_progress", "committed"):
+                continue
+            try:
+                ts = datetime.strptime(e.get("updated_at", ""), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            age = (now - ts).total_seconds()
+            if age <= max_age:
+                continue
+            backstop = age > 3 * max_age
+            if not backstop and _slot_worker_matches(e.get("slot"), tid):
+                print(f"reap: task {tid} stuck at '{state}' for {int(age)}s but slot "
+                      f"'{e.get('slot')}' worker is still alive and on this task — skipping",
+                      file=sys.stderr)
+                continue
+            reason = (f"reaper: cycle died mid-flight (stuck at '{state}' for {int(age)}s; "
+                      f"answer to re-queue, or clear to re-pick)")
+            if backstop:
+                print(f"reap: task {tid} backstop fired — escalating after {int(age)}s "
+                      f"(> {3 * max_age}s = 3x timeout) regardless of any liveness signal",
+                      file=sys.stderr)
+                reason = "reaper: backstop escalation (3x timeout exceeded); " + reason
+            e.update(state="escalated", updated_at=_now(), reason=reason)
+            reaped.append(tid)
     if reaped:
-        _save(data)
         print(" ".join(sorted(reaped)))
 
 
@@ -311,9 +462,9 @@ def cmd_clear(tid):
     # Remove a task's entry entirely so the picker can pick it again. Used to
     # re-promote an escalated task the operator judged the loop CAN now solve
     # (e.g. a stalled cycle that died before finishing). Returns 0 either way.
-    data = _load()
-    if data["entries"].pop(str(tid), None) is not None:
-        _save(data)
+    with _locked_update() as data:
+        removed = data["entries"].pop(str(tid), None) is not None
+    if removed:
         print(f"cleared ledger entry for '{tid}' — pickable again")
     else:
         print(f"no ledger entry for '{tid}' (nothing to clear)")
@@ -345,6 +496,11 @@ def cmd_show():
             line += f"\n      patch: {e['patch']}"
         if e.get("reason"):
             line += f"\n      reason: {e['reason']}"
+        if e.get("worker_pid"):
+            line += f"\n      worker: pid {e['worker_pid']}" + (f" slot {e['slot']}" if e.get("slot") else "")
+            if e.get("reclaimed_from"):
+                dead_pids = ", ".join(str(p) for p in e["reclaimed_from"])
+                line += f" (reclaimed from dead pid(s) {dead_pids})"
         for a in e.get("attachments") or []:
             line += (f"\n      attach[{a.get('kind')}]: {a.get('path')}"
                       + (f" — {a['label']}" if a.get("label") else ""))
@@ -355,16 +511,45 @@ def cmd_show():
         print(line)
 
 
+def _pop_flag_value(argv, flag):
+    # Remove `flag VALUE` from argv in place and return VALUE, or None if the
+    # flag isn't present. Exits 2 if the flag is present with no value.
+    if flag not in argv:
+        return None
+    i = argv.index(flag)
+    if i + 1 >= len(argv):
+        print(f"missing value for {flag}", file=sys.stderr)
+        sys.exit(2)
+    val = argv[i + 1]
+    del argv[i:i + 2]
+    return val
+
+
 def main(argv):
+    argv = list(argv)
     force = "--force" in argv
     argv = [a for a in argv if a != "--force"]
+    exclusive = "--exclusive" in argv
+    argv = [a for a in argv if a != "--exclusive"]
+    pid = _pop_flag_value(argv, "--pid")
+    slot = _pop_flag_value(argv, "--slot")
+    if (pid is not None or slot is not None) and not exclusive:
+        print("--pid/--slot require --exclusive (no silent non-exclusive degrade)", file=sys.stderr)
+        return 2
+    if pid is not None:
+        try:
+            pid = int(pid)
+        except ValueError:
+            print(f"--pid must be an integer, got '{pid}'", file=sys.stderr)
+            return 2
     if not argv:
         print(__doc__)
         return 2
     cmd, rest = argv[0], argv[1:]
     try:
         if cmd == "claim":
-            cmd_claim(rest[0], rest[1] if len(rest) > 1 else "", force=force)
+            cmd_claim(rest[0], rest[1] if len(rest) > 1 else "", force=force,
+                      exclusive=exclusive, pid=pid, slot=slot)
         elif cmd == "committed":
             cmd_committed(rest[0], rest[1], rest[2], force=force)
         elif cmd == "pushed":
@@ -401,6 +586,9 @@ def main(argv):
     except IndexError:
         print(f"missing argument for '{cmd}' — see ledger.py with no args", file=sys.stderr)
         return 2
+    except locks.LockTimeout as e:
+        print(f"ledger: could not acquire the ledger lock in time — {e}", file=sys.stderr)
+        return 6
     return 0
 
 

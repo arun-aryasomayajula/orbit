@@ -12,6 +12,7 @@ import importlib
 import json
 import os
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -655,3 +656,425 @@ def test_category_fallback_lists_insight(cc):
     shell = (Path(cc.ENGINE) / "cc_shell.html").read_text()
     fallback = shell.split("function _catOptions", 1)[1].split("\n}", 1)[0]
     assert "'insight'" in fallback
+
+
+# ── per-slot workers (Task 7) ────────────────────────────────────────────
+# workers_state() reads $AP_STATE/workers/<slot>.pid (run.sh's
+# write_worker_pid: {pid, tid, started}) and stamps each with `alive`
+# (locks.pid_alive) - the same identity-aware liveness ledger.py's reap
+# already trusts (a slot loop's own pid outlives any single task, so a plain
+# "is the loop alive" check would never go false). Absent from build_state
+# (not merely empty) when there's nothing to show: the dir is empty or
+# missing AND concurrency is 1 (today's overwhelming default) - same
+# discipline as watches_state/qa_services_state.
+
+def _guaranteed_dead_pid() -> int:
+    """A pid that has definitely already exited - not a made-up number that
+    might collide with something real and alive on the test machine (mirrors
+    tests/test_slot_claims.py's helper of the same name)."""
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    return p.pid
+
+
+def _write_worker_pid(cc, slot, pid, tid, started="2026-08-22T00:00:00Z",
+                      cycle_pid=None, cycle_pgid=None):
+    d = Path(cc.AP_STATE) / "workers"
+    d.mkdir(parents=True, exist_ok=True)
+    rec = {"pid": pid, "tid": tid, "started": started}
+    if cycle_pid is not None:
+        rec["cycle_pid"] = cycle_pid
+    if cycle_pgid is not None:
+        rec["cycle_pgid"] = cycle_pgid
+    (d / f"{slot}.pid").write_text(json.dumps(rec))
+
+
+def _write_loop_pid(cc, slot, pid):
+    """run.sh's lifetime loop-<slot>.pid, which lives in the SAME dir as the
+    per-cycle files and must never be read as one."""
+    d = Path(cc.AP_STATE) / "workers"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"loop-{slot}.pid").write_text(
+        json.dumps({"pid": pid, "slot": str(slot), "started": "2026-08-22T00:00:00Z"}))
+
+
+def _write_ledger(cc, entries):
+    (Path(cc.AP_STATE) / "ledger.json").write_text(json.dumps({"entries": entries}))
+
+
+def test_workers_absent_when_unconfigured(cc):
+    """No workers/ dir at all, concurrency unset (defaults to 1) - the key
+    must not appear, so a single-slot target's /api/state stays
+    byte-identical to before T7."""
+    assert cc.workers_state() is None
+    assert "workers" not in cc.build_state()
+
+
+def test_workers_shape_alive_and_dead_pid(cc):
+    dead = _guaranteed_dead_pid()
+    _write_worker_pid(cc, "0", os.getpid(), "t-live", "2026-08-22T00:00:00Z")
+    _write_worker_pid(cc, "1", dead, "t-dead", "2026-08-22T00:01:00Z")
+    ws = cc.workers_state()
+    by_slot = {w["slot"]: w for w in ws}
+    assert by_slot["0"] == {"slot": "0", "pid": os.getpid(), "tid": "t-live",
+                            "started": "2026-08-22T00:00:00Z", "alive": True,
+                            "cycle_pid": None, "cycle_pgid": None}
+    assert by_slot["1"] == {"slot": "1", "pid": dead, "tid": "t-dead",
+                            "started": "2026-08-22T00:01:00Z", "alive": False,
+                            "cycle_pid": None, "cycle_pgid": None}
+    s = cc.build_state()
+    assert s["workers"] == ws
+
+
+def test_workers_state_ignores_the_lifetime_loop_pid_files(cc):
+    """F3: loop-<slot>.pid shares the workers dir but means "slot owned", not
+    "task in flight". Counting one as a worker would leave a phantom row on
+    the strip and make build_state's `live` true for the loop's whole life."""
+    _write_loop_pid(cc, 0, os.getpid())
+    assert cc.workers_state() is None          # nothing worth a strip
+    assert "workers" not in cc.build_state()
+    _write_worker_pid(cc, "0", os.getpid(), "t-live")
+    ws = cc.workers_state()
+    assert [w["slot"] for w in ws] == ["0"]    # the numeric stem only
+
+
+def _write_aplog(cc, lines):
+    log = Path(cc.AP_STATE) / "logs" / "orbit.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("".join(lines))
+
+
+_ONE_CYCLE_LOG = [
+    "[2026-08-22 10:00:00] [slot 0] cycle start (task t-a, 2 pickable)\n",
+    "[2026-08-22 10:04:00] [slot 0] pushed origin/autopilot/task-t-a (abc) — review\n",
+]
+
+
+def test_turnaround_is_reported_with_a_single_live_worker(cc):
+    """Control for the suppression test below: one worker means the
+    start/terminal pairing in the shared log is unambiguous, so the number is
+    real and must still be published."""
+    _write_worker_pid(cc, "0", os.getpid(), "t-a")
+    _write_aplog(cc, _ONE_CYCLE_LOG)
+    rt = cc.probe_runtime()
+    assert rt["last_cycle_dur"] == 240
+    assert rt["avg_cycle_sec"] == 240
+    assert rt["cycle_samples"] == 1
+
+
+def test_turnaround_is_suppressed_while_several_workers_are_live(cc):
+    """F9: turnaround is measured by pairing a "cycle start" line with the next
+    terminal line in ONE shared orbit.log. With slots interleaving, slot 1's
+    terminal line closes slot 0's start and the "duration" is the gap between
+    two unrelated events. Publish nothing rather than a number nobody can see
+    is wrong (the UI renders null as "—"). Slot-tagged pairing is M5."""
+    _write_worker_pid(cc, "0", os.getpid(), "t-a")
+    _write_worker_pid(cc, "1", os.getpid(), "t-b")
+    _write_aplog(cc, _ONE_CYCLE_LOG + [
+        "[2026-08-22 10:01:00] [slot 1] cycle start (task t-b, 1 pickable)\n",
+        "[2026-08-22 10:09:00] [slot 1] cycle committed 1 change(s) (def)\n",
+    ])
+    rt = cc.probe_runtime()
+    assert rt["last_cycle_dur"] is None
+    assert rt["avg_cycle_sec"] is None
+    assert rt["cycle_samples"] == 0
+    assert rt["heartbeat"] is not None      # everything else still reported
+
+
+def test_probe_runtime_reuses_build_states_worker_read(cc, monkeypatch):
+    """F9: one poll, one read of the pid files. build_state needs
+    workers_state() for `live`/`workers`; probe_runtime needed the same list
+    and used to recompute it (re-reading and liveness-probing every file) on
+    every 3-second poll."""
+    _write_worker_pid(cc, "0", os.getpid(), "t-a")
+    real = cc.workers_state
+    calls = []
+
+    def counting():
+        calls.append(1)
+        return real()
+
+    monkeypatch.setattr(cc, "workers_state", counting)
+    cc.build_state()
+    assert len(calls) == 1, f"workers_state() ran {len(calls)}x in one poll"
+    # ...and standalone callers still get a self-sufficient probe_runtime.
+    calls.clear()
+    assert cc.probe_runtime()["daily_count"] == 0
+    assert len(calls) == 1
+
+
+def test_workers_present_but_empty_when_concurrency_over_one(cc):
+    """concurrency > 1 with an empty/missing workers dir still shows the key
+    ([] not absent) - an operator who just turned it on and is looking for
+    the strip needs to see "no workers right now", not have it vanish."""
+    import yaml
+    cfg_path = Path(cc.AP_HOME) / "config.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text()) or {}
+    cfg["concurrency"] = 3
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    assert cc.workers_state() == []
+    assert cc.build_state()["workers"] == []
+
+
+def test_workers_tolerates_corrupt_pid_file(cc):
+    d = Path(cc.AP_STATE) / "workers"
+    d.mkdir(parents=True)
+    (d / "0.pid").write_text("not json{")
+    assert cc.workers_state() == []
+    s = cc.build_state()   # must not raise
+    assert s["workers"] == []
+
+
+# ── board `live`: replacing the pgrep-based bool (Task 7) ────────────────
+# An in_progress ledger entry only shows as RUNNING when build_state's `live`
+# is true AND it's the claimed marker's task. `live` now comes from
+# workers_state() (any alive worker) whenever $AP_STATE/workers/ exists at
+# all - including "empty means genuinely idle", not a reason to fall back -
+# and only drops back to the machine-wide cycle_pids() pgrep when that dir
+# has never been created (a pre-T4 state dir, or the dashboard polled before
+# the loop's very first iteration).
+
+def test_in_progress_shows_running_when_a_worker_is_alive(cc, monkeypatch):
+    # cycle_pids() still feeds the unrelated legacy `cycle_running` field
+    # probe_runtime always computes - stub it to a harmless empty result so
+    # this test isolates `live` (the ledger running/escalated split), the
+    # thing workers_state() actually replaced.
+    monkeypatch.setattr(cc, "cycle_pids", lambda: [])
+    _write_ledger(cc, {"t1": {"state": "in_progress"}})
+    (Path(cc.AP_STATE) / ".current-task-id").write_text("t1")
+    _write_worker_pid(cc, "0", os.getpid(), "t1")
+    s = cc.build_state()
+    assert [r["id"] for r in s["running"]] == ["t1"]
+    assert s["escalated"] == []
+
+
+def test_in_progress_not_running_when_workers_dir_present_but_empty(cc, monkeypatch):
+    """An empty but PRESENT workers/ dir means genuinely idle - this must NOT
+    fall back to the machine-wide pgrep. cycle_pids() is stubbed to return a
+    LIVE pid here specifically to prove the point: if `live` were still
+    falling back to pgrep, this task would wrongly show as running."""
+    monkeypatch.setattr(cc, "cycle_pids", lambda: [os.getpid()])
+    (Path(cc.AP_STATE) / "workers").mkdir()
+    _write_ledger(cc, {"t1": {"state": "in_progress"}})
+    (Path(cc.AP_STATE) / ".current-task-id").write_text("t1")
+    s = cc.build_state()
+    assert s["running"] == []
+    assert [r["id"] for r in s["escalated"]] == ["t1"]
+
+
+def test_legacy_pgrep_fallback_only_when_workers_dir_never_existed(cc, monkeypatch):
+    """No workers/ dir at all - falls back to cycle_pids(), exactly the
+    pre-T7 behavior, so a state dir from before the pid-file contract existed
+    still gets a working live/running signal."""
+    assert not (Path(cc.AP_STATE) / "workers").exists()
+    _write_ledger(cc, {"t1": {"state": "in_progress"}})
+    (Path(cc.AP_STATE) / ".current-task-id").write_text("t1")
+
+    monkeypatch.setattr(cc, "cycle_pids", lambda: [])
+    s = cc.build_state()
+    assert s["running"] == []
+    assert [r["id"] for r in s["escalated"]] == ["t1"]
+    assert "workers" not in s
+
+    monkeypatch.setattr(cc, "cycle_pids", lambda: [12345])
+    s2 = cc.build_state()
+    assert [r["id"] for r in s2["running"]] == ["t1"]
+
+
+# ── do_killtask(tid): identity-aware abort (Task 7) ───────────────────────
+# Targeting a specific slot's process group replaces the old machine-wide
+# pgrep-and-kill-everything behavior, which would abort every OTHER slot's
+# in-flight task (and any unrelated orbit-cycle process on the box) right
+# along with the one the operator actually clicked Abort on.
+
+def _spy_signals(cc, monkeypatch):
+    """Record every real signal do_killtask sends, while letting signal 0
+    through: locks.pid_alive probes liveness with os.kill(pid, 0) on the SAME
+    module object, so swallowing that would make every pid look dead and the
+    targeted path would never be reached at all."""
+    blasted, killed = [], []
+    real_kill = cc.os.kill
+
+    def spy_kill(pid, sig):
+        if sig == 0:
+            return real_kill(pid, sig)
+        killed.append((pid, sig))
+
+    monkeypatch.setattr(cc.os, "kill", spy_kill)
+    monkeypatch.setattr(cc.os, "killpg", lambda pgid, sig: blasted.append((pgid, sig)))
+    return blasted, killed
+
+
+def test_killtask_targets_the_recorded_cycle_group_never_the_loop(cc, monkeypatch):
+    # F2/C2: the pid file's `pid` is the slot LOOP's - killing its group is
+    # what used to take the whole slot down with one aborted task. The signal
+    # must go to `cycle_pgid` (run.sh's record_cycle_pid) and to nothing else.
+    # Both pid files must name genuinely LIVE pids - workers_state() gates the
+    # match on `alive` (locks.pid_alive), so a made-up pid would never match
+    # and the test would silently exercise the legacy fallback instead.
+    other_proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
+    try:
+        _write_worker_pid(cc, "1", os.getpid(), "t-target",
+                          cycle_pid=555001, cycle_pgid=555001)
+        _write_worker_pid(cc, "0", other_proc.pid, "t-other",
+                          cycle_pid=555002, cycle_pgid=555002)
+        monkeypatch.setattr(cc, "cycle_pids", lambda: (_ for _ in ()).throw(
+            AssertionError("must not touch the machine-wide pgrep once a pid file matched")))
+        monkeypatch.setattr(cc.os, "getpgid", lambda pid: (_ for _ in ()).throw(
+            AssertionError("the loop's own group is never consulted, let alone signalled")))
+        blasted, killed = _spy_signals(cc, monkeypatch)
+        msg = cc.do_killtask("t-target")
+        # ONLY the target's own cycle group - not the loop's, not t-other's
+        assert blasted == [(555001, cc.signal.SIGTERM)]
+        assert killed == []
+        assert "t-target" in msg and "slot 1" in msg
+        assert str(os.getpid()) not in msg          # the loop pid is not the story
+        assert "t-target" in cc.load_skips()
+    finally:
+        other_proc.kill()
+        other_proc.wait()
+
+
+def test_killtask_terms_the_bare_cycle_pid_when_it_leads_no_group(cc, monkeypatch):
+    """No cycle_pgid means run.sh could not confirm the cycle leads its own
+    group (setsid refused), and killpg would then blast the LOOP's group. A
+    plain TERM on the cycle pid is all that is safe."""
+    _write_worker_pid(cc, "0", os.getpid(), "t-nogroup", cycle_pid=555003)
+    blasted, killed = _spy_signals(cc, monkeypatch)
+    msg = cc.do_killtask("t-nogroup")
+    assert killed == [(555003, cc.signal.SIGTERM)]
+    assert blasted == []
+    assert "t-nogroup" in cc.load_skips()
+    assert "555003" in msg
+
+
+def test_killtask_refuses_to_guess_when_no_cycle_is_recorded_yet(cc, monkeypatch):
+    """Claimed but no cycle pid on file (the window between the claim and the
+    cycle's first instant). The only other pid there is the loop's, so
+    nothing is signalled - but the task is still skipped, and the message
+    says so rather than implying a kill that never happened."""
+    _write_worker_pid(cc, "0", os.getpid(), "t-early")
+    monkeypatch.setattr(cc, "cycle_pids", lambda: (_ for _ in ()).throw(
+        AssertionError("must not fall through to the machine-wide pgrep")))
+    blasted, killed = _spy_signals(cc, monkeypatch)
+    msg = cc.do_killtask("t-early")
+    assert blasted == [] and killed == []
+    assert "nothing was stopped" in msg
+    assert "t-early" in cc.load_skips()
+
+
+def test_killtask_falls_back_to_legacy_pgrep_when_tid_unmatched(cc, monkeypatch):
+    """No pid file names this tid (a stale dashboard tab, or a state dir with
+    no workers/ at all) - the original machine-wide behavior, so the Abort
+    button still does something instead of silently no-op'ing."""
+    killpg_calls = []
+    monkeypatch.setattr(cc.os, "killpg", lambda *a: killpg_calls.append(a))
+    killed = []
+    monkeypatch.setattr(cc.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(cc, "cycle_pids", lambda: [9999])
+    msg = cc.do_killtask("t-unmatched")
+    assert killed == [(9999, 15)]
+    assert not killpg_calls
+    assert "t-unmatched" in msg
+    assert "t-unmatched" in cc.load_skips()
+
+
+def test_killtask_no_cycle_running_reports_nothing_to_stop(cc, monkeypatch):
+    monkeypatch.setattr(cc, "cycle_pids", lambda: [])
+    msg = cc.do_killtask("")
+    assert "nothing to stop" in msg.lower()
+
+
+# ── concurrency setting (Task 7) ──────────────────────────────────────────
+# `concurrency` joins interval_seconds/max_tasks_per_day/cycle_timeout_seconds
+# as a validated positive-int field in the Admin panel's Cadence card -
+# _validate_config's cheap check runs first; config.py's own `validate` (the
+# authoritative schema) already covers it a second time on write.
+
+def test_concurrency_round_trips_through_do_save_config(cc):
+    msg = cc.do_save_config(json.dumps({"concurrency": 3}))
+    assert msg.startswith("✓ Saved"), msg
+    assert cc._load_cfg()["concurrency"] == 3
+
+
+@pytest.mark.parametrize("value", [0, -1, 33, 3200, True, 1.5, "3"])
+def test_concurrency_rejects_out_of_range_and_rolls_back(cc, value):
+    """F5: the Admin panel refuses exactly what `config.py validate` refuses
+    (1..CONCURRENCY_MAX). A value saved here that the loop's own preflight
+    then rejects would leave the workspace unable to start."""
+    cfg_path = Path(cc.AP_HOME) / "config.yaml"
+    before = cfg_path.read_text()
+    msg = cc.do_save_config(json.dumps({"concurrency": value}))
+    assert msg.startswith("Rejected"), msg
+    assert "concurrency" in msg
+    assert cfg_path.read_text() == before
+
+
+def test_concurrency_accepts_the_top_of_the_range(cc):
+    assert cc.do_save_config(json.dumps({"concurrency": cc.CONCURRENCY_MAX})).startswith("✓ Saved")
+    assert cc._load_cfg()["concurrency"] == cc.CONCURRENCY_MAX
+
+
+# ── watches editor card (Task 8) ──────────────────────────────────────────
+# watches joins the mcp/gates/qa/plan/knowledge family in the Admin panel,
+# but as a structured card (cc_shell.html's watchRows/watchRowHtml/
+# validateWatchRows) rather than a JSON textarea. _validate_config only
+# checks shape (must be a list-or-absent) - deep per-row validation (name
+# slug, non-empty question, positive cadence_hours, category enum) stays
+# config.py's own `validate`, which do_save_config already shells out to
+# post-write, rolling the file back to its exact prior bytes on failure -
+# same two-pass discipline as the mcp/concurrency cards above.
+
+def test_validate_config_rejects_non_list_watches_shape_only(cc):
+    """_validate_config's cheap pass only checks shape - it neither knows nor
+    cares about name/question/cadence rules, those are config.py's."""
+    assert cc._validate_config({"watches": {"not": "a list"}})
+    assert cc._validate_config({"watches": [{"name": "not a slug!"}]}) == []
+    assert cc._validate_config({"watches": []}) == []
+    assert cc._validate_config({}) == []
+
+
+def test_watches_add_two_remove_one_round_trips_through_do_save_config(cc):
+    """The editor's add/remove/save cycle: two rows saved, then a second save
+    with one removed - each save must survive config.py's own validate() and
+    land exactly the rows sent (shallow merge means the sender's list wins
+    outright, same as sources/workable_categories)."""
+    first = [
+        {"name": "wow-signup", "question": "What changed WoW in signup?",
+         "cadence_hours": 24, "category": "funnel"},
+        {"name": "activation-drop", "question": "Why did activation drop?",
+         "cadence_hours": 168, "category": "insight"},
+    ]
+    msg = cc.do_save_config(json.dumps({"watches": first}))
+    assert msg.startswith("✓ Saved"), msg
+    assert cc._load_cfg()["watches"] == first
+
+    second = [first[1]]   # "wow-signup" removed
+    msg2 = cc.do_save_config(json.dumps({"watches": second}))
+    assert msg2.startswith("✓ Saved"), msg2
+    assert cc._load_cfg()["watches"] == second
+
+
+def test_watches_empty_list_clears_prior_rows_not_omitted(cc):
+    """Removing every row and saving must actually clear watches: on disk -
+    the editor always sends the list (never omits the key), because omitting
+    it would leave the shallow merge unable to ever clear a stale block."""
+    cc.do_save_config(json.dumps({"watches": [{"name": "wow-signup", "question": "q?"}]}))
+    assert cc._load_cfg()["watches"]
+
+    msg = cc.do_save_config(json.dumps({"watches": []}))
+    assert msg.startswith("✓ Saved"), msg
+    assert cc._load_cfg()["watches"] == []
+    assert cc.watches_state([]) == []   # present-but-empty, not absent - config.py's own reading
+
+
+def test_watches_bad_row_rejected_by_config_py_and_rolled_back(cc):
+    """A row that fails config.py's deep rules (bad name shape here) is
+    caught by the SECOND pass, after the write - and rolled back byte-exact,
+    same as the mcp http-without-url case above."""
+    cfg_path = Path(cc.AP_HOME) / "config.yaml"
+    before = cfg_path.read_text()
+    msg = cc.do_save_config(json.dumps({"watches": [{"name": "Not A Slug!", "question": "q?"}]}))
+    assert msg.startswith("Rejected")
+    assert "watches[0].name" in msg
+    assert cfg_path.read_text() == before

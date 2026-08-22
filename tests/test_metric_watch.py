@@ -5,6 +5,7 @@
 # state - even when the dated id it would file already exists in the backlog.
 #
 # Run: python3 -m pytest tests/test_metric_watch.py -v   (from orbit/)
+import importlib
 import json
 import os
 import subprocess
@@ -12,10 +13,12 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
 import yaml
 
 ORBIT = Path(__file__).resolve().parent.parent
 ADAPTER = ORBIT / "adapters" / "metric_watch_to_backlog.py"
+ENGINE = ORBIT / "engine"
 
 WATCHES_CFG = (
     'repo: "."\nbase_branch: "main"\ngates:\n  t: {cmd: "true"}\n'
@@ -221,3 +224,70 @@ def test_runs_via_run_source_adapters(tmp_path):
                        capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stderr
     assert "metric_watch" in r.stdout
+
+
+# ── command_center.watches_state malformed-entry tolerance (Task 8 pin) ────
+# This adapter (above) is the ONLY writer of watches.json/watch-<name>-*
+# tasks, but the dashboard's own reader - engine/command_center.py's
+# watches_state - walks the SAME `watches:` config list independently (see
+# its module comment: "this dashboard layer only reads all three"). It was
+# shipped already skipping non-dict entries and defaulting missing keys
+# (command_center.py's watches_state loop), but that tolerance was never
+# pinned by a test of its own - a hand-edited config.yaml (or a future
+# refactor) carrying a stray non-dict entry, or a dict missing optional
+# keys, must degrade to "skip/default that one entry", never crash the
+# whole /api/state poll.
+@pytest.fixture()
+def cc(tmp_path, monkeypatch):
+    ap_home = tmp_path / ".autopilot"
+    ap_state = ap_home / "state"
+    ap_state.mkdir(parents=True)
+    monkeypatch.setenv("AP_HOME", str(ap_home))
+    monkeypatch.setenv("AP_STATE", str(ap_state))
+    (ap_home / "config.yaml").write_text('repo: "."\nbase_branch: "main"\ngates:\n  t: {cmd: "true"}\n')
+
+    sys.path.insert(0, str(ENGINE))
+    sys.modules.pop("command_center", None)
+    mod = importlib.import_module("command_center")
+    importlib.reload(mod)
+    yield mod
+    sys.path.remove(str(ENGINE))
+
+
+def _write_watches_config(cc, watches):
+    cfg_path = Path(cc.AP_HOME) / "config.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text()) or {}
+    cfg["watches"] = watches
+    cfg_path.write_text(yaml.safe_dump(cfg))
+
+
+def test_watches_state_tolerates_non_dict_entries_and_missing_keys(cc):
+    """A watches: list with a stray non-dict entry (string/int/None - the
+    kind of thing a typo'd hand-edit or a bad YAML anchor produces) mixed in
+    with a valid-but-sparse dict (only `name`) and a fully-populated one:
+    watches_state must skip the non-dict entries, default the sparse one's
+    missing keys, and keep every valid entry - never raise."""
+    _write_watches_config(cc, [
+        "not-a-dict", 42, None, ["also", "not", "a", "dict"],
+        {"name": "bare-watch"},
+        {"name": "wow-signup", "question": "What changed WoW?",
+         "cadence_hours": 24, "category": "funnel"},
+    ])
+    ws = cc.watches_state([])   # must not raise
+    assert [w["name"] for w in ws] == ["bare-watch", "wow-signup"]
+
+    bare = ws[0]
+    assert bare["question"] == ""
+    assert bare["cadence_hours"] == 168
+    assert bare["category"] == "insight"
+    assert bare["last_filed"] is None
+
+    full = ws[1]
+    assert full["question"] == "What changed WoW?"
+    assert full["cadence_hours"] == 24
+    assert full["category"] == "funnel"
+
+    # build_state must also survive - the same poll a malformed hand-edit
+    # would otherwise break for every other band on the page.
+    s = cc.build_state()
+    assert s["watches"] == ws

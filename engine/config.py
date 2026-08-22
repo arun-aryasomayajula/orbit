@@ -10,11 +10,21 @@ Subcommands:
 """
 import sys, os, shlex, re
 
+# The upper bound on `concurrency`, shared by every enforcement point (see
+# validate() below for the list). 32 slots is already far past any real
+# machine's appetite for parallel claude cycles; the number exists so a
+# fat-fingered 3200 is refused instead of spawned.
+CONCURRENCY_MAX = 32
+
 DEFAULTS = {
     "repo": ".", "base_branch": "main", "model": "claude-opus-4-8",
     "permission_mode": "acceptEdits", "interval_seconds": 180,
     "max_tasks_per_day": 12, "cycle_timeout_seconds": 3600, "spec": None,
     "sources": ["backlog"], "branch_prefix": "autopilot",
+    # How many task cycles ("slots") the loop may run in parallel. 1 = the
+    # single worker every existing deployment runs today; run.sh reads it as
+    # ORBIT_CONCURRENCY and defaults ORBIT_SLOTS to it.
+    "concurrency": 1,
     "commit_trailer": "Co-Authored-By: Claude <noreply@anthropic.com>",
     "pull_requests": "off",
     "dashboard_url": "http://127.0.0.1:8787",
@@ -47,6 +57,19 @@ def shellenv(target):
         f"export ORBIT_INTERVAL={sh(cfg['interval_seconds'])}",
         f"export ORBIT_MAX_TASKS={sh(cfg['max_tasks_per_day'])}",
         f"export ORBIT_CYCLE_TIMEOUT={sh(cfg['cycle_timeout_seconds'])}",
+        f"export ORBIT_CONCURRENCY={sh(cfg['concurrency'])}",
+        # Comma-joined `workable_categories`, for the wrapper's own task pick
+        # (run.sh pickable_ids/count_pickable). EMPTY means "no category
+        # restriction configured" - the wrapper must then filter nothing, or a
+        # config without the key would starve instead of behaving as it does
+        # today. A category name with a comma in it is not representable and is
+        # not a thing (backlog_lint's category names are bare identifiers).
+        # Known minor gap: nothing here VALIDATES that assumption - a category
+        # containing a literal comma would silently split into two categories
+        # on the wrapper's side, desyncing from backlog_lint's enum. Inert
+        # today because backlog_lint's KNOWN_CATEGORIES gate rejects any such
+        # category before a task naming it ever reaches this join.
+        f"export ORBIT_WORKABLE={sh(','.join(str(c) for c in (raw.get('workable_categories') or [])))}",
         f"export ORBIT_BRANCH_PREFIX={sh(cfg['branch_prefix'])}",
         f"export ORBIT_PULL_REQUESTS={sh(cfg['pull_requests'])}",
         f"export ORBIT_DASHBOARD_URL={sh(cfg['dashboard_url'])}",
@@ -86,6 +109,23 @@ def validate(target):
     for name, g in (cfg.get("gates") or {}).items():
         if not g.get("cmd"):
             errs.append(f"gate '{name}' has no cmd")
+    # concurrency drives how many slot loops an operator is told to run (and
+    # how far auto-feed tops the queue up). A zero/negative/non-int value would
+    # silently mean "no worker at all" or a nonsense ORBIT_SLOTS, so reject it
+    # here rather than letting run.sh inherit garbage. Absent/null = the
+    # default (1).
+    #
+    # The 1..CONCURRENCY_MAX bound is ONE contract, enforced in four places
+    # that must agree: here, the dashboard's Admin patch validator
+    # (command_center._validate_config), the launcher's clamp
+    # (launcher._concurrency) and run.sh's own SLOTS derivation (which clamps
+    # with a WARN, since a hand-set ORBIT_SLOTS never passes through here).
+    # Above the ceiling it is not a config any more, it is a fork bomb: every
+    # slot is a full claude cycle with its own worktree.
+    if raw.get("concurrency") is not None:
+        c = raw["concurrency"]
+        if not isinstance(c, int) or isinstance(c, bool) or c <= 0 or c > CONCURRENCY_MAX:
+            errs.append(f"concurrency must be an integer between 1 and {CONCURRENCY_MAX}, got {c!r}")
     if cfg.get("pull_requests") not in ("off", "github"):
         errs.append(f"pull_requests must be \"off\" or \"github\", got {cfg.get('pull_requests')!r}")
     if "knowledge" in raw and raw["knowledge"] is not None:

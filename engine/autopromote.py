@@ -12,7 +12,10 @@ the chore categories (testing/documentation/dependencies/bug) plus the
 read-only product-analysis ones (insight/funnel/hypothesis), whose output is a
 doc the insight_lint gate grades. It does NOT auto-promote `code_quality`/
 `refactor` (which can include risky core rewrites) or any human-only category -
-promote those by hand from the dashboard.
+promote those by hand from the dashboard. On top of that it only promotes what
+this target can actually WORK: the conservative set is intersected with
+`workable_categories` (ORBIT_WORKABLE, the same filter run.sh's own pick
+applies), so auto-feed never fills the queue with tasks no slot may claim.
 
 Eligibility (see _eligible): a machine-filed task counts even though
 backlog_append writes every proposal as `autopilot: human`, because the
@@ -28,6 +31,8 @@ import sys
 from pathlib import Path
 
 import yaml
+
+import locks
 
 ENGINE = Path(__file__).resolve().parent
 
@@ -78,10 +83,20 @@ UNATTENDED_SOURCES = {"metric_watch", "logwatch", "ui-test", "maturity-score", "
 PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}
 
 
-def _eligible(t: dict) -> bool:
+def _workable() -> set[str]:
+    """The target's `workable_categories`, as run.sh hands them down
+    (ORBIT_WORKABLE, comma-joined by config.py shellenv). EMPTY means the
+    config has no such key, which in run.sh's own pick means "filter
+    nothing" - so it must mean the same here.
+    """
+    return {c for c in (os.environ.get("ORBIT_WORKABLE") or "").split(",") if c}
+
+
+def _eligible(t: dict, workable: set[str] | None = None) -> bool:
     """Is this proposed task one the AUTO_PROMOTE flag may feed the loop?
 
-    Category must be in the conservative set, AND one of:
+    Category must be in the conservative set AND in the target's
+    workable_categories (see _workable), AND one of:
       - `autopilot` is not `human` - the operator already un-gated this task; or
       - an unattended signal adapter filed it (see UNATTENDED_SOURCES).
 
@@ -93,8 +108,22 @@ def _eligible(t: dict) -> bool:
     opt-in: the operator turned the flag on, the category is gated by
     insight_lint, and the filer is a machine. A hand-written human task is
     never covered by it - the person typing it is right there to queue it.
+
+    The workable_categories intersection is what keeps auto-feed and the
+    wrapper's own pick talking about the same tasks. Without it, a workspace
+    whose workable set excludes (say) `testing` still auto-promoted testing
+    proposals: run.sh's pickable_ids then filtered every one of them back
+    out, count_pickable stayed below SLOTS, and the next tick promoted
+    another - a promote-unworkable-forever loop that drains the backlog into
+    a queue no slot may claim, and never lets the N=1 "queue is topped up"
+    stop condition fire.
     """
-    if t.get("category") not in AUTOPROMOTE_CATEGORIES:
+    if workable is None:
+        workable = _workable()
+    cat = t.get("category")
+    if cat not in AUTOPROMOTE_CATEGORIES:
+        return False
+    if workable and str(cat) not in workable:
         return False
     if t.get("autopilot") != "human":
         return True
@@ -115,38 +144,56 @@ def _skips() -> set[str]:
 
 
 def main() -> int:
-    backlog = (yaml.safe_load(BACKLOG.read_text()) or {}).get("tasks", []) or []
-    worked, skips = _worked(), _skips()
-    cands = [t for t in backlog
-             if t.get("status") == "proposed"
-             and _eligible(t)
-             and str(t.get("id")) not in worked
-             and str(t.get("id")) not in skips]
-    if not cands:
-        print("autopromote: no eligible proposed task — nothing to feed.")
-        return 0
-    cands.sort(key=lambda t: PRIORITY_RANK.get(t.get("priority", "medium"), 1))
-    pick = str(cands[0]["id"])
+    # Whole read-modify-write under the ONE lock every backlog.yaml writer
+    # takes (see locks.py) - the read that picks a candidate and the write
+    # that promotes it must never straddle another writer's own
+    # read-modify-write (backlog_append, autoclose, qa_check, the dashboard),
+    # or the two could each act on a now-stale snapshot and silently clobber
+    # each other. The converter subprocess below runs AFTER the lock is
+    # released - never hold this lock across a subprocess (locks.py's module
+    # docstring).
+    with locks.hold(AP_STATE / ".backlog.lock"):
+        backlog = (yaml.safe_load(BACKLOG.read_text()) or {}).get("tasks", []) or []
+        worked, skips = _worked(), _skips()
+        workable = _workable()
+        cands = [t for t in backlog
+                 if t.get("status") == "proposed"
+                 and _eligible(t, workable)
+                 and str(t.get("id")) not in worked
+                 and str(t.get("id")) not in skips]
+        if not cands:
+            print("autopromote: no eligible proposed task — nothing to feed.")
+            return 0
+        cands.sort(key=lambda t: PRIORITY_RANK.get(t.get("priority", "medium"), 1))
+        pick = str(cands[0]["id"])
 
-    # Block-level edit (preserve comments): set status queued + autopilot allow.
-    # Indent-tolerant: real backlogs use both `- id:` at column 0 (block style)
-    # and `  - id:` nested under `tasks:` — match either, and flip the key lines
-    # at whatever indent the block uses.
-    text = BACKLOG.read_text()
-    parts = re.split(r"(?m)(?=^\s*- id: )", text)
-    edited = False
-    for i, blk in enumerate(parts):
-        m = re.match(r"^\s*- id: (\S+)", blk)
-        if m and m.group(1) == pick:
-            blk, n_status = re.subn(r"(?m)^(\s*status: ).*$", r"\1queued", blk, count=1)
-            blk = re.sub(r"(?m)^(\s*autopilot: ).*$", r"\1allow", blk, count=1)
-            parts[i] = blk
-            edited = n_status == 1
-            break
-    if not edited:
-        print(f"autopromote: could not rewrite block for '{pick}' — backlog left unchanged.")
-        return 1
-    BACKLOG.write_text("".join(parts))
+        # Block-level edit (preserve comments): set status queued + autopilot allow.
+        # Indent-tolerant: real backlogs use both `- id:` at column 0 (block style)
+        # and `  - id:` nested under `tasks:` — match either, and flip the key lines
+        # at whatever indent the block uses.
+        text = BACKLOG.read_text()
+        parts = re.split(r"(?m)(?=^\s*- id: )", text)
+        edited = False
+        for i, blk in enumerate(parts):
+            m = re.match(r"^\s*- id: (\S+)", blk)
+            if m and m.group(1) == pick:
+                blk, n_status = re.subn(r"(?m)^(\s*status: ).*$", r"\1queued", blk, count=1)
+                blk = re.sub(r"(?m)^(\s*autopilot: ).*$", r"\1allow", blk, count=1)
+                parts[i] = blk
+                edited = n_status == 1
+                break
+        if not edited:
+            print(f"autopromote: could not rewrite block for '{pick}' — backlog left unchanged.")
+            return 1
+
+        # tmp+os.replace INSIDE the lock - a reader (dashboard, a concurrent
+        # cycle) must never be able to observe a truncated backlog.yaml
+        # mid-write (the bare write_text() this replaces truncates-then-writes
+        # in place, which is not atomic).
+        tmp = BACKLOG.with_name(f"{BACKLOG.name}.tmp{os.getpid()}")
+        tmp.write_text("".join(parts))
+        os.replace(tmp, BACKLOG)
+
     subprocess.run([sys.executable, str(CONVERTER)], cwd=str(ENGINE), capture_output=True)
     print(f"autopromote: promoted '{pick}' ({cands[0].get('category')}, "
           f"p{cands[0].get('priority','medium')}) → queued+allow.")

@@ -40,7 +40,23 @@ def test_late_recorded_facts_are_legal():
     assert lifecycle.check(None, "committed") is None
     assert lifecycle.check(None, "pushed") is None
     assert lifecycle.check(None, "escalate") is None
-    assert lifecycle.check("in_progress", "claim") is None      # crash re-claim
+
+
+def test_claim_over_in_progress_is_illegal_by_default():
+    # `claim` is the one loop event that is NOT permissive: a second worker
+    # (or a naive crash re-claim) taking an already-in_progress task is
+    # exactly the double-work bug exclusive claims exist to prevent. Only
+    # --force records a takeover now.
+    assert lifecycle.check("in_progress", "claim") is not None
+
+
+def test_reclaim_is_legal_only_from_in_progress():
+    # `reclaim` sanctions exactly the dead-worker-takeover path ledger.py's
+    # exclusive claim uses — legal ONLY from in_progress, never from ABSENT
+    # (that's plain `claim`) and never from any reviewable/terminal state.
+    assert lifecycle.check("in_progress", "reclaim") is None
+    for st in (None, "committed", "pushed", "escalated", "merged", "rejected"):
+        assert lifecycle.check(st, "reclaim") is not None
 
 
 def test_escalate_is_legal_until_reviewed():
@@ -48,6 +64,21 @@ def test_escalate_is_legal_until_reviewed():
         assert lifecycle.check(st, "escalate") is None
     for st in ("merged", "rejected"):
         assert lifecycle.check(st, "escalate") is not None
+
+
+def test_ships_are_recordable_over_an_escalation():
+    # F7: a ship and an escalation race. The reaper (or an operator's Abort)
+    # can escalate in the same seconds a cycle finishes committing, and the
+    # wrapper records `pushed` only after the branch is already on the remote.
+    # Refusing there leaves the ledger claiming nothing shipped while origin
+    # disagrees - and run.sh swallows verb failures, so nobody finds out.
+    assert lifecycle.check("escalated", "committed") is None
+    assert lifecycle.check("escalated", "pushed") is None
+    assert lifecycle.RESULT["pushed"] == "pushed"      # the ship wins the state
+    # ...but a REVIEWED task is still terminal - a late ship never reopens it.
+    for st in ("merged", "rejected"):
+        assert lifecycle.check(st, "committed") is not None
+        assert lifecycle.check(st, "pushed") is not None
 
 
 def test_judgments_require_a_reviewable_state():
@@ -144,6 +175,21 @@ def test_can_verb_is_a_dry_check(tmp_path):
     assert _entries(tmp_path)["t1"]["state"] == "pushed"   # nothing written either way
 
 
+def test_claim_over_in_progress_ledger_refused_without_force(tmp_path):
+    r = _ledger(tmp_path, "claim", "t1", "again",
+                entries={"t1": {"state": "in_progress", "updated_at": "2020-01-01T00:00:00Z"}})
+    assert r.returncode == 3
+    assert "illegal transition" in r.stderr
+    assert _entries(tmp_path)["t1"]["updated_at"] == "2020-01-01T00:00:00Z"  # untouched
+
+
+def test_claim_over_in_progress_ledger_force_overrides(tmp_path):
+    r = _ledger(tmp_path, "claim", "t1", "again", "--force",
+                entries={"t1": {"state": "in_progress"}})
+    assert r.returncode == 0 and "FORCED" in r.stderr
+    assert _entries(tmp_path)["t1"]["forced"] is True
+
+
 def test_committed_then_runtime_escalation(tmp_path):
     # The runtime-check flow: agent committed, wrapper escalates instead of pushing.
     assert _ledger(tmp_path, "committed", "t1", "autopilot/task-t1", "abc").returncode == 0
@@ -188,6 +234,20 @@ def test_reap_rejects_a_non_integer_age(tmp_path):
                 entries={"t": {"state": "in_progress", "updated_at": "2020-01-01T00:00:00Z"}})
     assert r.returncode == 2
     assert _entries(tmp_path)["t"]["state"] == "in_progress"
+
+
+def test_escalate_then_pushed_is_recorded_end_to_end(tmp_path):
+    """F7 through the real verb: escalate, then the ship lands anyway."""
+    r = _ledger(tmp_path, "escalate", "t1", "reaper: looked stalled",
+                entries={"t1": {"state": "in_progress", "updated_at": "2026-08-22T00:00:00Z"}})
+    assert r.returncode == 0, r.stderr
+    assert _entries(tmp_path)["t1"]["state"] == "escalated"
+    r = _ledger(tmp_path, "pushed", "t1", "origin/autopilot/task-t1")
+    assert r.returncode == 0, r.stderr
+    e = _entries(tmp_path)["t1"]
+    assert e["state"] == "pushed"
+    assert e["remote_ref"] == "origin/autopilot/task-t1"
+    assert e["reason"] == "reaper: looked stalled"   # the escalation is not erased
 
 
 # ── autoclose consults the same machine ──────────────────────────────────────
