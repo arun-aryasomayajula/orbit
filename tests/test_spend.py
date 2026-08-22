@@ -6,6 +6,7 @@
 import multiprocessing as mp
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ import pytest
 ENGINE = Path(__file__).resolve().parent.parent / "engine"
 sys.path.insert(0, str(ENGINE))
 
+import locks  # noqa: E402
 import spend  # noqa: E402
 
 CTX = mp.get_context("fork")
@@ -42,6 +44,34 @@ def test_add_accumulates_across_calls(tmp_path):
 def test_add_starts_from_zero_when_absent(tmp_path):
     total = spend.add(tmp_path, "2026-08-22", 0.3)
     assert total == pytest.approx(0.3)
+
+
+def test_add_cli_prints_per_cycle_cost_not_running_total(tmp_path):
+    """run.sh's caller logs THIS printed value as "cycle cost" - it must
+    never drift into the accumulated total (an adversarial-review catch:
+    the original CLI printed the post-add total instead)."""
+    r1 = _cli("add", str(tmp_path), "2026-08-22", "1.50")
+    assert r1.returncode == 0, r1.stderr
+    assert r1.stdout.strip() == "1.5000"
+
+    r2 = _cli("add", str(tmp_path), "2026-08-22", "0.25")
+    assert r2.returncode == 0, r2.stderr
+    assert r2.stdout.strip() == "0.2500"  # per-cycle, not "1.7500"
+
+    # The running total is untouched on disk either way.
+    assert (tmp_path / ".spend-2026-08-22").read_text() == "1.7500"
+
+
+def test_add_rejects_nan(tmp_path):
+    r = _cli("add", str(tmp_path), "2026-08-22", "nan")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert not (tmp_path / ".spend-2026-08-22").exists()
+
+
+def test_add_rejects_infinity(tmp_path):
+    r = _cli("add", str(tmp_path), "2026-08-22", "inf")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert not (tmp_path / ".spend-2026-08-22").exists()
 
 
 # ── count ────────────────────────────────────────────────────────────────
@@ -129,3 +159,31 @@ def test_bump_count_cap_boundary_under_concurrency(tmp_path):
     succeeded = sum(1 for r in results if r)
     assert succeeded == cap
     assert int((tmp_path / f".count-{date}").read_text()) == cap
+
+
+# ── lock contention surfaces as exit 4, not a traceback ─────────────────
+
+def _hold_spend_lock_for(lock_path, seconds, ready_evt):
+    with locks.hold(lock_path, timeout=10):
+        ready_evt.set()
+        time.sleep(seconds)
+
+
+def test_cli_exits_4_on_lock_timeout(tmp_path, monkeypatch):
+    """A LockTimeout from spend.py's own lock must never escape main() as
+    an uncaught traceback (exit 1, colliding with the CLI's own exit-1
+    space) - it gets one stderr line and a distinct exit code (4) so a
+    caller can tell "someone else is mid-write" apart from a cap refusal
+    (3) or a bad argument (2)."""
+    monkeypatch.setattr(spend, "DEFAULT_TIMEOUT", 0.2)
+    lock_path = str(tmp_path / ".spend.lock")  # matches spend._lock_path()
+
+    started = CTX.Event()
+    p = CTX.Process(target=_hold_spend_lock_for, args=(lock_path, 2, started))
+    p.start()
+    try:
+        assert started.wait(5)
+        rc = spend.main(["add", str(tmp_path), "2026-08-22", "1.0"])
+        assert rc == 4
+    finally:
+        p.join(5)

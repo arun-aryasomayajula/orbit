@@ -89,18 +89,22 @@ def test_stale_dead_pid_lock_is_acquired_promptly(tmp_path):
 # ── stale (dead-pid) lock that flock() genuinely cannot reacquire ──────────
 #
 # This is the scenario break_stale actually exists for (see locks.py's
-# module docstring): a lock fd leaked into a still-live descendant (e.g. a
-# subprocess that inherited it across an exec) means the flock is real and
-# still held even though the RECORDED owner pid is dead. Reproducing the
-# leak itself turns out to be platform-dependent (macOS's flock release
-# timing across fork differs from Linux's documented "released only when
-# every duplicate fd is closed" semantics - confirmed by hand while writing
-# this test), so this drives the same critical branch directly and
-# deterministically: one real, live process holds the flock the whole time,
-# but lies about the owner pid it stamps into the lock file, using a pid we
-# affirmatively KNOW is dead (a just-exited subprocess's). That isolates
-# exactly the logic under test - "flock() fails AND the recorded pid is
-# dead" - from the mechanism that produces it in production.
+# module docstring): a lock fd leaked into a still-live process that never
+# itself calls hold() again - NOT via subprocess/exec (PEP 446 makes fds
+# close-on-exec by default, so a plain subprocess.Popen call doesn't hand
+# a child the lock fd), but via a bare os.fork() with no following exec
+# (multiprocessing's "fork" start method, or a service double-forking to
+# daemonize) - means the flock is real and still held even though the
+# RECORDED owner pid is dead. Reproducing the fork-leak itself turns out
+# to be platform-dependent (macOS's flock release timing across fork
+# differs from Linux's documented "released only when every duplicate fd
+# is closed" semantics - confirmed by hand while writing this test), so
+# this drives the same critical branch directly and deterministically:
+# one real, live process holds the flock the whole time, but lies about
+# the owner pid it stamps into the lock file, using a pid we affirmatively
+# KNOW is dead (a just-exited subprocess's). That isolates exactly the
+# logic under test - "flock() fails AND the recorded pid is dead" - from
+# the mechanism that produces it in production.
 
 def _hold_under_a_dead_pid(lock_path, dead_pid, started_evt, hold_seconds):
     import fcntl
@@ -169,3 +173,103 @@ def test_live_owner_lock_raises_timeout(tmp_path):
                 pass
     finally:
         p.join(10)
+
+
+# ── reentrancy ───────────────────────────────────────────────────────────
+
+def test_reentrant_hold_raises_immediately(tmp_path):
+    """A nested hold() on the SAME path in the SAME process must fail fast
+    (ReentrantLock), not poll until timeout against its own earlier
+    acquisition - flock() cannot tell "same process, different fd" apart
+    from a genuinely unrelated contender."""
+    lock_path = str(tmp_path / "reentrant.lock")
+    start = time.monotonic()
+    with locks.hold(lock_path, timeout=10):
+        with pytest.raises(locks.ReentrantLock):
+            with locks.hold(lock_path, timeout=10):
+                pass
+    assert time.monotonic() - start < 1
+
+    # Released cleanly afterwards - a subsequent, non-nested hold still
+    # works (the bookkeeping doesn't leak past the failed nested attempt).
+    with locks.hold(lock_path, timeout=1):
+        pass
+
+
+# ── stranded contender (adversarial-review regression) ──────────────────
+#
+# A contender that opened its fd BEFORE another process broke a stale lock
+# must notice the break and reacquire promptly - it must not remain wedged
+# reading a mismatched (post-break) owner off a stale fd that no longer
+# corresponds to what's actually at `path`. This is the exact bug an
+# adversarial review caught: a pre-existing contender pinned to the
+# orphaned inode timed out at its full budget while the lock was actually
+# free within milliseconds of the break.
+
+def _contend_without_breaking(lock_path, timeout, result_queue):
+    start = time.monotonic()
+    try:
+        with locks.hold(lock_path, timeout=timeout, break_stale=False):
+            pass
+        result_queue.put(("ok", time.monotonic() - start))
+    except locks.LockTimeout:
+        result_queue.put(("timeout", time.monotonic() - start))
+
+
+def _contend_and_break(lock_path, timeout, hold_seconds, ready_evt):
+    with locks.hold(lock_path, timeout=timeout, break_stale=True):
+        ready_evt.set()
+        time.sleep(hold_seconds)
+
+
+def test_stranded_contender_recovers_after_someone_elses_break(tmp_path):
+    lock_path = str(tmp_path / "contended.lock")
+    dead_pid = _guaranteed_dead_pid()
+
+    # D: genuinely, unbreakably holds the ORIGINAL inode under a
+    # falsified dead pid for the whole test.
+    started_d = CTX.Event()
+    d = CTX.Process(target=_hold_under_a_dead_pid,
+                     args=(lock_path, dead_pid, started_d, 10))
+    d.start()
+
+    manager = CTX.Manager()
+    result_q = manager.Queue()
+    c = None
+    b = None
+    try:
+        assert started_d.wait(5)
+
+        # C: a pre-existing contender - starts polling while D still holds
+        # the original inode, and (break_stale=False) never itself
+        # attempts to break the lock, so any recovery it manages must
+        # come from noticing SOMEONE ELSE'S break, not from doing its own.
+        c = CTX.Process(target=_contend_without_breaking,
+                         args=(lock_path, 8, result_q))
+        c.start()
+        time.sleep(0.3)  # let C open its fd and take at least one failed poll
+
+        # B: the breaker - starts after C, forces the stale lock open, and
+        # releases quickly.
+        ready_b = CTX.Event()
+        b = CTX.Process(target=_contend_and_break, args=(lock_path, 5, 0.1, ready_b))
+        b_start = time.monotonic()
+        b.start()
+        assert ready_b.wait(5)
+        b.join(10)
+        assert b.exitcode == 0
+        assert time.monotonic() - b_start < 1  # the breaker itself isn't stuck
+
+        kind, c_elapsed = result_q.get(timeout=10)
+        c.join(10)
+        assert c.exitcode == 0
+        assert kind == "ok", (
+            f"pre-existing contender should recover, got {kind!r} after "
+            f"{c_elapsed:.2f}s"
+        )
+        assert c_elapsed < 2  # promptly, not stranded until its own 8s budget
+    finally:
+        for proc in (d, c, b):
+            if proc is not None and proc.is_alive():
+                proc.terminate()
+                proc.join(5)

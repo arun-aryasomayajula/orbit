@@ -18,19 +18,24 @@ guess an age threshold.
 
 Why `break_stale` still exists despite that: it exists for exactly one
 failure mode flock's own semantics cannot save you from - a lock fd LEAKED
-across a fork+exec (e.g. `subprocess.Popen` without `close_fds`, or any
-libc that doesn't set `O_CLOEXEC`) into a child that outlives the process
-that acquired the lock. The child never touches the lock again, has no
-idea it is holding anything, and the kernel has no way to know the
-"real" owner already exited - the open file description, and the flock on
-it, stays alive as long as ANY process still has that fd open. This is
-precisely why the docstring rule below says NEVER hold this lock across a
-claude invocation: `claude` subprocesses are exactly the kind of
-long-lived child that can inherit a leaked fd and then sit on it for the
+into a still-live process that never itself calls hold() again. The vector
+is NOT `subprocess`/exec (PEP 446 makes every fd Python opens
+close-on-exec by default, so a plain `subprocess.Popen` call, even without
+`close_fds`, does not hand a child the lock fd) - the real vector is a bare
+`os.fork()` with NO following exec: `close-on-exec` only fires at exec()
+time, so a fork()'d child (e.g. `multiprocessing`'s "fork" start method, or
+a service daemonizing itself via a double-fork) inherits the parent's
+lock fd wholesale and can outlive the parent while never touching the lock
+API again. The kernel has no way to know the "real" owner already exited -
+the open file description, and the flock on it, stays alive as long as ANY
+process still has that fd open. This is precisely why the docstring rule
+below says NEVER hold this lock across a claude invocation: a `claude`
+subprocess launched *from inside* a `with hold(...)` block could itself
+fork internally in a way that ends up holding a copy of the fd for the
 rest of a cycle's runtime, wedging every other contender for the full
-`timeout` window, forever, on every subsequent attempt - the process that
-"holds" it (per the pid recorded in the lock file) is already dead, but
-the lock itself is not going anywhere on its own.
+`timeout` window on every subsequent attempt - the process that "holds" it
+(per the pid recorded in the lock file) is already dead, but the lock
+itself is not going anywhere on its own.
 
 `break_stale=True` (the default) copes with that: when `flock()` fails and
 the pid recorded in the lock file is dead, `hold()` unlinks the lock path
@@ -41,13 +46,35 @@ the true, live holder of the leaked fd might still be mutating whatever
 the lock protects is inherently unsafe in the general case - it is only
 ever reached when the "never hold across a claude invocation" rule has
 already been broken elsewhere. `hold()` narrows the race as far as a
-single flock+file API reasonably allows (see `_same_file` below - every
-acquisition, stale-break or not, is verified against the inode currently
-sitting at `path` before the critical section starts, so a concurrent
-break-and-recreate by another contender is caught rather than silently
-producing two simultaneous "holders"), but it cannot make the underlying
-scenario safe; it can only make sure autopilot itself is never the reason
-a corpse's lock outlives it forever.
+single flock+file API reasonably allows: every acquisition (stale-break or
+not) is verified against the inode currently sitting at `path` before the
+critical section starts (`_same_file`, below), the owner pid is re-read
+immediately before a break actually happens (narrowing, not closing, the
+window between "diagnosed dead" and "acted on it"), and - the specific bug
+an adversarial review caught - a contender whose own fd was opened BEFORE
+someone else's break drops that now-orphaned fd and reopens the current
+file the moment it notices the mismatch, rather than continuing to poll a
+file nobody else can even see any more (see "stranded contender" below).
+None of this makes the underlying leaked-fd scenario safe in general; it
+only makes sure autopilot itself is never the reason a corpse's lock
+outlives it forever, and never the reason an innocent bystander contender
+gets left holding a dead reference.
+
+Reentrancy: `hold()` is NOT reentrant, and cannot be made safely reentrant
+with plain flock() - a nested `with hold(p): ... with hold(p): ...` in the
+SAME process opens a SECOND, independent fd to `p` and tries to flock it,
+which is indistinguishable to the kernel from a totally unrelated process
+contending for the same lock (flock has no notion of "same process,
+different fd"). Left unguarded this self-deadlocks (or, worse, with
+break_stale it could try to break a lock the process itself still holds).
+`hold()` tracks paths currently held per-pid (module-level, cleared on
+release) and raises `ReentrantLock` immediately - before ever touching the
+filesystem - on a same-process re-entry, so the bug surfaces as a loud,
+instant exception instead of a 30-second hang. Per-pid (not a bare set) so
+a fork()'d child - which inherits the parent's Python memory, including
+whatever this module's bookkeeping said at fork time - never mistakes the
+parent's still-recorded holds for its own; the fork gets a fresh pid, so
+`os.getpid()`-keyed lookups correctly see nothing already held.
 
 Usage:
     import locks
@@ -75,11 +102,28 @@ class LockTimeout(Exception):
     it the whole time."""
 
 
-def _pid_alive(pid) -> bool:
-    """Best-effort liveness check for a pid recorded in a lock file. A
-    negative/zero/unparseable pid is never "alive" (never something to wait
-    out). EPERM means the pid exists but is owned by someone else - still
-    alive, just not ours to signal."""
+class ReentrantLock(Exception):
+    """Raised by hold() when this same process already holds the lock at
+    `path` - see the module docstring's "Reentrancy" section. Fail fast
+    instead of self-deadlocking against your own earlier acquisition."""
+
+
+# path -> {paths currently held by that pid}, so a fork()'d child (which
+# inherits this dict's CONTENTS but gets its own fresh pid) never confuses
+# a parent's still-open hold with something it itself is holding.
+_HELD_PATHS: dict = {}
+
+
+def _held_paths() -> set:
+    return _HELD_PATHS.setdefault(os.getpid(), set())
+
+
+def pid_alive(pid) -> bool:
+    """Best-effort liveness check for a pid recorded in a lock file (or any
+    other worker-identity record - ledger.py's reap also consumes this).
+    A negative/zero/unparseable pid is never "alive" (never something to
+    wait out). EPERM means the pid exists but is owned by someone else -
+    still alive, just not ours to signal."""
     try:
         pid = int(pid)
     except (TypeError, ValueError):
@@ -95,6 +139,9 @@ def _pid_alive(pid) -> bool:
     except OSError:
         return False
     return True
+
+
+_pid_alive = pid_alive  # back-compat alias - prefer the public name above
 
 
 def _read_owner_pid(path):
@@ -131,6 +178,10 @@ def hold(path, timeout: float = 30, break_stale: bool = True,
     the flock is released (never unlinked - see below) on the way out,
     success or exception alike.
 
+    Raises `ReentrantLock` immediately (before touching the filesystem) if
+    this same process is already inside a `hold()` on this exact path - see
+    the module docstring's "Reentrancy" section.
+
     `break_stale`: while contended, if the pid recorded in the lock file is
     no longer alive, force a fresh inode at `path` so new contenders never
     queue forever behind a leaked fd (see module docstring for exactly when
@@ -146,6 +197,16 @@ def hold(path, timeout: float = 30, break_stale: bool = True,
     instead - the same posture as a plain, permanent lock file.
     """
     path = os.fspath(path)
+    held = _held_paths()
+    if path in held:
+        raise ReentrantLock(
+            f"{path!r} is already held by this process (pid {os.getpid()}) - "
+            "nested locks.hold() calls on the same path self-deadlock under "
+            "flock(); restructure the caller so the inner critical section "
+            "reuses the outer one's hold instead of re-acquiring it"
+        )
+    held.add(path)
+
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
@@ -154,35 +215,52 @@ def hold(path, timeout: float = 30, break_stale: bool = True,
     fd = None
     try:
         while True:
+            if time.monotonic() >= deadline:
+                raise LockTimeout(
+                    f"could not acquire lock {path!r} within {timeout}s"
+                )
+
             if fd is None:
                 fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError as e:
                 if e.errno not in (errno.EACCES, errno.EAGAIN):
                     raise
-                broke = False
-                if break_stale:
+
+                if not _same_file(fd, path):
+                    # `path` has already moved on to a different inode
+                    # since we opened this fd (another contender broke or
+                    # replaced it). Our flock() result says NOTHING about
+                    # the file actually at `path` now - in particular,
+                    # reading "the owner" off `path` at this point would
+                    # describe someone else's lock entirely, not whatever
+                    # our own stale fd is contending with. Drop it; the
+                    # sleep+retry below reopens the CURRENT file next
+                    # iteration instead of us polling (or breaking based
+                    # on) a file nobody else can even see any more - this
+                    # is the "stranded contender" bug an adversarial
+                    # review caught: a pre-existing contender timing out
+                    # while the real lock was actually free.
+                    os.close(fd)
+                    fd = None
+                elif break_stale:
                     owner = _read_owner_pid(path)
-                    if owner is not None and not _pid_alive(owner):
-                        # Dead owner, still can't get the flock: almost
-                        # certainly a leaked fd (see module docstring).
-                        # Force a fresh inode so contenders stop queueing
-                        # behind it.
-                        try:
-                            if _same_file(fd, path):
+                    if owner is not None and not pid_alive(owner):
+                        # Re-read immediately before acting: narrows (does
+                        # not close - see module docstring) the window
+                        # between "diagnosed dead" and "broke the lock" in
+                        # which the file could have changed again.
+                        if _read_owner_pid(path) == owner:
+                            try:
                                 os.unlink(path)
-                            broke = True
-                        except OSError:
-                            pass
-                        os.close(fd)
-                        fd = None
-                if broke:
-                    continue  # reopen the fresh file immediately, no sleep
-                if time.monotonic() >= deadline:
-                    raise LockTimeout(
-                        f"could not acquire lock {path!r} within {timeout}s"
-                    )
+                            except OSError:
+                                pass
+                            os.close(fd)
+                            fd = None
+                            continue  # our own action just changed things
+
                 time.sleep(poll_interval)
                 continue
 
@@ -195,10 +273,6 @@ def hold(path, timeout: float = 30, break_stale: bool = True,
                 finally:
                     os.close(fd)
                 fd = None
-                if time.monotonic() >= deadline:
-                    raise LockTimeout(
-                        f"could not acquire lock {path!r} within {timeout}s"
-                    )
                 continue
             break
 
@@ -209,6 +283,7 @@ def hold(path, timeout: float = 30, break_stale: bool = True,
             pass  # best-effort - failing to stamp ownership never blocks
         yield
     finally:
+        held.discard(path)
         if fd is not None:
             try:
                 fcntl.flock(fd, fcntl.LOCK_UN)
