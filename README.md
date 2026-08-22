@@ -278,6 +278,9 @@ Product workspaces also carry a gated PRD pipeline: intake, research, synthesis,
 Scope and sign-off are human gates, run from the dashboard's PRD view, never auto-approved.
 Design: section 4 of `docs/superpowers/specs/2026-08-20-orbit-product-teams-design.md`.
 
+Beyond the PRD pipeline, product workspaces cover the rest of the PM loop: `/orbit-analyze-funnel` and `/orbit-hypothesis` turn a question into a cited insight doc, `/orbit-survey-design` and `/orbit-survey-analyze` take a survey from questionnaire to a grounded report (verbatim quotes required, same `insight_lint` gate), standing `watches:` re-file a question on a cadence via the `metric_watch` adapter, and `engine/browse.py` gives cycles a minimal read-only fetch/screenshot driver with saved, re-runnable scrapers.
+Design: `docs/superpowers/plans/2026-08-21-orbit-product-m3.md`.
+
 ## Requirements
 
 - **[Claude Code](https://claude.com/claude-code)** (`claude`) on PATH — Orbit drives

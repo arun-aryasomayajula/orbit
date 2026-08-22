@@ -195,6 +195,9 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
 #     question: "What's the week-over-week change in signup conversion, and why?"
 #     cadence_hours: 168            # optional, positive int; default 168 (weekly)
 #     category: insight             # optional: insight | funnel | hypothesis; default insight
+#
+# Fetches worth repeating are saved as named scrapers, independent of watches:
+# `.autopilot/scrapers/<name>.json` - saved read-only extractors; engine/browse.py rerun <target> <name>.
 
 # --- PRD pipeline (optional, product workspaces) -------------------------------
 # Tunes the headless `claude` call prd_flow.py makes per stage (intake, research,
