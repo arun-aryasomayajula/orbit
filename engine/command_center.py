@@ -3200,9 +3200,10 @@ def do_delete_branches_bulk(kind: str) -> str:
 # ── admin / settings (config.yaml is the portable single source of truth) ─────
 CATEGORIES_ALL = ["bug", "feature", "refactor", "code_quality", "testing", "documentation",
                   "dependencies", "developer_experience", "security", "infrastructure",
-                  "release_management", "git_practices"]
+                  "release_management", "git_practices",
+                  "insight", "funnel", "hypothesis", "survey_design", "survey_analysis"]
 SOURCES_ALL = ["backlog", "backlog-research", "maturity-score", "logwatch", "ui-test",
-               "code-review", "security-review", "network-review"]
+               "code-review", "security-review", "network-review", "metric_watch"]
 HOSTS_ALL = ["bitbucket", "github", "gitlab"]
 _PREFIX_RE = re.compile(r"^[A-Za-z0-9._/-]{1,60}$")
 
@@ -3214,18 +3215,38 @@ def _dashboard_label() -> str:
     return "com.orbit.dashboard-" + REPO.name
 
 
+def _checkbox_options(known: list, current) -> list:
+    """The known options PLUS whatever this config already holds.
+
+    The Admin panel renders ONE checkbox per served option and Save sends back
+    exactly the checked ones, so an option the server omits from the meta is an
+    option the next Save silently deletes from config.yaml. Serving the union
+    makes that structurally impossible: a value already on disk - a category
+    this build predates, one a hand edit added, one a newer profile writes -
+    always renders (checked, since it is in the config) and always survives the
+    round trip. Known options lead in their declared order; extras follow
+    sorted, so the served list is deterministic."""
+    if not isinstance(current, list):
+        return list(known)
+    extra = sorted({v for v in current if isinstance(v, str) and v not in known})
+    return list(known) + extra
+
+
 def config_payload() -> dict:
     """Full config.yaml + resolved runtime meta for the Admin panel."""
     reload_settings()
     src, pr = _git_urls(GIT_HOST, GIT_REPO, BASE_BRANCH)
+    cfg = _load_cfg()
     return {
-        "config": _load_cfg(),
+        "config": cfg,
         "meta": {
             "ap_home": str(AP_HOME), "repo": str(REPO), "port": PORT,
             "loop_label": LAUNCHD_LABEL, "dashboard_label": _dashboard_label(),
             "base_branch": BASE_BRANCH, "git_host": GIT_HOST, "git_repo": GIT_REPO,
             "git_src_url": src, "git_pr_url": pr,
-            "categories_all": CATEGORIES_ALL, "sources_all": SOURCES_ALL, "hosts_all": HOSTS_ALL,
+            "categories_all": _checkbox_options(CATEGORIES_ALL, cfg.get("workable_categories")),
+            "sources_all": _checkbox_options(SOURCES_ALL, cfg.get("sources")),
+            "hosts_all": HOSTS_ALL,
         },
     }
 
