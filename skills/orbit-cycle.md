@@ -25,9 +25,11 @@ You are the **Orbit orchestrator**. Run exactly ONE task to completion (green) o
 - `$AP_STATE/NEEDS_YOU.md` — skip anything already escalated.
 
 ## 1. Get the task - pre-claimed (slot loops) or self-pick (manual runs)
-Slot loops claim a task before invoking this skill so N loops never race the same task; a manual `/orbit-cycle` (no `$ARGUMENTS`) still self-picks and claims, exactly as before.
+Slot loops claim a task before invoking this skill so N loops never race the same task. A manual `/orbit-cycle` (no `$ARGUMENTS`) still self-picks and claims, exactly as before.
 
-**Given** (`$ARGUMENTS` carries a task id): use it verbatim as `<id>`. SKIP the pick logic below and SKIP `ledger.py claim` - the wrapper already claimed it exclusively. Still run the workability checks below against its `queue.json` entry, and still write the marker: `echo "<id>" > "$AP_STATE/.current-task-id"`. If it fails the workability checks, escalate (same as the REFUSE case below) and exit the cycle now, skipping steps 2-4 - do not leave a task you refuse silently `in_progress` until reap. If it passes, stay on the detached HEAD and continue to step 2.
+**Given** (`$ARGUMENTS` carries a task id): use it verbatim as `<id>`. SKIP the pick logic below and SKIP `ledger.py claim` - the wrapper already claimed it exclusively. Do NOT write the marker (the slot loop already wrote the per-slot marker before invoking this cycle).
+- No entry for `<id>` in `queue.json` → escalate via step 5's protocol (`ledger.py escalate <id> "<reason>"` AND the NEEDS_YOU.md entry with its Operator-next-action line) with reason "task not in queue", then exit, skipping steps 2-4.
+- Entry found → run the workability checks below against it. If it fails them, escalate via step 5's protocol (`ledger.py escalate <id> "<reason>"` AND the NEEDS_YOU.md entry with its Operator-next-action line), then exit, skipping steps 2-4 - do not leave a task you refuse silently `in_progress` until reap. If it passes, stay on the detached HEAD and continue to step 2.
 
 **Absent**: from `queue.json`, pick the highest-`priority` task with `status == "backlog"`, id NOT in `worked-ids`, whose `category` is in the config's `workable_categories`.
 
