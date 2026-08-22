@@ -10,6 +10,12 @@ Subcommands:
 """
 import sys, os, shlex, re
 
+# The upper bound on `concurrency`, shared by every enforcement point (see
+# validate() below for the list). 32 slots is already far past any real
+# machine's appetite for parallel claude cycles; the number exists so a
+# fat-fingered 3200 is refused instead of spawned.
+CONCURRENCY_MAX = 32
+
 DEFAULTS = {
     "repo": ".", "base_branch": "main", "model": "claude-opus-4-8",
     "permission_mode": "acceptEdits", "interval_seconds": 180,
@@ -108,10 +114,18 @@ def validate(target):
     # silently mean "no worker at all" or a nonsense ORBIT_SLOTS, so reject it
     # here rather than letting run.sh inherit garbage. Absent/null = the
     # default (1).
+    #
+    # The 1..CONCURRENCY_MAX bound is ONE contract, enforced in four places
+    # that must agree: here, the dashboard's Admin patch validator
+    # (command_center._validate_config), the launcher's clamp
+    # (launcher._concurrency) and run.sh's own SLOTS derivation (which clamps
+    # with a WARN, since a hand-set ORBIT_SLOTS never passes through here).
+    # Above the ceiling it is not a config any more, it is a fork bomb: every
+    # slot is a full claude cycle with its own worktree.
     if raw.get("concurrency") is not None:
         c = raw["concurrency"]
-        if not isinstance(c, int) or isinstance(c, bool) or c <= 0:
-            errs.append(f"concurrency must be a positive integer, got {c!r}")
+        if not isinstance(c, int) or isinstance(c, bool) or c <= 0 or c > CONCURRENCY_MAX:
+            errs.append(f"concurrency must be an integer between 1 and {CONCURRENCY_MAX}, got {c!r}")
     if cfg.get("pull_requests") not in ("off", "github"):
         errs.append(f"pull_requests must be \"off\" or \"github\", got {cfg.get('pull_requests')!r}")
     if "knowledge" in raw and raw["knowledge"] is not None:
