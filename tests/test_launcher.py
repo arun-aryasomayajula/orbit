@@ -1,14 +1,18 @@
 # launcher.py — standalone multi-project front door: registry CRUD, import
-# validation, non-interactive init scaffolding, and the proxy's security gate
+# validation, non-interactive init scaffolding, workspace creation, the loop
+# process manager (per-project run.sh slots), and the proxy's security gate
 # (Host/Origin/token checked BEFORE any request ever reaches a child).
 #
 # Run: python3.11 -m pytest tests/test_launcher.py -v   (from orbit/)
 import http.server
 import importlib.util
 import json
+import os
+import signal
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -270,6 +274,47 @@ def test_do_remove_unregisters_and_stops_child(launcher, tmp_path):
     assert str(repo.resolve()) not in launcher.CHILDREN
 
 
+def test_spawn_child_passes_launchd_label_for_this_project(launcher, tmp_path, monkeypatch):
+    # The multi-project restart bug: without ORBIT_LAUNCHD_LABEL every
+    # dashboard child fell back to command_center.py's default
+    # `com.orbit.autopilot`, so its loop-loaded light and Restart button both
+    # pointed at whichever project happened to own that label.
+    repo = tmp_path / "label repo.v2"
+    repo.mkdir()
+    (repo / ".autopilot").mkdir()
+    launcher.registry_add(str(repo))
+    captured = {}
+
+    class FakeProc:
+        def poll(self):
+            return None
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(launcher.subprocess, "Popen",
+                        lambda argv, env=None, cwd=None, **kw: (captured.update(env=env), FakeProc())[1])
+    monkeypatch.setattr(launcher.urllib.request, "urlopen", lambda *a, **k: FakeResp())
+    ok, _ = launcher.spawn_child(str(repo))
+    assert ok is True
+    # install_service.sh's slug: every non-alphanumeric char becomes a dash,
+    # trailing dashes stripped.
+    assert captured["env"]["ORBIT_LAUNCHD_LABEL"] == "com.orbit.orbit-label-repo-v2"
+    assert launcher.launchd_label(str(repo)) == "com.orbit.orbit-label-repo-v2"
+
+
+def test_launchd_label_matches_install_service_slug(launcher, tmp_path):
+    for basename, expected in [("orbit", "com.orbit.orbit-orbit"),
+                               ("cdp-metaql", "com.orbit.orbit-cdp-metaql"),
+                               ("My Repo!!", "com.orbit.orbit-My-Repo"),
+                               ("dots.in.name", "com.orbit.orbit-dots-in-name")]:
+        assert launcher.launchd_label(str(tmp_path / basename)) == expected
+
+
 def test_spawn_child_passes_expected_env_and_reuses_live_child(launcher, tmp_path, monkeypatch):
     repo = tmp_path / "spawnrepo"
     repo.mkdir()
@@ -387,13 +432,27 @@ def test_launcher_state_function_shape(launcher, tmp_path):
 
 
 def test_launcher_state_loop_running_reflects_stop_file(launcher, tmp_path):
+    # The legacy (no-pid-file) signal, e.g. a launchd-managed loop napping
+    # between cycles: it has an orbit.log - proof a loop has run here - so STOP
+    # is the only thing left to read.
     repo = tmp_path / "looprepo"
     repo.mkdir()
     ap_state = repo / ".autopilot" / "state"
-    ap_state.mkdir(parents=True)
+    (ap_state / "logs").mkdir(parents=True)
+    (ap_state / "logs" / "orbit.log").write_text("[2026-08-22 10:00:00] [slot 0] tick\n")
     launcher.registry_add(str(repo))
     assert launcher.launcher_state()["projects"][0]["loop_running"] is True
     (ap_state / "STOP").write_text("stopped\n")
+    assert launcher.launcher_state()["projects"][0]["loop_running"] is False
+
+
+def test_launcher_state_loop_not_running_for_a_never_started_workspace(launcher, tmp_path):
+    # A freshly scaffolded workspace has a state dir and no STOP file, which
+    # the old heuristic reported as "running" - a badge that lied about every
+    # brand-new project.
+    repo = tmp_path / "fresh"
+    (repo / ".autopilot" / "state").mkdir(parents=True)
+    launcher.registry_add(str(repo))
     assert launcher.launcher_state()["projects"][0]["loop_running"] is False
 
 
@@ -575,3 +634,386 @@ def test_proxy_rejects_wrong_host_header(proxied):
     finally:
         conn.close()
     assert _STUB_HITS == []
+
+
+# ── loop process manager (LOOPS, loop-start / loop-stop, _loop_running) ──────
+def _wait_for(cond, timeout=8.0):
+    """Poll `cond` until it's true (processes and their side effects are
+    asynchronous - never assert on a spawn without waiting for it)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if cond():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _workspace(tmp_path, name="ws", concurrency=None):
+    """A minimally initialized workspace: .autopilot/state + a config.yaml."""
+    repo = tmp_path / name
+    (repo / ".autopilot" / "state").mkdir(parents=True)
+    cfg = 'repo: "."\nbase_branch: "main"\n'
+    if concurrency is not None:
+        cfg += f"concurrency: {concurrency}\n"
+    else:
+        cfg += "# concurrency: 4\n"   # the commented-out default init.py writes
+    (repo / ".autopilot" / "config.yaml").write_text(cfg)
+    return repo
+
+
+@pytest.fixture()
+def loops(launcher, tmp_path, monkeypatch):
+    """launcher module with a zero grace period (loop-stop's real 2s window is
+    a courtesy to a live loop, not something to pay for in tests), an
+    ORBIT_LOOP_CMD stand-in for engine/run.sh, and a teardown that never
+    leaves a spawned slot behind."""
+    launcher.LOOP_STOP_GRACE = 0.0
+    envdir = tmp_path / "loopenv"
+    envdir.mkdir()
+    script = tmp_path / "fake-run.sh"
+    # Records the slot env it was handed (so the spawn contract is assertable),
+    # says one line on stdout (so the loop-<slot>.out redirection is too), then
+    # sleeps until it is signalled.
+    script.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$ORBIT_SLOT|$ORBIT_SLOTS|$ORBIT_LAUNCHD_LABEL|$1" > "$ORBIT_TEST_ENVDIR/slot-$ORBIT_SLOT"\n'
+        'echo "fake loop slot $ORBIT_SLOT up"\n'
+        "sleep 60\n")
+    script.chmod(0o755)
+    monkeypatch.setenv("ORBIT_TEST_ENVDIR", str(envdir))
+    monkeypatch.setenv("ORBIT_LOOP_CMD", f"/bin/sh {script}")
+    yield launcher, envdir
+    for path in list(launcher.LOOPS.keys()):
+        for proc in list((launcher.LOOPS.get(path) or {}).values()):
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+        launcher.LOOPS.pop(path, None)
+
+
+def test_loop_start_spawns_one_process_per_configured_slot(loops, tmp_path):
+    launcher, envdir = loops
+    repo = _workspace(tmp_path, "twoslot", concurrency=2)
+    launcher.registry_add(str(repo))
+    result = launcher.do_loop_start(str(repo))
+    assert result["ok"] is True, result["msg"]
+    assert result["slots"] == 2
+    assert result["started"] == [0, 1]
+    procs = launcher.LOOPS[str(repo.resolve())]
+    assert sorted(procs) == [0, 1]
+    assert all(p.poll() is None for p in procs.values())
+    # each slot got its own identity, the shared slot count, this project's
+    # service label, and the target path as argv[1]
+    assert _wait_for(lambda: len(list(envdir.iterdir())) == 2), list(envdir.iterdir())
+    for slot in (0, 1):
+        slot_env, slots, label, target = (envdir / f"slot-{slot}").read_text().strip().split("|")
+        assert slot_env == str(slot)
+        assert slots == "2"
+        assert label == "com.orbit.orbit-twoslot"
+        assert target == str(repo.resolve())
+    # stdout/stderr landed in the per-slot log
+    logs = repo / ".autopilot" / "state" / "logs"
+    assert _wait_for(lambda: (logs / "loop-0.out").exists() and (logs / "loop-1.out").exists())
+    assert _wait_for(lambda: "fake loop slot 0 up" in (logs / "loop-0.out").read_text())
+
+
+def test_loop_start_defaults_to_one_slot_without_configured_concurrency(loops, tmp_path):
+    launcher, envdir = loops
+    repo = _workspace(tmp_path, "oneslot")   # only a commented-out concurrency
+    launcher.registry_add(str(repo))
+    result = launcher.do_loop_start(str(repo))
+    assert result["ok"] is True
+    assert result["slots"] == 1
+    assert launcher._concurrency(str(repo)) == 1
+    assert sorted(launcher.LOOPS[str(repo.resolve())]) == [0]
+
+
+def test_loop_start_disarms_the_stop_file(loops, tmp_path):
+    launcher, envdir = loops
+    repo = _workspace(tmp_path, "armed")
+    stop = repo / ".autopilot" / "state" / "STOP"
+    stop.write_text("stopped\n")
+    launcher.registry_add(str(repo))
+    assert launcher.do_loop_start(str(repo))["ok"] is True
+    assert not stop.exists()   # a start with STOP still armed would just idle
+
+
+def test_loop_start_is_idempotent_for_live_slots(loops, tmp_path):
+    launcher, envdir = loops
+    repo = _workspace(tmp_path, "again")
+    launcher.registry_add(str(repo))
+    launcher.do_loop_start(str(repo))
+    first = launcher.LOOPS[str(repo.resolve())][0].pid
+    second = launcher.do_loop_start(str(repo))
+    assert second["started"] == []   # nothing new spawned
+    assert launcher.LOOPS[str(repo.resolve())][0].pid == first
+
+
+def test_loop_start_rejects_unregistered_and_uninitialized(loops, tmp_path):
+    launcher, envdir = loops
+    ghost = tmp_path / "ghost"
+    ghost.mkdir()
+    assert launcher.do_loop_start(str(ghost))["ok"] is False
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    launcher.registry_add(str(bare))
+    res = launcher.do_loop_start(str(bare))
+    assert res["ok"] is False
+    assert "autopilot" in res["msg"].lower()
+    assert launcher.LOOPS == {}
+
+
+def test_loop_stop_terms_the_slots_and_leaves_stop_armed(loops, tmp_path):
+    launcher, envdir = loops
+    repo = _workspace(tmp_path, "stopme", concurrency=2)
+    launcher.registry_add(str(repo))
+    launcher.do_loop_start(str(repo))
+    procs = list(launcher.LOOPS[str(repo.resolve())].values())
+    assert _wait_for(lambda: len(list(envdir.iterdir())) == 2)
+
+    result = launcher.do_loop_stop(str(repo))
+    assert result["ok"] is True
+    assert len(result["signalled"]) == 2
+    for proc in procs:
+        assert _wait_for(lambda p=proc: p.poll() is not None), "slot survived SIGTERM"
+    # the ledger ruling: STOP stays on disk so launchd's KeepAlive restart
+    # comes back up idle instead of silently resuming
+    assert (repo / ".autopilot" / "state" / "STOP").exists()
+    assert launcher.LOOPS == {}
+
+
+def test_loop_stop_without_a_running_loop_still_arms_stop(loops, tmp_path):
+    launcher, envdir = loops
+    repo = _workspace(tmp_path, "neverstarted")
+    launcher.registry_add(str(repo))
+    result = launcher.do_loop_stop(str(repo))
+    assert result["ok"] is True
+    assert result["signalled"] == []
+    assert (repo / ".autopilot" / "state" / "STOP").exists()
+
+
+def test_loop_stop_signals_untracked_loops_from_worker_pid_files(loops, tmp_path):
+    # A loop started by launchd (or a previous launcher process) isn't in
+    # LOOPS at all - its $STATE/workers/<slot>.pid is the only allowlist
+    # loop-stop consults.
+    launcher, envdir = loops
+    repo = _workspace(tmp_path, "untracked")
+    launcher.registry_add(str(repo))
+    workers = repo / ".autopilot" / "state" / "workers"
+    workers.mkdir(parents=True)
+    stray = subprocess.Popen(["/bin/sh", "-c", "sleep 60"], start_new_session=True)
+    try:
+        (workers / "0.pid").write_text(json.dumps({"pid": stray.pid, "tid": "t-1", "started": "now"}))
+        result = launcher.do_loop_stop(str(repo))
+        assert result["signalled"] == [stray.pid]
+        assert _wait_for(lambda: stray.poll() is not None)
+    finally:
+        if stray.poll() is None:
+            os.killpg(os.getpgid(stray.pid), signal.SIGKILL)
+            stray.wait(timeout=5)
+
+
+def test_loop_stop_only_blasts_a_process_group_the_loop_actually_leads(loops, tmp_path, monkeypatch):
+    # A loop pid from a workers file is not ours; if it is its own group's
+    # leader (our spawns, launchd, systemd) the group goes down with it so no
+    # in-flight cycle is orphaned. If it is NOT, the group belongs to whatever
+    # shell backgrounded it and must never be blasted - TERM the pid alone.
+    launcher, envdir = loops
+    repo = _workspace(tmp_path, "grouprules")
+    launcher.registry_add(str(repo))
+    workers = repo / ".autopilot" / "state" / "workers"
+    workers.mkdir(parents=True)
+    (workers / "0.pid").write_text(json.dumps({"pid": 4242, "tid": "t-1"}))
+    monkeypatch.setattr(launcher, "_pid_alive", lambda pid: True)
+
+    for pgid, expect_group_kill in [(4242, True), (1, False)]:
+        killed, blasted = [], []
+        monkeypatch.setattr(launcher.os, "getpgid", lambda pid, _g=pgid: _g)
+        monkeypatch.setattr(launcher.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+        monkeypatch.setattr(launcher.os, "killpg", lambda pg, sig: blasted.append((pg, sig)))
+        result = launcher.do_loop_stop(str(repo))
+        assert result["signalled"] == [4242]
+        if expect_group_kill:
+            assert blasted == [(4242, signal.SIGTERM)] and killed == []
+        else:
+            assert killed == [(4242, signal.SIGTERM)] and blasted == []
+
+
+def test_loop_running_is_true_while_a_slot_lives_and_false_after_stop(loops, tmp_path):
+    launcher, envdir = loops
+    repo = _workspace(tmp_path, "liveness")
+    launcher.registry_add(str(repo))
+    assert launcher.do_loop_start(str(repo))["ok"] is True
+    assert launcher._loop_running(str(repo)) is True
+    assert launcher.launcher_state()["projects"][0]["loop_running"] is True
+    assert launcher.launcher_state()["projects"][0]["loop_tracked"] == 1
+
+    launcher.do_loop_stop(str(repo))
+    assert _wait_for(lambda: launcher._loop_running(str(repo)) is False)
+    state = launcher.launcher_state()["projects"][0]
+    assert state["loop_running"] is False
+    assert state["loop_tracked"] == 0
+
+
+def test_loop_running_trusts_a_live_worker_pid_over_the_stop_file(loops, tmp_path):
+    # The pid-file signal outranks the legacy STOP heuristic: a loop that is
+    # mid-cycle when STOP is armed is still running until it finishes.
+    launcher, envdir = loops
+    repo = _workspace(tmp_path, "midcycle")
+    state = repo / ".autopilot" / "state"
+    (state / "workers").mkdir()
+    (state / "STOP").write_text("stopped\n")
+    (state / "workers" / "0.pid").write_text(json.dumps({"pid": os.getpid(), "tid": "t-1"}))
+    assert launcher._loop_running(str(repo)) is True
+    # a dead pid falls through to the legacy STOP heuristic
+    (state / "workers" / "0.pid").write_text(json.dumps({"pid": 999999999, "tid": "t-1"}))
+    assert launcher._loop_running(str(repo)) is False
+
+
+def test_loop_running_tolerates_a_torn_worker_pid_file(loops, tmp_path):
+    launcher, envdir = loops
+    repo = _workspace(tmp_path, "torn")
+    state = repo / ".autopilot" / "state"
+    (state / "workers").mkdir()
+    (state / "workers" / "0.pid").write_text('{"pid": 1')   # half-written
+    (state / "STOP").write_text("stopped\n")
+    assert launcher._loop_running(str(repo)) is False   # no crash, legacy answer
+
+
+def test_loop_routes_over_http_require_the_token(launcher, tmp_path):
+    repo = _workspace(tmp_path, "httpstop")
+    launcher.registry_add(str(repo))
+    lch = _start_launcher(launcher)
+    try:
+        body = json.dumps({"path": str(repo)}).encode()
+        for route in ("/_launcher/loop-start", "/_launcher/loop-stop"):
+            req = urllib.request.Request(f"http://127.0.0.1:{lch.port}{route}", data=body, method="POST",
+                                         headers={"Content-Type": "application/json",
+                                                  "X-CC-Token": "wrong-token"})
+            with pytest.raises(urllib.error.HTTPError) as ei:
+                urllib.request.urlopen(req, timeout=5)
+            assert ei.value.code == 403
+        assert not (repo / ".autopilot" / "state" / "STOP").exists()
+        # with the real token the route runs (stop is the side-effect-cheap one)
+        req = urllib.request.Request(f"http://127.0.0.1:{lch.port}/_launcher/loop-stop", data=body,
+                                     method="POST", headers={"Content-Type": "application/json",
+                                                             "X-CC-Token": launcher._TOKEN})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        assert data["ok"] is True
+        assert (repo / ".autopilot" / "state" / "STOP").exists()
+    finally:
+        lch.close()
+
+
+# ── /_launcher/create (new workspace) ────────────────────────────────────────
+def test_create_scaffolds_git_init_plus_autopilot_and_registers(launcher, tmp_path, monkeypatch):
+    spawned = []
+    monkeypatch.setattr(launcher, "spawn_child", lambda p: (spawned.append(p), (True, "opened"))[1])
+    target = tmp_path / "brand-new"
+    result = launcher.do_create(str(target), name="Brand New", product=False)
+    assert result["ok"] is True, result["msg"]
+    assert (target / ".git").exists()
+    assert (target / ".autopilot" / "config.yaml").exists()
+    assert (target / ".autopilot" / "backlog.yaml").exists()
+    assert (target / ".claude" / "commands").is_dir()
+    # registered under the operator's name, with the dashboard child brought up
+    assert result["project"]["path"] == str(target.resolve())
+    assert result["project"]["name"] == "Brand New"
+    assert launcher.registry_get(str(target))["name"] == "Brand New"
+    assert result["opened"] is True
+    assert spawned == [str(target.resolve())]
+
+
+def test_create_product_workspace_passes_the_product_flag(launcher, tmp_path, monkeypatch):
+    monkeypatch.setattr(launcher, "spawn_child", lambda p: (True, "opened"))
+    target = tmp_path / "pm-space"
+    result = launcher.do_create(str(target), name="", product=True)
+    assert result["ok"] is True, result["msg"]
+    assert result["project"]["name"] == "pm-space"   # defaults to the basename
+    # --product-only scaffolding (init.py): the PM directories and the
+    # grounding track it copies out of the engine
+    assert (target / "insights").is_dir()
+    assert (target / "surveys").is_dir()
+    assert (target / ".autopilot" / "tracks" / "prd-grounding.md").exists()
+    assert "insight_lint" in (target / ".autopilot" / "config.yaml").read_text()
+
+
+def test_create_refuses_an_existing_non_empty_directory(launcher, tmp_path, monkeypatch):
+    monkeypatch.setattr(launcher, "spawn_child", lambda p: (True, "opened"))
+    target = tmp_path / "occupied"
+    target.mkdir()
+    (target / "README.md").write_text("someone's repo\n")
+    result = launcher.do_create(str(target), name="", product=False)
+    assert result["ok"] is False
+    assert "not empty" in result["msg"]
+    assert not (target / ".autopilot").exists()
+    assert launcher.registry_list() == []
+
+
+def test_create_accepts_an_existing_empty_directory(launcher, tmp_path, monkeypatch):
+    monkeypatch.setattr(launcher, "spawn_child", lambda p: (True, "opened"))
+    target = tmp_path / "empty-but-there"
+    target.mkdir()
+    result = launcher.do_create(str(target), name="", product=False)
+    assert result["ok"] is True, result["msg"]
+    assert (target / ".autopilot" / "config.yaml").exists()
+
+
+def test_create_rejects_a_relative_or_missing_path(launcher):
+    assert launcher.do_create("", name="", product=False)["ok"] is False
+    res = launcher.do_create("relative/workspace", name="", product=False)
+    assert res["ok"] is False
+    assert "absolute" in res["msg"]
+
+
+def test_create_survives_a_failing_dashboard_spawn(launcher, tmp_path, monkeypatch):
+    # The scaffold is on disk and registered - a dashboard that didn't come up
+    # is a reopen away, not a failed create.
+    monkeypatch.setattr(launcher, "spawn_child", lambda p: (False, "dashboard did not respond within 5s"))
+    target = tmp_path / "no-dash"
+    result = launcher.do_create(str(target), name="", product=False)
+    assert result["ok"] is True
+    assert result["opened"] is False
+    assert "did not respond" in result["msg"]
+    assert launcher.registry_get(str(target)) is not None
+
+
+def test_create_route_over_http(launcher, tmp_path, monkeypatch):
+    monkeypatch.setattr(launcher, "spawn_child", lambda p: (True, "opened"))
+    lch = _start_launcher(launcher)
+    try:
+        target = tmp_path / "over-http"
+        body = json.dumps({"path": str(target), "name": "Over HTTP", "product": False}).encode()
+        req = urllib.request.Request(f"http://127.0.0.1:{lch.port}/_launcher/create", data=body, method="POST",
+                                     headers={"Content-Type": "application/json",
+                                              "X-CC-Token": launcher._TOKEN})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read())
+        assert data["ok"] is True, data["msg"]
+        assert data["project"]["name"] == "Over HTTP"
+        assert (target / ".autopilot" / "config.yaml").exists()
+    finally:
+        lch.close()
+
+
+def test_concurrency_reads_the_config_and_defaults_to_one(launcher, tmp_path):
+    repo = _workspace(tmp_path, "cfg", concurrency=3)
+    assert launcher._concurrency(str(repo)) == 3
+    # a commented-out key is not a value
+    commented = _workspace(tmp_path, "commented")
+    assert launcher._concurrency(str(commented)) == 1
+    # garbage and absent configs both fall back to today's single loop
+    (repo / ".autopilot" / "config.yaml").write_text("concurrency: banana\n")
+    assert launcher._concurrency(str(repo)) == 1
+    assert launcher._concurrency(str(tmp_path / "nope")) == 1
+    # a real number out of range is clamped, not dropped
+    (repo / ".autopilot" / "config.yaml").write_text("concurrency: 99\n")
+    assert launcher._concurrency(str(repo)) == 32
+    (repo / ".autopilot" / "config.yaml").write_text("concurrency: 0\n")
+    assert launcher._concurrency(str(repo)) == 1

@@ -11,14 +11,21 @@ own Host/Origin/token so the child's own CSRF defense stays intact end to end.
 Run:    python3 $ORBIT_HOME/engine/launcher.py    # http://127.0.0.1:8787
         PORT=9000 python3 $ORBIT_HOME/engine/launcher.py
 
+It is also the loop process manager: each project's run.sh slots are started
+and stopped from here (see LOOPS), so an operator never has to touch launchd
+to pause or resume a workspace.
+
 Reserved routes (never proxied — see the class-level docstring on Handler):
-  GET  /_launcher/state    registry + active project + per-project flags
-  POST /_launcher/import   {path} -> validate + register a git repo
-  POST /_launcher/init     {path} -> scaffold .autopilot/ (install/init.py)
-  POST /_launcher/open     {path} -> spawn/reuse a command_center.py child, activate it
-  POST /_launcher/close    deselect the active project (back to the picker)
-  POST /_launcher/remove   {path} -> unregister (stops its child if running)
-  GET  /                   picker (no active project) or proxy (active project)
+  GET  /_launcher/state       registry + active project + per-project flags
+  POST /_launcher/import      {path} -> validate + register a git repo
+  POST /_launcher/init        {path} -> scaffold .autopilot/ (install/init.py)
+  POST /_launcher/create      {path, name, product} -> mkdir + git init + init.py + register
+  POST /_launcher/open        {path} -> spawn/reuse a command_center.py child, activate it
+  POST /_launcher/loop-start  {path} -> spawn slots 0..concurrency-1 of engine/run.sh
+  POST /_launcher/loop-stop   {path} -> arm the STOP file, then TERM this project's slots
+  POST /_launcher/close       deselect the active project (back to the picker)
+  POST /_launcher/remove      {path} -> unregister (stops its child if running)
+  GET  /                      picker (no active project) or proxy (active project)
 Everything else proxies to the active child; 503 JSON if none is active.
 """
 from __future__ import annotations
@@ -27,7 +34,9 @@ import atexit
 import hmac
 import json
 import os
+import re
 import secrets
+import shlex
 import signal
 import socket
 import subprocess
@@ -45,6 +54,7 @@ from pathlib import Path
 ENGINE = Path(__file__).resolve().parent               # this repo's engine dir
 ORBIT_HOME = Path(os.environ.get("ORBIT_HOME") or ENGINE.parent)   # orbit repo root
 COMMAND_CENTER = ENGINE / "command_center.py"
+RUN_SCRIPT = ENGINE / "run.sh"
 INIT_SCRIPT = ORBIT_HOME / "install" / "init.py"
 SHELL_FILE = ENGINE / "launcher_shell.html"
 
@@ -72,6 +82,25 @@ _ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}", f"[::1]:{PORT}"}
 # test-injected fake children (register_child), never for real spawns.
 CHILDREN: dict[str, dict] = {}
 ACTIVE: dict[str, str | None] = {"path": None}
+
+# path(str, resolved) -> {slot(int): Popen}. One entry per engine/run.sh slot
+# process THIS launcher started for that project (slots 0..concurrency-1).
+# Loops started by launchd/systemd (or by a previous launcher process) are not
+# in here at all - they are discovered through $STATE/workers/*.pid instead,
+# which is why every read of this table is only half of the liveness answer
+# (see _loop_running) and every write of it is best-effort bookkeeping.
+LOOPS: dict[str, dict[int, subprocess.Popen]] = {}
+
+# How long loop-stop waits between arming the STOP file and signalling the
+# slot processes. STOP is only read at the top of a slot's iteration, so this
+# is not "wait for a graceful exit" (that can take an interval_seconds nap) -
+# it is a courtesy window for a slot that is about to loop around anyway.
+# Env-tunable so tests don't pay for it (a garbage value must never keep the
+# launcher from booting, so it falls back to the default).
+try:
+    LOOP_STOP_GRACE = max(0.0, float(os.environ.get("ORBIT_LOOP_STOP_GRACE") or 2))
+except ValueError:
+    LOOP_STOP_GRACE = 2.0
 
 # Coarse lock guarding all reads/writes of CHILDREN and ACTIVE. RLock so a
 # function that already holds it (e.g. spawn_child) can call another that
@@ -122,14 +151,17 @@ def registry_list() -> list:
     return _load_registry()["projects"]
 
 
-def registry_add(path: str) -> dict:
-    """Register a project, deduped on its resolved absolute path. Idempotent."""
+def registry_add(path: str, name: str | None = None) -> dict:
+    """Register a project, deduped on its resolved absolute path. Idempotent.
+    `name` overrides the display name (default: the directory's basename) -
+    used by do_create, where the operator names the workspace themselves."""
     p = str(Path(path).resolve())
     reg = _load_registry()
     for proj in reg["projects"]:
         if proj["path"] == p:
             return proj
-    proj = {"name": Path(p).name, "path": p, "added_at": time.time(), "last_opened": None}
+    proj = {"name": (name or "").strip() or Path(p).name, "path": p,
+            "added_at": time.time(), "last_opened": None}
     reg["projects"].append(proj)
     _save_registry(reg)
     return proj
@@ -169,16 +201,154 @@ def has_autopilot(path: str) -> bool:
         return False
 
 
-def _loop_running(path: str) -> bool:
-    # Best-effort, never crash: a loop is considered "running" when its state
-    # dir exists and no STOP kill-switch is present.
+def _state_dir(path: str) -> Path:
+    return Path(path) / ".autopilot" / "state"
+
+
+def _pid_alive(pid) -> bool:
+    """Local copy of locks.pid_alive (same semantics: EPERM means alive but
+    not ours). Duplicated rather than imported because launcher.py is the one
+    engine file that must run standalone - stdlib only, no engine imports, so
+    it still boots from a half-installed tree."""
     try:
-        state = Path(path) / ".autopilot" / "state"
-        if not state.exists():
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _worker_pids(path: str) -> list[int]:
+    """Live pids recorded in $STATE/workers/*.pid (run.sh's write_worker_pid
+    writes the SLOT LOOP's own pid there, so these name loop processes - not
+    just in-flight cycles). This is how loops the launcher didn't start
+    (launchd, systemd, a previous launcher) become visible to it."""
+    out = []
+    wd = _state_dir(path) / "workers"
+    try:
+        files = sorted(wd.glob("*.pid")) if wd.is_dir() else []
+    except OSError:
+        return out
+    for f in files:
+        try:
+            info = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue   # torn tmp+rename read - same tolerance as command_center's workers_state
+        if isinstance(info, dict) and _pid_alive(info.get("pid")):
+            out.append(int(info["pid"]))
+    return out
+
+
+def _tracked_loop_pids(path: str) -> list[int]:
+    """Pids of this launcher's own live slot processes for `path`, reaping the
+    dead entries out of LOOPS on the way past."""
+    p = str(Path(path).resolve())
+    alive = []
+    with _LOCK:
+        table = LOOPS.get(p) or {}
+        for slot, proc in list(table.items()):
+            if proc.poll() is None:
+                alive.append(proc.pid)
+            else:
+                del table[slot]
+        if not table:
+            LOOPS.pop(p, None)
+    return alive
+
+
+def _loop_running(path: str) -> bool:
+    """Is this project's loop running? Three signals, cheapest first:
+      1. a slot process THIS launcher started is still alive (LOOPS);
+      2. $STATE/workers/*.pid names a live pid (a loop started by launchd, by
+         a previous launcher, or by hand - the launcher is not the only way in);
+      3. legacy fallback - a loop has run here before (logs/orbit.log) and no
+         STOP file is armed. Kept because the pid files only exist while a slot
+         HOLDS a claim: a service-managed loop napping between cycles has none,
+         and before Task 4 the workers dir didn't exist at all. It is a
+         heuristic, so it comes last - and it is gated on orbit.log because
+         "state dir exists and no STOP" alone reported every freshly scaffolded
+         workspace, which has never run anything, as running."""
+    try:
+        if _tracked_loop_pids(path):
+            return True
+        if _worker_pids(path):
+            return True
+        state = _state_dir(path)
+        if not (state / "logs" / "orbit.log").exists():
             return False
         return not (state / "STOP").exists()
     except Exception:
         return False
+
+
+def _slug(path: str) -> str:
+    """The service slug for a target repo, byte-identical to
+    install_service.sh: `orbit-` + the basename with every non-alphanumeric
+    character replaced by a dash (tr -c, one dash per character - not
+    squeezed), trailing dashes stripped."""
+    name = re.sub(r"[^a-zA-Z0-9]", "-", Path(path).name)
+    return "orbit-" + name.rstrip("-")
+
+
+def launchd_label(path: str) -> str:
+    """The launchd/systemd label for a target repo's loop. The dashboard reads
+    it as ORBIT_LAUNCHD_LABEL to answer "is my loop loaded?" and to restart
+    the right service - without it every child of a multi-project launcher
+    inherits the default `com.orbit.autopilot` and restarts (or reports on)
+    some OTHER project's service."""
+    return f"com.orbit.{_slug(path)}"
+
+
+def _concurrency(path: str) -> int:
+    """The project's configured `concurrency` (how many slots its loop runs),
+    default 1. Read straight from its .autopilot/config.yaml: engine/config.py
+    would be the authority, but importing it drags in PyYAML, and the launcher
+    is stdlib-only by contract. So try PyYAML if the interpreter happens to
+    have it, else scan for a top-level `concurrency:` line (a commented-out or
+    indented one is deliberately not a match). Any garbage means 1 - the
+    default that reproduces today's single-loop behavior - and a real number
+    is clamped to 1..32 rather than dropped, so a fat-fingered 99 starts a
+    lot of slots instead of silently starting one."""
+    cfg = Path(path) / ".autopilot" / "config.yaml"
+    try:
+        text = cfg.read_text()
+    except OSError:
+        return 1
+    raw = None
+    try:
+        import yaml   # noqa: PLC0415 - optional, see above
+        loaded = yaml.safe_load(text) or {}
+        if isinstance(loaded, dict):
+            raw = loaded.get("concurrency")
+    except Exception:
+        raw = None
+    if raw is None:
+        m = re.search(r"^concurrency:\s*([0-9]+)\s*$", text, re.MULTILINE)
+        raw = m.group(1) if m else None
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return 1
+    return min(max(n, 1), 32)
+
+
+def _loop_argv(path: str) -> list[str]:
+    """argv for one slot process. ORBIT_LOOP_CMD replaces the command (shlex
+    split, target path still appended) so tests can spawn a tiny sleeper
+    instead of a real Claude-driven loop."""
+    override = os.environ.get("ORBIT_LOOP_CMD")
+    if override:
+        return shlex.split(override) + [path]
+    return ["bash", str(RUN_SCRIPT), path]
 
 
 def _is_git_repo(path: Path) -> bool:
@@ -288,6 +458,12 @@ def spawn_child(path: str) -> tuple[bool, str]:
         "ORBIT_HOME": str(ORBIT_HOME),
         "CC_TOKEN": _TOKEN,
         "PORT": str(port),
+        # Which service this dashboard's loop actually is. Without it every
+        # child of a multi-project launcher fell back to command_center.py's
+        # default `com.orbit.autopilot`, so its "loop loaded" light and its
+        # Restart button both pointed at whatever project happened to own
+        # that label - the restart-loop bug.
+        "ORBIT_LAUNCHD_LABEL": launchd_label(p),
     })
     try:
         proc = subprocess.Popen([sys.executable, str(COMMAND_CENTER)], env=env, cwd=p,
@@ -325,12 +501,199 @@ def do_open(path: str) -> dict:
     return {"ok": True, "msg": msg}
 
 
+def do_loop_start(path: str) -> dict:
+    """Start this project's loop: one detached engine/run.sh process per slot
+    (0..concurrency-1). Disarms the STOP file first - a start with STOP still
+    on disk would spawn slots that immediately idle."""
+    proj = registry_get(path)
+    if not proj:
+        return {"ok": False, "msg": "project not registered - import it first"}
+    p = proj["path"]
+    if not has_autopilot(p):
+        return {"ok": False, "msg": "project has no .autopilot/ - initialize it first"}
+    state = _state_dir(p)
+    logs = state / "logs"
+    try:
+        logs.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return {"ok": False, "msg": f"could not create {logs}: {e}"}
+    try:
+        (state / "STOP").unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        return {"ok": False, "msg": f"could not clear the STOP file: {e}"}
+    slots = _concurrency(p)
+    label = launchd_label(p)
+    _tracked_loop_pids(p)   # reap dead entries so a restart refills their slots
+    started, kept, failed = [], [], []
+    with _LOCK:
+        table = LOOPS.setdefault(p, {})
+        for slot in range(slots):
+            if slot in table:
+                kept.append(slot)   # already ours and alive (just reaped above)
+                continue
+            env = dict(os.environ)
+            env.update({
+                "ORBIT_HOME": str(ORBIT_HOME),
+                "ORBIT_SLOT": str(slot),
+                "ORBIT_SLOTS": str(slots),
+                "ORBIT_LAUNCHD_LABEL": label,
+            })
+            try:
+                # Append, never truncate: two starts of the same slot across a
+                # launcher restart must not eat the first one's tail.
+                log = open(logs / f"loop-{slot}.out", "ab")
+            except OSError as e:
+                failed.append(f"slot {slot}: {e}")
+                continue
+            try:
+                # start_new_session: each slot gets its OWN session/process
+                # group, so (a) Ctrl-C in the launcher's terminal does not
+                # reach it - loops outlive the launcher by design (see the
+                # atexit note) - and (b) loop-stop can signal exactly one
+                # slot's group without touching the launcher or its siblings.
+                proc = subprocess.Popen(_loop_argv(p), env=env, cwd=p, start_new_session=True,
+                                        stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+            except Exception as e:
+                failed.append(f"slot {slot}: {e}")
+                continue
+            finally:
+                log.close()   # the child holds its own dup of the fd
+            table[slot] = proc
+            started.append(slot)
+        if not table:
+            LOOPS.pop(p, None)
+    if failed and not started:
+        return {"ok": False, "msg": "could not start the loop - " + "; ".join(failed)}
+    bits = [f"started {len(started)} slot(s) of {slots}"]
+    if kept:
+        bits.append(f"{len(kept)} already running")
+    if failed:
+        bits.append("failed: " + "; ".join(failed))
+    return {"ok": True, "msg": f"{proj['name']}: " + ", ".join(bits),
+            "slots": slots, "started": started}
+
+
+def do_loop_stop(path: str) -> dict:
+    """Stop this project's loop: arm the STOP file, wait out a short grace
+    window, then SIGTERM the slot processes.
+
+    STOP is deliberately LEFT ARMED afterwards (ledger ruling): a
+    service-managed loop is restarted within seconds by launchd KeepAlive /
+    systemd Restart, and a STOP-less restart would silently resume the work
+    the operator just stopped. Armed, the restarted loop comes back up and
+    idles. Resuming is therefore always an explicit loop-start (which clears
+    the file), never an accident."""
+    proj = registry_get(path)
+    if not proj:
+        return {"ok": False, "msg": "project not registered - import it first"}
+    p = proj["path"]
+    state = _state_dir(p)
+    try:
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "STOP").write_text(f"stopped by the launcher at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+    except OSError as e:
+        return {"ok": False, "msg": f"could not write the STOP file: {e}"}
+    if LOOP_STOP_GRACE > 0:
+        time.sleep(LOOP_STOP_GRACE)
+    tracked = _tracked_loop_pids(p)
+    # Untracked loops (launchd, systemd, a previous launcher) are only ever
+    # signalled when THIS project's own workers/*.pid names them - the pid
+    # files are the whole allowlist. Nothing here ever pgreps the machine.
+    extra = [pid for pid in _worker_pids(p) if pid not in tracked]
+    signalled, errors = [], []
+    for pid in tracked + extra:
+        try:
+            # Signal the GROUP when the loop leads its own one, so the cycle it
+            # has in flight goes with it instead of being orphaned (same
+            # discipline as command_center.do_killtask). Our own spawns always
+            # qualify - start_new_session makes each slot a session leader -
+            # and so does a launchd/systemd job. A loop that is NOT its
+            # group's leader was backgrounded from some other process's shell,
+            # whose group is not ours to blast: TERM that pid alone.
+            if os.getpgid(pid) == pid:
+                os.killpg(pid, signal.SIGTERM)
+            else:
+                os.kill(pid, signal.SIGTERM)
+            signalled.append(pid)
+        except ProcessLookupError:
+            pass   # already gone - STOP stays armed either way
+        except OSError as e:
+            errors.append(f"pid {pid}: {e}")
+    with _LOCK:
+        LOOPS.pop(p, None)
+    msg = f"{proj['name']}: STOP armed"
+    msg += f", TERMed {len(signalled)} loop process(es)" if signalled else ", no live loop process found"
+    if errors:
+        msg += " (" + "; ".join(errors) + ")"
+    return {"ok": True, "msg": msg, "signalled": signalled}
+
+
+def do_create(path: str, name: str = "", product: bool = False) -> dict:
+    """Create a brand-new workspace at `path`: mkdir -p, `git init`,
+    install/init.py (--product for a PM workspace), register it, and bring up
+    its dashboard child. Refuses to touch a directory that already has
+    anything in it - scaffolding into someone's existing repo is what
+    /_launcher/import + /_launcher/init are for."""
+    path = (path or "").strip()
+    if not path:
+        return {"ok": False, "msg": "path is required"}
+    p = Path(path).expanduser()
+    if not p.is_absolute():
+        return {"ok": False, "msg": "path must be absolute"}
+    if p.exists():
+        if not p.is_dir():
+            return {"ok": False, "msg": f"'{p}' exists and is not a directory"}
+        try:
+            nonempty = any(p.iterdir())
+        except OSError as e:
+            return {"ok": False, "msg": f"could not read '{p}': {e}"}
+        if nonempty:
+            return {"ok": False, "msg": f"'{p}' already exists and is not empty - import it instead"}
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return {"ok": False, "msg": f"could not create '{p}': {e}"}
+    p = p.resolve()
+    if not _is_git_repo(p):
+        try:
+            r = subprocess.run(["git", "init", "-q", str(p)], capture_output=True, text=True, timeout=60)
+        except Exception as e:
+            return {"ok": False, "msg": f"git init failed: {e}"}
+        if r.returncode != 0:
+            return {"ok": False, "msg": f"git init failed: {(r.stderr or r.stdout or '').strip()[-500:]}"}
+    argv = [sys.executable, str(INIT_SCRIPT), str(p), str(ORBIT_HOME)]
+    if product:
+        argv.append("--product")
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "msg": "init timed out after 120s"}
+    except Exception as e:
+        return {"ok": False, "msg": f"failed to run init: {e}"}
+    if r.returncode != 0:
+        out = ((r.stdout or "") + ("\n" + r.stderr if r.stderr else "")).strip()
+        return {"ok": False, "msg": f"init failed (rc={r.returncode}): {out[-2000:]}"}
+    proj = registry_add(str(p), name=name)
+    # A workspace with no dashboard is a workspace an operator can't see, so
+    # bring the child up now - but a spawn failure is not a create failure:
+    # the scaffold is on disk and registered, and /_launcher/open retries.
+    ok, spawn_msg = spawn_child(str(p))
+    return {"ok": True, "project": proj, "opened": ok,
+            "msg": f"Created {proj['name']} at {p}." + ("" if ok else f" Dashboard not up yet: {spawn_msg}")}
+
+
 def do_close() -> dict:
     set_active(None)
     return {"ok": True}
 
 
 def do_remove(path: str) -> dict:
+    # Unregisters and drops the DASHBOARD child only. A running loop is left
+    # running on purpose, same ruling as the atexit reaper below: loop
+    # processes are long-lived work and are only ever stopped explicitly
+    # (loop-stop, or the workspace's own STOP file).
     p = str(Path(path).resolve())
     stop_child(p)
     removed = registry_remove(p)
@@ -351,6 +714,11 @@ def launcher_state() -> dict:
             "path": path,
             "has_autopilot": ha,
             "loop_running": _loop_running(path) if ha else False,
+            # Configured slot count and how many of them are this launcher's
+            # own live processes - the tab strip badge reads "2/2" from these.
+            # slots is 0 for an un-initialized project (no config to read).
+            "loop_slots": _concurrency(path) if ha else 0,
+            "loop_tracked": len(_tracked_loop_pids(path)) if ha else 0,
         })
     with _LOCK:
         active = ACTIVE["path"]
@@ -471,8 +839,16 @@ class Handler(BaseHTTPRequestHandler):
             self._json(do_import((data.get("path") or "").strip())); return
         if path == "/_launcher/init":
             self._json(do_init((data.get("path") or "").strip())); return
+        if path == "/_launcher/create":
+            self._json(do_create((data.get("path") or "").strip(),
+                                 (data.get("name") or "").strip(),
+                                 bool(data.get("product")))); return
         if path == "/_launcher/open":
             self._json(do_open((data.get("path") or "").strip())); return
+        if path == "/_launcher/loop-start":
+            self._json(do_loop_start((data.get("path") or "").strip())); return
+        if path == "/_launcher/loop-stop":
+            self._json(do_loop_stop((data.get("path") or "").strip())); return
         if path == "/_launcher/close":
             self._json(do_close()); return
         if path == "/_launcher/remove":
@@ -531,12 +907,21 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+# Dashboard children die with the launcher: they are pure UI in front of a
+# state dir, and a dashboard with no launcher to proxy to is unreachable.
+# LOOPS is deliberately NOT touched here (ledger ruling): a slot loop is
+# long-lived work, mid-cycle when the launcher happens to exit, and stopping
+# it is always an explicit act (loop-stop / the STOP file). The cost is that a
+# launcher restart can find loops it no longer tracks - which is exactly the
+# case _loop_running's workers/*.pid signal and loop-stop's untracked-pid pass
+# exist to handle.
 atexit.register(lambda: [stop_child(p) for p in list(CHILDREN.keys())])
 
 
 def main():
     print(f"Orbit launcher → http://127.0.0.1:{PORT}")
     print("Ctrl-C stops the launcher (and any child dashboards it spawned).")
+    print("Loops keep running - stop them from a tab (or with the workspace's STOP file).")
     # atexit handlers don't run on a bare SIGTERM (kill, launchd-stop,
     # terminal-close) — translate it into a normal SystemExit so the
     # atexit.register'd child-reaper below actually fires and no child

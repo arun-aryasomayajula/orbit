@@ -31,6 +31,33 @@ body{background:var(--void);color:var(--ink);font:14px/1.55 var(--body);
 ::selection{background:var(--blue-dim);color:var(--ink)}
 :focus-visible{outline:2px solid var(--blue);outline-offset:2px;border-radius:4px}
 
+/* ── tab strip ─────────────────────────────────────────────────────────────
+   One tab per registered workspace, pinned across the top. Clicking a tab
+   opens that project (the launcher flips its proxy to that dashboard, so this
+   page is replaced by it); the mini buttons start/stop its loop without
+   leaving the picker. body.has-tabs reserves the strip's height - the strip
+   is hidden entirely until there is at least one workspace. */
+#tabstrip{position:fixed;top:0;left:0;right:0;z-index:10;display:none;align-items:center;gap:6px;
+  padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--line);overflow-x:auto}
+body.has-tabs #tabstrip{display:flex}
+body.has-tabs{padding-top:104px}
+.tab{display:flex;align-items:center;gap:2px;flex:none;background:var(--card);border:1px solid var(--line2);
+  border-radius:9px;padding:2px}
+.tab.is-active{background:var(--blue-dim);border-color:#2b4f86}
+.tab-open{display:flex;align-items:center;gap:7px;background:transparent;border:0;color:var(--ink);
+  font:600 12.5px var(--disp);padding:5px 9px;border-radius:7px;cursor:pointer;max-width:220px}
+.tab-open:hover{background:var(--card2)}
+.tab.is-active .tab-open{color:var(--blue)}
+.tab-open .tname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tab-open .tslots{font:500 10px var(--mono);color:var(--dim);flex:none}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--line2);flex:none}
+.dot.on{background:var(--green);box-shadow:0 0 0 3px var(--green-dim)}
+.tab-mini{background:transparent;border:0;color:var(--dim);font:600 11px var(--disp);
+  padding:5px 7px;border-radius:6px;cursor:pointer;flex:none}
+.tab-mini:hover{background:var(--card2);color:var(--ink)}
+.tab-mini:disabled{opacity:.4;cursor:not-allowed}
+.tab-mini.go:hover{color:var(--green)} .tab-mini.halt:hover{color:var(--red)}
+
 #shell{width:100%;max-width:640px}
 header{display:flex;flex-direction:column;align-items:center;text-align:center;margin-bottom:28px}
 .orbmark{font-size:40px;line-height:1}
@@ -41,10 +68,24 @@ header .sub{font:500 12.5px var(--mono);color:var(--dim);margin:0}
 .panel h2{font:600 10.5px var(--disp);letter-spacing:.18em;text-transform:uppercase;color:var(--faint);margin:0 0 12px}
 
 #importForm{display:flex;gap:8px}
-#importPath{flex:1;background:var(--card);border:1px solid var(--line2);color:var(--ink);border-radius:8px;
+.in{background:var(--card);border:1px solid var(--line2);color:var(--ink);border-radius:8px;
   padding:9px 11px;font:500 12.5px var(--mono);min-width:0}
-#importPath:focus{outline:2px solid var(--blue);outline-offset:1px}
-#importPath::placeholder{color:var(--faint)}
+#importPath{flex:1}
+.in:focus{outline:2px solid var(--blue);outline-offset:1px}
+.in::placeholder{color:var(--faint)}
+
+#createForm{display:flex;flex-direction:column;gap:8px}
+#createForm .row{display:flex;gap:8px}
+#createForm .row .in{flex:1}
+#createForm .foot{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.check{display:flex;align-items:center;gap:7px;font:500 11.5px var(--mono);color:var(--dim);cursor:pointer}
+.check input{accent-color:var(--blue);width:14px;height:14px;flex:none}
+/* Narrow screens: side-by-side name+path (and the checkbox next to Create)
+   squeeze both into unreadable slivers - stack them instead. */
+@media (max-width:520px){
+  #createForm .row{flex-direction:column}
+  #createForm .foot{flex-direction:column;align-items:stretch;gap:12px}
+}
 
 .btn{border:1px solid var(--line2);border-radius:7px;padding:8px 14px;font:600 12px var(--disp);
   letter-spacing:.02em;cursor:pointer;background:var(--card);color:var(--ink);transition:filter .12s;white-space:nowrap}
@@ -69,6 +110,7 @@ header .sub{font:500 12.5px var(--mono);color:var(--dim);margin:0}
 </style>
 </head>
 <body>
+<nav id="tabstrip" aria-label="Workspaces"></nav>
 <div id="shell">
   <header>
     <div class="orbmark">🪐</div>
@@ -79,8 +121,22 @@ header .sub{font:500 12.5px var(--mono);color:var(--dim);margin:0}
   <section class="panel">
     <h2>Import a repo</h2>
     <form id="importForm">
-      <input id="importPath" type="text" placeholder="/absolute/path/to/repo" autocomplete="off" spellcheck="false">
+      <input id="importPath" class="in" type="text" placeholder="/absolute/path/to/repo" autocomplete="off" spellcheck="false">
       <button class="btn btn-blue" type="submit">Import</button>
+    </form>
+  </section>
+
+  <section class="panel">
+    <h2>New workspace</h2>
+    <form id="createForm">
+      <div class="row">
+        <input id="createName" class="in" type="text" placeholder="name" autocomplete="off" spellcheck="false">
+        <input id="createPath" class="in" type="text" placeholder="/absolute/path/to/new/workspace" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="foot">
+        <label class="check"><input id="createProduct" type="checkbox"> product workspace (PM: insights, research, surveys)</label>
+        <button class="btn btn-go" type="submit">Create</button>
+      </div>
     </form>
   </section>
 
@@ -106,7 +162,35 @@ function setMsg(text) {
   document.getElementById('msg').textContent = text || '';
 }
 
+function renderTabs(state) {
+  const strip = document.getElementById('tabstrip');
+  document.body.classList.toggle('has-tabs', state.projects.length > 0);
+  strip.innerHTML = state.projects.map(p => {
+    // state.active is null whenever this page is the one being served (the
+    // launcher proxies GET / to the dashboard as soon as a project IS active),
+    // so in practice no tab is highlighted here - the highlight is honest
+    // wherever the shell renders with an active project.
+    const active = state.active === p.path ? ' is-active' : '';
+    const slots = p.loop_running && p.loop_slots ? `${p.loop_tracked}/${p.loop_slots}` : '';
+    const label = p.has_autopilot ? 'open' : 'not initialized - click to initialize';
+    const controls = p.has_autopilot
+      ? `<button class="tab-mini go" data-act="loop-start" data-path="${esc(p.path)}"
+                 title="Start this workspace's loop">▶</button>
+         <button class="tab-mini halt" data-act="loop-stop" data-path="${esc(p.path)}"
+                 title="Stop this workspace's loop (leaves it stopped)">■</button>`
+      : `<button class="tab-mini" data-act="init" data-path="${esc(p.path)}"
+                 title="Scaffold .autopilot/">init</button>`;
+    return `<div class="tab${active}">
+      <button class="tab-open" data-act="${p.has_autopilot ? 'open' : 'init'}" data-path="${esc(p.path)}" title="${label}">
+        <span class="dot${p.loop_running ? ' on' : ''}"></span>
+        <span class="tname">${esc(p.name)}</span>
+        ${slots ? `<span class="tslots">${slots}</span>` : ''}
+      </button>${controls}</div>`;
+  }).join('');
+}
+
 function render(state) {
+  renderTabs(state);
   const list = document.getElementById('projects');
   list.innerHTML = '';
   if (!state.projects.length) {
@@ -117,7 +201,7 @@ function render(state) {
     const card = document.createElement('div');
     card.className = 'card';
     const badges = [
-      p.loop_running ? '<span class="b b-ok">running</span>' : '',
+      p.loop_running ? `<span class="b b-ok">running${p.loop_slots > 1 ? ` ${p.loop_tracked}/${p.loop_slots}` : ''}</span>` : '',
       !p.has_autopilot ? '<span class="b b-muted">not initialized</span>' : '',
     ].join('');
     const actionBtn = p.has_autopilot
@@ -143,8 +227,10 @@ document.addEventListener('click', e => {
   if (!btn) return;
   const act = btn.dataset.act, path = btn.dataset.path;
   if (act === 'remove' && !confirm(`Remove ${path} from the launcher?`)) return;
+  const route = {open: '/_launcher/open', init: '/_launcher/init', remove: '/_launcher/remove',
+                 'loop-start': '/_launcher/loop-start', 'loop-stop': '/_launcher/loop-stop'}[act];
+  if (!route) return;   // unknown act: never disable a button we won't act on
   btn.disabled = true;
-  const route = {open: '/_launcher/open', init: '/_launcher/init', remove: '/_launcher/remove'}[act];
   post(route, {path}).then(j => {
     setMsg(j.msg || (j.ok ? 'done' : 'failed'));
     if (act === 'open' && j.ok) { location.reload(); return; }
@@ -163,6 +249,24 @@ document.getElementById('importForm').addEventListener('submit', e => {
     if (j.ok) input.value = '';
     refresh();
   }).catch(() => setMsg('request failed'));
+});
+
+document.getElementById('createForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const pathInput = document.getElementById('createPath');
+  const nameInput = document.getElementById('createName');
+  const product = document.getElementById('createProduct').checked;
+  const path = pathInput.value.trim();
+  if (!path) { setMsg('a path for the new workspace is required'); return; }
+  const btn = e.target.querySelector('button[type=submit]');
+  btn.disabled = true;
+  setMsg('creating workspace…');
+  post('/_launcher/create', {path, name: nameInput.value.trim(), product}).then(j => {
+    setMsg(j.msg || (j.ok ? 'created' : 'failed'));
+    if (j.ok) { pathInput.value = ''; nameInput.value = ''; }
+    btn.disabled = false;
+    refresh();
+  }).catch(() => { setMsg('request failed'); btn.disabled = false; });
 });
 
 refresh();
