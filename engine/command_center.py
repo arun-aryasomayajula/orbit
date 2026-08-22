@@ -3347,7 +3347,7 @@ def do_save_config(raw: str) -> str:
     qa/plan/knowledge/mcp/pull_requests/spec/repo. A validate() failure rolls
     the write back (restoring the prior bytes via the same atomic temp+rename
     _atomic_write_config_text uses, or removing the file if it didn't exist
-    before) so a bad qa/plan/knowledge/mcp block is rolled back within seconds —
+    before) so a bad qa/plan/knowledge/mcp block is rolled back within seconds -
     it is genuinely on disk for the brief window the validate() subprocess
     runs, but never stays there, and the restore itself can never leave a
     half-written file even if the process dies mid-rollback."""
@@ -3447,7 +3447,7 @@ def _ensure_secrets_gitignored() -> None:
 
 def _atomic_write_secrets(secrets_map: dict) -> None:
     """Write secrets_map as bare KEY=VALUE lines to .secrets.env, atomically and
-    at mode 0600 throughout (the temp file too — a crash between mkstemp and
+    at mode 0600 throughout (the temp file too - a crash between mkstemp and
     os.replace must never leave a world-readable temp copy of these values
     lying next to the real file). Matches prd_flow._atomic_write_json's
     mkstemp + unlink-on-failure pattern."""
@@ -3460,7 +3460,7 @@ def _atomic_write_secrets(secrets_map: dict) -> None:
         os.fchmod(fd, 0o600)  # belt-and-suspenders against a umask widening mkstemp's mode
         with os.fdopen(fd, "w") as f:
             f.write(body)
-        os.replace(tmp, str(path))  # same-dir rename — atomic, no partial-file window
+        os.replace(tmp, str(path))  # same-dir rename - atomic, no partial-file window
     except Exception:
         try:
             os.close(fd)
@@ -3474,9 +3474,9 @@ def _atomic_write_secrets(secrets_map: dict) -> None:
 
 
 def secrets_payload() -> dict:
-    """GET /api/secrets — name + length-only preview. Full values are NEVER
+    """GET /api/secrets - name + length-only preview. Full values are NEVER
     returned once saved (that's the whole point of a secrets store), and
-    neither are any of its characters — a `first2...last2` preview still
+    neither are any of its characters - a `first2...last2` preview still
     leaks real value bytes, so this masks fully and reports only the length."""
     out = []
     for name, value in sorted(_read_secrets_env().items()):

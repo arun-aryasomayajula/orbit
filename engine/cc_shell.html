@@ -866,11 +866,11 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
 <div class="modal" id="modal6" onclick="closeModal6()"><div class="modalbox" onclick="event.stopPropagation()">
   <h3>＋ New PRD</h3>
   <div style="display:flex;flex-direction:column;gap:6px">
-    <input id="pfRun" class="tfin" placeholder="run id — lowercase letters, digits, hyphens, e.g. checkout-redesign" autocomplete="off" oninput="_pfValidateRun()">
+    <input id="pfRun" class="tfin" placeholder="run id - lowercase letters, digits, hyphens, e.g. checkout-redesign" autocomplete="off" oninput="_pfValidateRun()">
     <div class="m3ctx" id="pfRunHint" style="min-height:1.5em"></div>
-    <input id="pfTitle" class="tfin" placeholder="title — required" autocomplete="off">
-    <textarea id="pfBrief" class="tfin" rows="4" placeholder="brief — one paragraph, optional (grounds the intake agent)"></textarea>
-    <input id="pfPm" class="tfin" placeholder="PM override — optional, defaults to your git identity" autocomplete="off">
+    <input id="pfTitle" class="tfin" placeholder="title - required" autocomplete="off">
+    <textarea id="pfBrief" class="tfin" rows="4" placeholder="brief - one paragraph, optional (grounds the intake agent)"></textarea>
+    <input id="pfPm" class="tfin" placeholder="PM override - optional, defaults to your git identity" autocomplete="off">
   </div>
   <div style="margin-top:10px;display:flex;gap:8px">
     <button class="btn btn-go btn-mini" onclick="submitPrdForm()">Create</button>

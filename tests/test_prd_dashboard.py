@@ -57,7 +57,7 @@ def test_get_masks_values(cc):
     dumped = json.dumps(payload)
     assert "sk-abc123" not in dumped
     by_name = {s["name"]: s["preview"] for s in payload["secrets"]}
-    # Fixed mask + length only — no value characters (not even the first/last
+    # Fixed mask + length only - no value characters (not even the first/last
     # two) ever leave the server, regardless of the value's length.
     assert by_name["METAQL_TOKEN"] == "•••• (9 chars)"
     assert by_name["SHORT"] == "•••• (2 chars)"
@@ -106,7 +106,7 @@ def test_delete_removes_key_and_preserves_others(cc):
 
 
 def test_delete_of_absent_key_reports_honestly(cc):
-    # A delete for a name that was never set is a no-op, not a lie — the
+    # A delete for a name that was never set is a no-op, not a lie - the
     # message must say "removed 0", not claim credit for a key that was
     # never there to begin with.
     msg = cc.do_save_secrets({"delete": ["NEVER_SET"]})
@@ -441,7 +441,7 @@ def test_done_run_can_be_reopened(cc):
 
 def test_revise_synthesis_is_legal_from_awaiting_signoff(cc):
     """awaiting-signoff must offer a way back to synthesis, not just draft/
-    research — a review that finds the SYNTHESIS wrong (not just its writeup)
+    research - a review that finds the SYNTHESIS wrong (not just its writeup)
     otherwise has no legal action to say so."""
     cc.prd_flow.new(str(cc.REPO), "r1", "My PRD")
     marker = cc.prd_flow.load_marker(str(cc.REPO), "r1")

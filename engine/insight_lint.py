@@ -35,7 +35,7 @@ def lint_file(path: Path, survey: bool = False) -> list:
             errs.append(f"{rel}: citation (S{n}) has no matching source in Basis")
     for marker in MARKERS:
         if marker.search(text):
-            errs.append(f"{rel}: contains '{marker.pattern[2:-2]}' — abstain-over-guess means gaps go in Basis, not markers")
+            errs.append(f"{rel}: contains '{marker.pattern[2:-2]}' - abstain-over-guess means gaps go in Basis, not markers")
     if survey:
         quote_lines = [line for line in text.split("\n") if line.startswith("> ")]
         has_coverage_gaps = "## Coverage gaps" in text

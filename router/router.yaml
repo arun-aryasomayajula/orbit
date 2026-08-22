@@ -63,11 +63,11 @@ goldens:
     documentation: documentation
     frontend: frontend           # path-triggered (frontend-react track)
     security: code-review        # security fixes use the review-lens card
-    insight: always              # no dedicated card yet — verify-before-done applies
-    funnel: always                # no dedicated card yet - verify-before-done applies
-    hypothesis: always            # no dedicated card yet - verify-before-done applies
-    survey_design: always          # no dedicated card yet - verify-before-done applies
-    survey_analysis: always        # no dedicated card yet - verify-before-done applies
+    insight: always              # no dedicated card yet - verify-before-done applies
+    funnel: always               # no dedicated card yet - verify-before-done applies
+    hypothesis: always           # no dedicated card yet - verify-before-done applies
+    survey_design: always        # no dedicated card yet - verify-before-done applies
+    survey_analysis: always      # no dedicated card yet - verify-before-done applies
     # dependencies / developer_experience / observability / infrastructure → `always` card only
 
 # category → routing. `policy`: allow = auto-pickable; human = only if forced:true
