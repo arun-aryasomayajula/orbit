@@ -1,6 +1,6 @@
 ---
 description: Run ONE autonomous Orbit task end-to-end in an isolated worktree — pick a safe task, route it (maker·model·skill·tracks) via the router, build→check→verify-spec→atomic commit on the detached base HEAD. The wrapper pushes it to its own <branch_prefix>/task-<id> branch for review. Driven headless by engine/run.sh.
-argument-hint: "(no args — picks the next safe task from the target's queue)"
+argument-hint: "[task-id] (no args - picks the next safe task from the target's queue; a task id skips the pick, used by pre-claiming slot loops)"
 allowed-tools: Read, Grep, Glob, Bash, Edit, Write, Task, Skill
 model: opus
 ---
@@ -24,13 +24,19 @@ You are the **Orbit orchestrator**. Run exactly ONE task to completion (green) o
 - `python3 "$ORBIT_HOME/engine/ledger.py" worked-ids` — exclude these.
 - `$AP_STATE/NEEDS_YOU.md` — skip anything already escalated.
 
-## 1. Pick the next WORKABLE task
-From `queue.json`, the highest-`priority` task with `status == "backlog"`, id NOT in `worked-ids`, whose `category` is in the config's `workable_categories`.
+## 1. Get the task - pre-claimed (slot loops) or self-pick (manual runs)
+Slot loops claim a task before invoking this skill so N loops never race the same task; a manual `/orbit-cycle` (no `$ARGUMENTS`) still self-picks and claims, exactly as before.
+
+**Given** (`$ARGUMENTS` carries a task id): use it verbatim as `<id>`. SKIP the pick logic below and SKIP `ledger.py claim` - the wrapper already claimed it exclusively. Still run the workability checks below against its `queue.json` entry, and still write the marker: `echo "<id>" > "$AP_STATE/.current-task-id"`. If it fails the workability checks, escalate (same as the REFUSE case below) and exit the cycle now, skipping steps 2-4 - do not leave a task you refuse silently `in_progress` until reap. If it passes, stay on the detached HEAD and continue to step 2.
+
+**Absent**: from `queue.json`, pick the highest-`priority` task with `status == "backlog"`, id NOT in `worked-ids`, whose `category` is in the config's `workable_categories`.
+
+Workability checks (both modes):
 - **`forced: true`** → an operator explicitly handed you an otherwise-excluded task; attempt it if code-fixable, else escalate (do not fake an infra/secret/migration action).
 - **REFUSE** (escalate) anything touching auth/payments/billing/migrations/secrets/CI-CD, or any architecture/design decision, unless `forced` AND code-fixable.
-- No safe task → append "no safe tasks this run" to `$AP_STATE/STATE.md` and exit cleanly. Never invent work.
+- Self-pick with no safe task → append "no safe tasks this run" to `$AP_STATE/STATE.md` and exit cleanly. Never invent work.
 
-Claim it (do NOT edit queue.json): `python3 "$ORBIT_HOME/engine/ledger.py" claim <id> "<title>"` then `echo "<id>" > "$AP_STATE/.current-task-id"`. Stay on the detached HEAD.
+Self-pick only: claim it (do NOT edit queue.json): `python3 "$ORBIT_HOME/engine/ledger.py" claim <id> "<title>"` then `echo "<id>" > "$AP_STATE/.current-task-id"`. Stay on the detached HEAD.
 
 ## 2. Route via the ROUTER (maker + model + effort + skill + tracks)
 **Read `$AP_HOME/router.yaml`** (target override) or the engine default `$ORBIT_HOME/router/router.yaml`. Look up the task's `category` under `categories:`:
