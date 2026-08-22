@@ -58,6 +58,11 @@ def shellenv(target):
         # config without the key would starve instead of behaving as it does
         # today. A category name with a comma in it is not representable and is
         # not a thing (backlog_lint's category names are bare identifiers).
+        # Known minor gap: nothing here VALIDATES that assumption - a category
+        # containing a literal comma would silently split into two categories
+        # on the wrapper's side, desyncing from backlog_lint's enum. Inert
+        # today because backlog_lint's KNOWN_CATEGORIES gate rejects any such
+        # category before a task naming it ever reaches this join.
         f"export ORBIT_WORKABLE={sh(','.join(str(c) for c in (raw.get('workable_categories') or [])))}",
         f"export ORBIT_BRANCH_PREFIX={sh(cfg['branch_prefix'])}",
         f"export ORBIT_PULL_REQUESTS={sh(cfg['pull_requests'])}",

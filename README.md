@@ -266,6 +266,19 @@ force-with-reason override. A **Reap stalled** button covers what the wrapper's
 per-iteration reaper can't reach while the loop is paused.
 What each section means and how to operate it: **[docs/OPERATOR-GUIDE.md](docs/OPERATOR-GUIDE.md)**.
 
+## Concurrency and the launcher
+
+A single deployment can run more than one task cycle at once.
+Config `concurrency: N` (default 1) says how many independent slots a workspace runs.
+Each slot is its own `engine/run.sh` process, with its own worktree and its own exclusive ledger claim, so two slots can never pick the same task.
+Slot 0 keeps every legacy filename and stays the deployment's housekeeper (queue refresh, knowledge refresh, the regression sweep, reaping stalled tasks); slot 1+ only claims and runs cycles.
+Raising `concurrency` in `.autopilot/config.yaml` does nothing by itself — something has to actually start the extra slot processes.
+
+That something is `engine/launcher.py`: a standalone front door (`http://127.0.0.1:8787` by default) that sits in front of every registered workspace's own dashboard.
+It shows one tab per workspace, lets you create a new one (plain or `--product`) straight from the browser, and gives each tab its own Start/Stop loop control that spawns or stops exactly that workspace's `concurrency` slot processes.
+Closing a tab or stopping the launcher never kills a running loop — loops are long-lived work, so they keep going until you stop them from their tab or touch the workspace's `STOP` file yourself.
+See `docs/superpowers/specs/2026-08-20-orbit-product-teams-design.md` sections 9 (parallelism) and 10 (tabs) for the full design.
+
 ## Product workspaces
 
 `orbit init <dir> --product` scaffolds a PM workspace: the same loop, gates,
