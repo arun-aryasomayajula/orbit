@@ -2996,11 +2996,21 @@ def watches_state(backlog: list) -> list | None:
     joined with $AP_STATE/watches.json's last_filed and the newest
     watch-<name>-* backlog task (if the adapter has ever filed one for that
     watch - `backlog` is build_state's already-loaded list, not reread here).
-    None (key omitted from build_state) unless the profile actually has a
-    watches: block."""
+
+    None (key omitted from build_state) when the profile has no watches:
+    block at all - a target that never configured watches sees a
+    byte-identical /api/state. A block that IS there but empty returns [],
+    which is a different fact and worth showing: the band can say "No
+    watches configured." instead of vanishing, which is what an operator who
+    just added the block and is looking for it needs to see. (`watches:` with
+    nothing after it parses as None, indistinguishable from absent by value -
+    hence the key test.) A malformed block (not a list) is omitted, same
+    corrupt-tolerant discipline as the state file below."""
     cfg = _load_cfg()
-    watches = cfg.get("watches")
-    if not isinstance(watches, list) or not watches:
+    if "watches" not in cfg:
+        return None
+    watches = cfg.get("watches") or []
+    if not isinstance(watches, list):
         return None
     try:
         raw = json.loads((AP_STATE / "watches.json").read_text())

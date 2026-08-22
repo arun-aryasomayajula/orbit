@@ -131,12 +131,14 @@ def main() -> int:
     filed = deduped = 0
     for watch in watches:
         if not isinstance(watch, dict):
-            print(f"WARN: malformed watch entry {watch!r} - skipping (see config/schema.yaml)")
+            print(f"WARN: malformed watch entry {watch!r} - skipping (see config/schema.yaml)",
+                  file=sys.stderr)
             continue
         name = str(watch.get("name") or "").strip()
         question = str(watch.get("question") or "").strip()
         if not name or not NAME_RE.match(name) or not question:
-            print(f"WARN: malformed watch entry {watch!r} - skipping (see config/schema.yaml)")
+            print(f"WARN: malformed watch entry {watch!r} - skipping (see config/schema.yaml)",
+                  file=sys.stderr)
             continue
         # Single coercion site: a non-numeric cadence_hours (e.g. a typo'd
         # string) must warn-and-skip THIS watch, never raise mid-loop - an

@@ -31,8 +31,10 @@ KNOWN_CATEGORIES = {
     "insight",         # product workspace analysis (safe; gated by insight_lint)
     "funnel",          # funnel-drop analysis (safe; gated by insight_lint)
     "hypothesis",      # single-hypothesis triangulation (safe; gated by insight_lint)
-    "survey_design",   # survey design workflow (Task 5; safe; gated by insight_lint)
-    "survey_analysis", # survey analysis workflow (Task 5; safe; gated by insight_lint)
+    "survey_design",   # survey questionnaire authoring (safe; NOT insight_lint-gated -
+                       # it writes questionnaire.md, and the lint reads only
+                       # insights/*.md and surveys/*/report.md)
+    "survey_analysis", # survey analysis (safe; its report.md IS insight_lint-gated)
 }
 
 

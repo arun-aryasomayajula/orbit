@@ -57,8 +57,8 @@ SAFE_CATEGORIES = {
     "insight",           # product workspace analysis (spec section 5): read-only data pulls into a gated doc
     "funnel",            # funnel-drop analysis: read-only data pulls into a gated doc
     "hypothesis",        # single-hypothesis triangulation: read-only data pulls into a gated doc
-    "survey_design",     # survey design workflow (Task 5): read-only/authoring pulls into a gated doc
-    "survey_analysis",   # survey analysis workflow (Task 5): read-only data pulls into a gated doc
+    "survey_design",     # survey questionnaire authoring: writes surveys/<name>/, touches no code
+    "survey_analysis",   # survey analysis: read-only data pulls into a gated report.md
 }
 # Categories the loop MAY work when explicitly promoted (autopilot:allow). Safe
 # chores PLUS review-gated product work (bug/feature/refactor) — the operator opts

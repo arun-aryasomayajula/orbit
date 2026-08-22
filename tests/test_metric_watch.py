@@ -164,7 +164,10 @@ def test_malformed_watch_entry_is_rejected_loudly_not_crashed(tmp_path):
     t = _target(tmp_path, cfg)
     r = _run(t)
     assert r.returncode == 0, r.stderr
-    assert "WARN" in r.stdout
+    # Every WARN goes to stderr, so a caller can read stdout as the report and
+    # stderr as the problems - the bad-cadence warning below already did.
+    assert "WARN" in r.stderr
+    assert "WARN" not in r.stdout
     assert _backlog_tasks(t) == []
 
 

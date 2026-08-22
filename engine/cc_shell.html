@@ -653,6 +653,7 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
     <div id="prdBand"></div>
     <div id="artifactsBand"></div>
     <div id="watchesBand"></div>
+    <div id="surveysBand"></div>
     <div id="calibrationBand"></div>
     <div class="chips" id="filterbar"></div>
     <div class="ds-wrap">
@@ -1417,7 +1418,7 @@ function renderPrd(){
     <div class=grid>${rs.length?rs.map(prdCard).join(''):'<div class=meta style="padding:8px 0">No PRD runs yet - start one above.</div>'}</div></div>`;
 }
 
-/* ── product artifact browser (Task 7): insights/*.md, signed PRD drafts, survey reports ─ */
+/* ── product artifact browser: insights/*.md, signed PRD drafts, survey reports ─ */
 function artifactRow(label,url,name){
   return `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0">
     <span>${esc(name)}</span>
@@ -1436,12 +1437,13 @@ function renderArtifacts(){
   const prdRows=prds.map(r=>artifactRow(`PRD draft - ${r.run_id}`,`/prd-artifact?run=${encodeURIComponent(r.run_id)}&file=04-prd.md`,r.title||r.run_id)).join('');
   const surveyRows=surveys.map(s=>artifactRow(`Survey report - ${s.name}`,`/product-artifact?kind=survey&name=${encodeURIComponent(s.name)}`,s.name)).join('');
   const body=artifactGroup('Insights',insightRows)+artifactGroup('PRDs',prdRows)+artifactGroup('Survey reports',surveyRows);
-  // Nothing to show is not a state worth a band — no insight docs, no
+  // Nothing to show is not a state worth a band - no insight docs, no
   // draft-stamped PRDs, no survey reports means self-hide, same discipline
-  // every other absent-unless-configured band follows (renderWatches is the
-  // one exception: watches is configured infrastructure, so an empty list
-  // is itself informative — "no watches configured" — where an empty
-  // artifact browser is just noise).
+  // every absent-unless-configured band follows. renderWatches and
+  // renderSurveys read the other way: a present-but-empty watches: block or
+  // surveys/ directory IS configured infrastructure, so the empty list is
+  // itself the message ("No watches configured.") - where an empty artifact
+  // browser is just noise.
   if(!body){band.innerHTML='';return;}
   band.innerHTML=`<div class=band><div class=bandhead><h3>Product artifacts</h3>
     <span class=bandsum>insights, signed-off PRD drafts, and survey reports - one click to read</span></div>
@@ -1449,8 +1451,17 @@ function renderArtifacts(){
 }
 
 /* ── watches band: standing metric questions re-filed on a cadence ──────── */
+/* The adapter writes last_filed as a raw ISO stamp (offset, microseconds and
+   all), which is unreadable at a glance - render it the way every other
+   timestamp on the dashboard reads: date + HH:MM, in the operator's zone. */
+function fmtStamp(iso){
+  if(!iso)return'';
+  const d=new Date(iso);if(isNaN(d.getTime()))return String(iso);
+  const p=n=>String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 function watchCard(w){
-  const lastFiled=w.last_filed?esc(w.last_filed):'never filed';
+  const lastFiled=w.last_filed?esc(fmtStamp(w.last_filed)):'never filed';
   const task=w.task_id?`<span class=meta>${esc(w.task_id)} - ${esc(w.task_status||'')}</span>`
                        :'<span class=meta>no task filed yet</span>';
   return `<div class=card><div class="card-h"><span class=tid>${esc(w.name)}</span> ${badge(w.category||'insight','muted')}</div>
@@ -1465,6 +1476,28 @@ function renderWatches(){
   band.innerHTML=`<div class=band><div class=bandhead><h3>Watches - standing metric questions</h3>
     <span class=bandsum>re-filed into a fresh insight past cadence - see .autopilot/config.yaml watches:</span></div>
     <div class=grid>${ws.length?ws.map(watchCard).join(''):'<div class=meta style="padding:8px 0">No watches configured.</div>'}</div></div>`;
+}
+
+/* ── surveys band: one card per surveys/<name>/ on disk ──────────────────── */
+/* Filesystem-first, like the artifact browser: surveys_state lists a directory
+   per survey with the three things an operator needs to know - is there a
+   questionnaire, have any responses landed, is there a report. The literal
+   drop path is on the card because "where do I put the CSV" is the question
+   this band exists to answer. */
+function surveyCard(s){
+  const files=s.raw_count===1?'1 file':`${s.raw_count} files`;
+  return `<div class=card><div class="card-h"><span class=tid>${esc(s.name)}</span>
+    ${s.has_report?badge('report','ok'):badge('no report','muted')}</div>
+    <div class=meta>questionnaire: ${s.has_questionnaire?'yes':'no'} - responses: ${esc(files)}</div>
+    <div class=meta>drop responses in <code>surveys/${esc(s.name)}/raw/</code></div></div>`;
+}
+function renderSurveys(){
+  const band=document.getElementById('surveysBand');if(!band)return;
+  if(!S||!('surveys' in S)){band.innerHTML='';return;}
+  const ss=S.surveys||[];
+  band.innerHTML=`<div class=band><div class=bandhead><h3>Surveys - questionnaires and responses</h3>
+    <span class=bandsum>design writes the questionnaire, you drop the CSVs, analysis writes the report</span></div>
+    <div class=grid>${ss.length?ss.map(surveyCard).join(''):'<div class=meta style="padding:8px 0">No surveys yet - run an orbit-survey-design task.</div>'}</div></div>`;
 }
 
 /* ── calibration strip: the goldens learning loop's human gate ───────────── */
@@ -2904,7 +2937,7 @@ function renderViews(){
   // Preserve column scroll positions across rebuilds.
   const colsEl=document.getElementById('queueCols');
   const scrolls=[...colsEl.querySelectorAll('.col')].map(c=>c.scrollTop);
-  renderStats();renderInboxAll();renderFilters();renderEpics();renderPrd();renderArtifacts();renderWatches();renderCalibration();renderDeepspace();renderQueue();renderShips();renderBranches();renderAgents();renderQa();
+  renderStats();renderInboxAll();renderFilters();renderEpics();renderPrd();renderArtifacts();renderWatches();renderSurveys();renderCalibration();renderDeepspace();renderQueue();renderShips();renderBranches();renderAgents();renderQa();
   renderKpis();renderSpend();renderHistory();renderFunnel();renderRunlog();renderOnboarding();renderKnowledge();
   [...colsEl.querySelectorAll('.col')].forEach((c,i)=>{if(scrolls[i])c.scrollTop=scrolls[i];});
 }

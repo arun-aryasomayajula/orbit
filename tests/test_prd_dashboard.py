@@ -497,7 +497,7 @@ def test_shell_asks_a_second_question_before_approving_a_pii_scope(cc):
     assert "r.pii_touch" in shell
 
 
-# ── watches / surveys / insight_docs (Task 7) ──────────────────────────────
+# ── watches / surveys / insight_docs ───────────────────────────────────────
 # build_state's absent-unless-configured trio: watches_state (config
 # `watches:` + $AP_STATE/watches.json + the newest watch-<name>-* backlog
 # task), surveys_state (surveys/*/ subdirs), insight_docs_state
@@ -505,6 +505,9 @@ def test_shell_asks_a_second_question_before_approving_a_pii_scope(cc):
 # families /prd-artifact doesn't cover.
 
 def test_watches_surveys_insight_docs_absent_when_unconfigured(cc):
+    """No watches: block AT ALL (as opposed to an empty one - see below):
+    the key is omitted entirely, so an unconfigured target's /api/state is
+    byte-identical to what it was before any of this shipped."""
     s = cc.build_state()
     assert "watches" not in s
     assert "surveys" not in s
@@ -520,6 +523,30 @@ def _write_watches_config(cc, watches):
     cfg = yaml.safe_load(cfg_path.read_text()) or {}
     cfg["watches"] = watches
     cfg_path.write_text(yaml.safe_dump(cfg))
+
+
+def test_watches_state_empty_block_is_an_empty_list_not_absent(cc):
+    """A block that IS there but empty is a different fact from no block, and
+    the band renders it differently ("No watches configured." rather than
+    vanishing) - which is exactly what the operator who just added the block
+    and is hunting for it needs to see."""
+    _write_watches_config(cc, [])
+    assert cc.watches_state([]) == []
+    assert cc.build_state()["watches"] == []
+
+
+def test_watches_state_null_block_reads_as_empty_not_absent(cc):
+    """`watches:` with nothing after it parses as None - indistinguishable
+    from absent by VALUE, which is why the check is on the key."""
+    cfg_path = Path(cc.AP_HOME) / "config.yaml"
+    cfg_path.write_text(cfg_path.read_text() + "watches:\n")
+    assert cc.watches_state([]) == []
+
+
+def test_watches_state_malformed_block_is_omitted(cc):
+    _write_watches_config(cc, {"not": "a list"})
+    assert cc.watches_state([]) is None
+    assert "watches" not in cc.build_state()
 
 
 def test_watches_state_shape_no_task_filed_yet(cc):
