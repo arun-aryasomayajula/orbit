@@ -98,6 +98,100 @@ def test_cli_settings_no_mcp_prints_base_path(tmp_path):
     assert r.stdout.strip() == str(ORBIT / "config" / "orbit.settings.json")
 
 
+def test_validate_accepts_good_publish_block(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG +
+                   'publish:\n  confluence:\n    base_url: "https://wiki.example.com"\n'
+                   '    space: "PROD"\n    parent_id: 42\n'
+                   '  jira:\n    base_url: "https://jira.example.com"\n'
+                   '    project: "ORB"\n    issue_type: "Task"\n')
+    r = _validate(t)
+    assert r.returncode == 0, r.stdout
+
+
+def test_validate_rejects_non_dict_publish_block(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG + 'publish: "invalid"\n')
+    r = _validate(t)
+    assert r.returncode == 1
+    assert "publish must be a mapping" in r.stdout
+
+
+def test_validate_rejects_missing_confluence_base_url(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG +
+                   'publish:\n  confluence:\n    space: "PROD"\n')
+    r = _validate(t)
+    assert r.returncode == 1
+    assert "publish.confluence.base_url" in r.stdout
+
+
+def test_validate_rejects_empty_jira_project(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG +
+                   'publish:\n  jira:\n    base_url: "https://jira.example.com"\n'
+                   '    project: ""\n    issue_type: "Task"\n')
+    r = _validate(t)
+    assert r.returncode == 1
+    assert "publish.jira.project" in r.stdout
+
+
+def test_validate_accepts_confluence_without_parent_id(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG +
+                   'publish:\n  confluence:\n    base_url: "https://wiki.example.com"\n'
+                   '    space: "PROD"\n')
+    r = _validate(t)
+    assert r.returncode == 0, r.stdout
+
+
+def test_validate_rejects_invalid_confluence_parent_id(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG +
+                   'publish:\n  confluence:\n    base_url: "https://wiki.example.com"\n'
+                   '    space: "PROD"\n    parent_id: {}\n')
+    r = _validate(t)
+    assert r.returncode == 1
+    assert "publish.confluence.parent_id" in r.stdout
+
+
+def test_validate_rejects_empty_confluence_parent_id_string(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG +
+                   'publish:\n  confluence:\n    base_url: "https://wiki.example.com"\n'
+                   '    space: "PROD"\n    parent_id: ""\n')
+    r = _validate(t)
+    assert r.returncode == 1
+    assert "publish.confluence.parent_id" in r.stdout
+
+
+def test_validate_rejects_http_to_non_loopback_confluence(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG +
+                   'publish:\n  confluence:\n    base_url: "http://wiki.example.com"\n'
+                   '    space: "PROD"\n')
+    r = _validate(t)
+    assert r.returncode == 1
+    assert "publish.confluence.base_url" in r.stdout and "loopback" in r.stdout
+
+
+def test_validate_rejects_http_to_non_loopback_jira(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG +
+                   'publish:\n  jira:\n    base_url: "http://jira.example.com"\n'
+                   '    project: "ORB"\n    issue_type: "Task"\n')
+    r = _validate(t)
+    assert r.returncode == 1
+    assert "publish.jira.base_url" in r.stdout and "loopback" in r.stdout
+
+
+def test_validate_accepts_http_loopback_confluence(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG +
+                   'publish:\n  confluence:\n    base_url: "http://127.0.0.1:8090"\n'
+                   '    space: "PROD"\n')
+    r = _validate(t)
+    assert r.returncode == 0, r.stdout
+
+
+def test_validate_accepts_http_localhost_confluence(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG +
+                   'publish:\n  confluence:\n    base_url: "http://localhost:8090"\n'
+                   '    space: "PROD"\n')
+    r = _validate(t)
+    assert r.returncode == 0, r.stdout
+
+
 def test_cli_settings_with_mcp_writes_merged_file(tmp_path):
     t = _mk_target(tmp_path, BASE_CFG +
                    'mcp:\n  metaql:\n    transport: http\n    url: "https://m/mcp"\n    tools: [metaql_execute_query]\n')

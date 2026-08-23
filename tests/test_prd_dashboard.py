@@ -14,6 +14,7 @@ import os
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -613,7 +614,8 @@ def test_insight_docs_state_absent_without_insights_dir_present_with_stems(cc):
     (root / "funnel-drop.md").write_text("# Funnel drop\n")
 
     docs = cc.insight_docs_state()
-    assert docs == ["funnel-drop", "wow-signup"]
+    assert docs == [{"name": "funnel-drop", "jira_key": None, "publish_error": None},
+                    {"name": "wow-signup", "jira_key": None, "publish_error": None}]
     s = cc.build_state()
     assert s["insight_docs"] == docs
 
@@ -751,7 +753,7 @@ _ONE_CYCLE_LOG = [
 
 
 def test_turnaround_is_reported_with_a_single_live_worker(cc):
-    """Control for the suppression test below: one worker means the
+    """Control for the interleaved-pairing test below: one worker means the
     start/terminal pairing in the shared log is unambiguous, so the number is
     real and must still be published."""
     _write_worker_pid(cc, "0", os.getpid(), "t-a")
@@ -762,23 +764,45 @@ def test_turnaround_is_reported_with_a_single_live_worker(cc):
     assert rt["cycle_samples"] == 1
 
 
-def test_turnaround_is_suppressed_while_several_workers_are_live(cc):
-    """F9: turnaround is measured by pairing a "cycle start" line with the next
-    terminal line in ONE shared orbit.log. With slots interleaving, slot 1's
-    terminal line closes slot 0's start and the "duration" is the gap between
-    two unrelated events. Publish nothing rather than a number nobody can see
-    is wrong (the UI renders null as "—"). Slot-tagged pairing is M5."""
+def test_turnaround_pairs_correctly_when_several_workers_interleave(cc):
+    """M5: turnaround pairing is keyed by each line's "[slot N]" tag (from M4),
+    not by position in the shared orbit.log. Interleaved so a position-based
+    pairing would get it wrong: slot 1 starts and finishes entirely inside
+    slot 0's still-open cycle, so a same-order algorithm would either close
+    slot 0's start against slot 1's terminal line, or lose slot 0's pairing
+    outright. Keyed pairing gets both right and no longer needs to go dark at
+    concurrency > 1 (replaces F9's suppress-when->1 test)."""
     _write_worker_pid(cc, "0", os.getpid(), "t-a")
     _write_worker_pid(cc, "1", os.getpid(), "t-b")
-    _write_aplog(cc, _ONE_CYCLE_LOG + [
+    _write_aplog(cc, [
+        "[2026-08-22 10:00:00] [slot 0] cycle start (task t-a, 2 pickable)\n",
         "[2026-08-22 10:01:00] [slot 1] cycle start (task t-b, 1 pickable)\n",
-        "[2026-08-22 10:09:00] [slot 1] cycle committed 1 change(s) (def)\n",
+        "[2026-08-22 10:03:00] [slot 1] cycle committed 1 change(s) (def)\n",
+        "[2026-08-22 10:05:00] [slot 0] pushed origin/autopilot/task-t-a (abc) — review\n",
     ])
     rt = cc.probe_runtime()
-    assert rt["last_cycle_dur"] is None
-    assert rt["avg_cycle_sec"] is None
-    assert rt["cycle_samples"] == 0
-    assert rt["heartbeat"] is not None      # everything else still reported
+    assert rt["cycle_samples"] == 2                # slot 1 (120s) then slot 0 (300s)
+    assert rt["last_cycle_dur"] == 300              # the LAST terminal line seen: slot 0's
+    assert rt["avg_cycle_sec"] == 210               # (120 + 300) / 2
+    assert rt["heartbeat"] is not None
+
+
+def test_turnaround_pairs_untagged_legacy_lines_together(cc):
+    """Logs written before slot tagging existed (or a single-slot deployment's
+    untagged history) carry no "[slot N]" tag at all. Those lines share one
+    bucket and keep pairing against each other exactly as they did before
+    M5, unaffected by any slot-tagged lines elsewhere in the same log."""
+    _write_worker_pid(cc, "0", os.getpid(), "t-a")
+    _write_aplog(cc, [
+        "[2026-08-22 09:00:00] cycle start (task t-old, 1 pickable)\n",
+        "[2026-08-22 09:03:00] pushed origin/autopilot/task-t-old (abc) — review\n",
+        "[2026-08-22 10:00:00] [slot 0] cycle start (task t-a, 2 pickable)\n",
+        "[2026-08-22 10:04:00] [slot 0] pushed origin/autopilot/task-t-a (abc) — review\n",
+    ])
+    rt = cc.probe_runtime()
+    assert rt["cycle_samples"] == 2                 # legacy pair (180s), slot 0 pair (240s)
+    assert rt["last_cycle_dur"] == 240
+    assert rt["avg_cycle_sec"] == 210                # (180 + 240) / 2
 
 
 def test_probe_runtime_reuses_build_states_worker_read(cc, monkeypatch):
@@ -1078,3 +1102,369 @@ def test_watches_bad_row_rejected_by_config_py_and_rolled_back(cc):
     assert msg.startswith("Rejected")
     assert "watches[0].name" in msg
     assert cfg_path.read_text() == before
+
+
+# ── publish (Task 6: dashboard publish surfaces) ───────────────────────────
+# do_prd_action's `publish` (legal only from status done, second-gated on
+# publish.confluence being configured) and do_artifact_action's `file-jira`
+# (insight-only, gated on publish.jira, same confinement read_product_artifact
+# uses) - plus the state surfaces the shell reads to decide what to render:
+# prd_pipeline_state's `published` + filtered `next_actions`,
+# insight_docs_state's `jira_key`.
+
+CONFLUENCE_CFG = {"base_url": "https://confluence.example.com", "space": "PROD"}
+JIRA_CFG = {"base_url": "https://jira.example.com", "project": "PROD", "issue_type": "Task"}
+
+
+def _write_publish_config(cc, confluence=None, jira=None):
+    import yaml
+    cfg_path = Path(cc.AP_HOME) / "config.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text()) or {}
+    pub = {}
+    if confluence is not None:
+        pub["confluence"] = confluence
+    if jira is not None:
+        pub["jira"] = jira
+    cfg["publish"] = pub
+    cfg_path.write_text(yaml.safe_dump(cfg))
+
+
+def _done_run(cc, run="r1"):
+    cc.prd_flow.new(str(cc.REPO), run, "My PRD")
+    marker = cc.prd_flow.load_marker(str(cc.REPO), run)
+    marker["status"] = "done"
+    cc.prd_flow._write_marker(str(cc.REPO), run, marker)
+
+
+def test_publish_channels_absent_by_default(cc):
+    assert cc._publish_channels() == {"confluence": False, "jira": False}
+    s = cc.build_state()
+    assert s["publish_channels"] == {"confluence": False, "jira": False}
+
+
+def test_publish_channels_true_only_when_all_required_fields_present(cc):
+    _write_publish_config(cc, confluence={"base_url": "https://x"})   # missing space
+    assert cc._publish_channels()["confluence"] is False
+    _write_publish_config(cc, confluence=CONFLUENCE_CFG, jira=JIRA_CFG)
+    assert cc._publish_channels() == {"confluence": True, "jira": True}
+
+
+def test_publish_action_illegal_outside_done(cc):
+    cc.prd_flow.new(str(cc.REPO), "r1", "My PRD")   # status stays "intake"
+    _write_publish_config(cc, confluence=CONFLUENCE_CFG)
+    msg = cc.do_prd_action("r1", "publish")
+    assert "cannot" in msg.lower()
+    assert "status" in msg.lower()
+
+
+def test_publish_action_unconfigured_gives_clear_message_and_no_popen(cc, monkeypatch):
+    _done_run(cc)
+    calls = []
+    monkeypatch.setattr(cc.subprocess, "Popen", lambda *a, **kw: calls.append((a, kw)))
+    msg = cc.do_prd_action("r1", "publish")
+    assert "publish.confluence" in msg
+    assert "not configured" in msg
+    assert calls == []
+
+
+class _FakePopen:
+    """Stand-in for the detached Popen handle do_prd_action/do_artifact_
+    action now read `.pid` off of, to write the publish-pending record
+    (see _write_publish_pending)."""
+    pid = 424242
+
+
+def test_publish_action_spawns_detached_popen_with_logging(cc, monkeypatch):
+    _done_run(cc)
+    _write_publish_config(cc, confluence=CONFLUENCE_CFG)
+    calls = []
+    monkeypatch.setattr(cc.subprocess, "Popen", lambda cmd, **kw: (calls.append((cmd, kw)), _FakePopen())[1])
+    msg = cc.do_prd_action("r1", "publish")
+    assert "launched" in msg.lower()
+    assert len(calls) == 1
+    cmd, kwargs = calls[0]
+    assert cmd == [cc.sys.executable, str(Path(cc.ENGINE) / "publish.py"), "prd", str(cc.REPO), "r1"]
+    assert kwargs.get("start_new_session") is True
+    log = Path(cc.AP_STATE) / "logs" / "publish-prd-r1.log"
+    assert f"logs/{log.name}" in msg
+
+
+def test_next_actions_hides_publish_button_when_confluence_unconfigured(cc):
+    _done_run(cc)
+    run = cc.prd_pipeline_state()[0]
+    assert "publish" not in run["next_actions"]
+    assert run["published"] is None
+
+
+def test_next_actions_shows_publish_button_when_confluence_configured(cc):
+    _done_run(cc)
+    _write_publish_config(cc, confluence=CONFLUENCE_CFG)
+    run = cc.prd_pipeline_state()[0]
+    assert "publish" in run["next_actions"]
+
+
+def test_published_url_surfaced_from_seeded_marker(cc):
+    _done_run(cc)
+    marker = cc.prd_flow.load_marker(str(cc.REPO), "r1")
+    marker["published"] = {"confluence": {"page_id": "123",
+                                          "url": "https://confluence.example.com/x",
+                                          "at": "2026-08-22T00:00:00Z"}}
+    cc.prd_flow._write_marker(str(cc.REPO), "r1", marker)
+    run = cc.prd_pipeline_state()[0]
+    assert run["published"] == {"page_id": "123", "url": "https://confluence.example.com/x",
+                                "at": "2026-08-22T00:00:00Z"}
+    s = cc.build_state()
+    assert s["prd"][0]["published"]["url"] == "https://confluence.example.com/x"
+
+
+def test_published_url_with_unsafe_scheme_passes_through_state_unfiltered(cc):
+    """The server never sanitises `published.confluence.url` - it is a
+    trusted-writer field (only publish.py's own _record_published sets it,
+    behind the marker lock) and command_center reads it back verbatim. The
+    ACTUAL defense against a tampered/hand-edited marker carrying something
+    like `javascript:...` lives client-side, in cc_shell.html's
+    isSafeLinkUrl gate (pinned by test_prd_publish_link_gated_on_http_scheme
+    below) - this test only pins that the raw value still reaches the state
+    payload unmodified, which is exactly why that client-side gate is load-
+    bearing rather than defense-in-depth on top of a server-side filter."""
+    _done_run(cc)
+    marker = cc.prd_flow.load_marker(str(cc.REPO), "r1")
+    marker["published"] = {"confluence": {"page_id": "123",
+                                          "url": "javascript:alert(1)",
+                                          "at": "2026-08-22T00:00:00Z"}}
+    cc.prd_flow._write_marker(str(cc.REPO), "r1", marker)
+    run = cc.prd_pipeline_state()[0]
+    assert run["published"]["url"] == "javascript:alert(1)"
+
+
+def test_prd_publish_link_gated_on_http_scheme(cc):
+    """cc_shell.html's prdPublishArea must never hand `published.confluence.url`
+    straight to an <a href> - escAttr stops attribute breakout (a stray '"')
+    but does nothing about the SCHEME, so a marker carrying
+    `url: "javascript:..."` would otherwise become a live anchor the moment
+    the card renders (see the test above: the server hands that value
+    through unfiltered). No JS runtime in this suite, so this is a source-
+    text pin: the scheme check exists, and the render path actually calls it
+    before building the anchor, with an escaped-plain-text fallback when it
+    fails."""
+    shell = (Path(cc.ENGINE) / "cc_shell.html").read_text()
+    assert "function isSafeLinkUrl" in shell
+    assert r"^https?:\/\/" in shell   # the actual check, not just the function's existence
+    area = shell.split("function prdPublishArea", 1)[1].split("\nfunction ", 1)[0]
+    assert "isSafeLinkUrl(url)" in area
+    assert "<a href=" in area and "esc(url)" in area   # anchor branch AND the plain-text fallback
+
+
+# ── /artifact-action: file-jira ─────────────────────────────────────────────
+
+def test_artifact_action_file_jira_unconfigured_gives_message_no_popen(cc, monkeypatch):
+    ir = Path(cc.REPO) / "insights"
+    ir.mkdir()
+    (ir / "wow-signup.md").write_text("# WoW signup\n## Answer\nit went up\n## Basis\n- S1: data\n")
+    calls = []
+    monkeypatch.setattr(cc.subprocess, "Popen", lambda *a, **kw: calls.append((a, kw)))
+    msg = cc.do_artifact_action("insight", "wow-signup", "file-jira")
+    assert "publish.jira" in msg
+    assert "not configured" in msg
+    assert calls == []
+
+
+def test_artifact_action_file_jira_spawns_detached_popen_with_logging(cc, monkeypatch):
+    ir = Path(cc.REPO) / "insights"
+    ir.mkdir()
+    (ir / "wow-signup.md").write_text("# WoW signup\n## Answer\nit went up\n## Basis\n- S1: data\n")
+    _write_publish_config(cc, jira=JIRA_CFG)
+    calls = []
+    monkeypatch.setattr(cc.subprocess, "Popen", lambda cmd, **kw: (calls.append((cmd, kw)), _FakePopen())[1])
+    msg = cc.do_artifact_action("insight", "wow-signup", "file-jira")
+    assert "filing" in msg.lower()
+    assert len(calls) == 1
+    cmd, kwargs = calls[0]
+    assert cmd == [cc.sys.executable, str(Path(cc.ENGINE) / "publish.py"), "finding",
+                   str(cc.REPO), "wow-signup"]
+    assert kwargs.get("start_new_session") is True
+
+
+def test_artifact_action_rejects_traversal_and_unknown_kind(cc):
+    ir = Path(cc.REPO) / "insights"
+    ir.mkdir()
+    (ir / "real.md").write_text("# Real\n")
+    _write_publish_config(cc, jira=JIRA_CFG)
+
+    assert "invalid" in cc.do_artifact_action("insight", "../secret", "file-jira").lower()
+    assert "invalid" in cc.do_artifact_action("insight", "../../etc/passwd", "file-jira").lower()
+    assert "no insight doc" in cc.do_artifact_action("insight", "not-real", "file-jira").lower()
+    assert "only insight docs" in cc.do_artifact_action("survey", "real", "file-jira").lower()
+    assert "unknown artifact action" in cc.do_artifact_action("insight", "real", "bogus-action").lower()
+
+
+def test_insight_docs_state_surfaces_jira_key_when_record_line_exists(cc):
+    ir = Path(cc.REPO) / "insights"
+    ir.mkdir()
+    (ir / "wow-signup.md").write_text(
+        "# WoW signup\n## Answer\nit went up\n## Basis\n- S1: data\n\n"
+        "<!-- published: jira PROD-42 -->\n")
+    (ir / "unfiled.md").write_text("# Unfiled\n")
+
+    docs = {d["name"]: d["jira_key"] for d in cc.insight_docs_state()}
+    assert docs["wow-signup"] == "PROD-42"
+    assert docs["unfiled"] is None
+
+
+# ── publish failure surfacing (Task/Important 1) ────────────────────────────
+# do_prd_action's `publish` and do_artifact_action's `file-jira` launch
+# publish.py detached and return immediately - a bad config/secret/lint/HTTP/
+# lock failure used to be invisible unless someone opened logs/publish-*.log
+# by hand. _write_publish_pending/_publish_reconcile close that: a small
+# pending-record json next to the log lets prd_pipeline_state/insight_docs_
+# state reconcile pid-alive / succeeded / failed on every poll.
+
+def _dead_pid():
+    """A pid guaranteed dead (spawned and reaped by THIS process, so
+    locks.pid_alive sees ProcessLookupError) - never a guessed large number,
+    which could theoretically collide with something still alive."""
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    return p.pid
+
+
+def _write_pending(cc, log_stem, pid, launched_at):
+    log = Path(cc.AP_STATE) / "logs" / f"{log_stem}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    if not log.exists():
+        log.touch()
+    cc._publish_pending_path(log).write_text(
+        json.dumps({"pid": pid, "log": log_stem, "launched_at": launched_at}))
+    return log
+
+
+def test_publish_error_absent_when_no_pending_record(cc):
+    _done_run(cc)
+    run = cc.prd_pipeline_state()[0]
+    assert run["publish_error"] is None
+
+
+def test_publish_error_absent_while_the_launched_pid_is_still_alive(cc):
+    """Still publishing - nothing to show yet, not an error."""
+    _done_run(cc)
+    _write_pending(cc, "publish-prd-r1", os.getpid(), time.time())
+    run = cc.prd_pipeline_state()[0]
+    assert run["publish_error"] is None
+
+
+def test_publish_error_absent_and_pending_file_cleared_on_success(cc):
+    """pid gone + a success record newer than the launch time = this
+    attempt (or one that superseded it) succeeded - the pending file is
+    reconciled away so it is never re-checked again."""
+    _done_run(cc)
+    dead = _dead_pid()
+    log = _write_pending(cc, "publish-prd-r1", dead, time.time() - 100)
+    marker = cc.prd_flow.load_marker(str(cc.REPO), "r1")
+    marker["published"] = {"confluence": {"page_id": "1", "url": "https://x/1",
+                                          "at": "2026-08-22T00:00:00Z"}}
+    cc.prd_flow._write_marker(str(cc.REPO), "r1", marker)
+
+    run = cc.prd_pipeline_state()[0]
+    assert run["publish_error"] is None
+    assert not cc._publish_pending_path(log).exists()
+
+
+def test_publish_error_present_when_pid_gone_and_no_success_record(cc):
+    """pid gone, no success record at all - a real failure, and the log's
+    own `publish[<code>]: <msg>` line drives the short reason."""
+    _done_run(cc)
+    dead = _dead_pid()
+    log = _write_pending(cc, "publish-prd-r1", dead, time.time())
+    log.write_text("some log noise\npublish[5]: POST https://x/y failed: HTTP 503\n")
+
+    run = cc.prd_pipeline_state()[0]
+    assert run["publish_error"] == {"reason": "HTTP 503", "log": "publish-prd-r1"}
+    # left in place - not silently forgotten after being shown once
+    assert cc._publish_pending_path(log).exists()
+
+
+@pytest.mark.parametrize("code,msg,reason", [
+    (2, "no `publish:` block", "config"),
+    (3, "missing ATLASSIAN_EMAIL", "secrets"),
+    (4, "insight_lint failed", "unapproved/lint"),
+    (5, "POST x failed: HTTP 500", "HTTP 500"),
+    (6, "could not acquire the lock", "lock contention"),
+])
+def test_publish_error_reason_maps_every_exit_code(cc, code, msg, reason):
+    _done_run(cc)
+    dead = _dead_pid()
+    log = _write_pending(cc, "publish-prd-r1", dead, time.time())
+    log.write_text(f"publish[{code}]: {msg}\n")
+    run = cc.prd_pipeline_state()[0]
+    assert run["publish_error"]["reason"] == reason
+
+
+def test_publish_error_surfaces_on_insight_docs_state_too(cc):
+    ir = Path(cc.REPO) / "insights"
+    ir.mkdir()
+    (ir / "wow-signup.md").write_text("# WoW signup\n## Answer\nit went up\n## Basis\n- S1: data\n")
+    dead = _dead_pid()
+    log = _write_pending(cc, "publish-finding-wow-signup", dead, time.time())
+    log.write_text("publish[3]: missing ATLASSIAN_API_TOKEN\n")
+
+    docs = {d["name"]: d for d in cc.insight_docs_state()}
+    assert docs["wow-signup"]["publish_error"] == {"reason": "secrets", "log": "publish-finding-wow-signup"}
+
+
+def test_publish_error_cleared_on_insight_docs_state_when_filed(cc):
+    ir = Path(cc.REPO) / "insights"
+    ir.mkdir()
+    doc = ir / "wow-signup.md"
+    dead = _dead_pid()
+    log = _write_pending(cc, "publish-finding-wow-signup", dead, time.time() - 100)
+    doc.write_text("# WoW signup\n## Answer\nit went up\n## Basis\n- S1: data\n\n"
+                   "<!-- published: jira PROD-42 -->\n")
+
+    docs = {d["name"]: d for d in cc.insight_docs_state()}
+    assert docs["wow-signup"]["publish_error"] is None
+    assert not cc._publish_pending_path(log).exists()
+
+
+def test_shell_renders_publish_error_on_prd_card_and_insight_row(cc):
+    """Source-text pin (no JS runtime in this suite, same template as
+    test_prd_publish_link_gated_on_http_scheme): publishErrorLine must exist,
+    escape its reason text, and actually be called from both prdCard (the
+    PRD band) and insightArtifactRow (the artifact browser) - the two places
+    build_state's publish_error can appear."""
+    shell = (Path(cc.ENGINE) / "cc_shell.html").read_text()
+    assert "function publishErrorLine" in shell
+    body = shell.split("function publishErrorLine", 1)[1].split("\nfunction ", 1)[0]
+    assert "esc(err.reason" in body
+    prd_card = shell.split("function prdCard", 1)[1].split("\nfunction ", 1)[0]
+    assert "publishErrorLine(r.publish_error)" in prd_card
+    insight_row = shell.split("function insightArtifactRow", 1)[1].split("\nfunction ", 1)[0]
+    assert "publishErrorLine(d.publish_error)" in insight_row
+
+
+def test_cmdlog_route_serves_publish_prd_and_finding_logs(cc):
+    """The route's confinement (do_GET's `_cmdlog_name_ok`) must extend to
+    the publish-{prd,finding} log stems, shape-checked the same way as the
+    run id / insight stem they're built from - never widened to an arbitrary
+    filesystem path."""
+    log = Path(cc.AP_STATE) / "logs" / "publish-prd-r1.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("hello from publish-prd-r1\n")
+    assert "hello from publish-prd-r1" in cc.read_cmdlog("publish-prd-r1")
+
+    log2 = Path(cc.AP_STATE) / "logs" / "publish-finding-wow-signup.log"
+    log2.write_text("hello from publish-finding-wow-signup\n")
+    assert "hello from publish-finding-wow-signup" in cc.read_cmdlog("publish-finding-wow-signup")
+
+
+@pytest.mark.parametrize("name", [
+    "publish-prd-../../etc/passwd", "publish-prd-R1", "publish-prd-",
+    "publish-finding-../secret", "publish-finding-", "publish-finding-a/b",
+    "publish-other-x", "../../etc/passwd", "publish-prd-r1.log",
+])
+def test_cmdlog_route_rejects_malformed_publish_log_names(cc, name):
+    # A secret file OUTSIDE logs/ that a traversal attempt would otherwise
+    # reach, to prove a bad name never gets anywhere near it.
+    secret = Path(cc.AP_STATE).parent / "secret.txt"
+    secret.write_text("do not serve me")
+    assert not cc._cmdlog_name_ok(name)
+    assert cc.read_cmdlog(name) == ""

@@ -54,3 +54,71 @@ def test_slack_message_without_url_has_no_link(tmp_path, monkeypatch):
     mod.notify_slack("title", "message")
     assert "Open the dashboard" not in sent["body"]["text"]
     assert WEBHOOK not in sent["body"]["text"]
+
+
+# ── send() dedupe (best-effort, state under $AP_STATE) ───────────────────────
+def _wired(mod, monkeypatch):
+    """Stub both fan-out channels and return the list send() actually reached."""
+    calls = []
+    monkeypatch.setattr(mod, "notify_macos", lambda t, m: calls.append((t, m)))
+    monkeypatch.setattr(mod, "notify_slack", lambda t, m, u="": None)
+    return calls
+
+
+def test_dedupe_drops_identical_title_and_body_within_window(tmp_path, monkeypatch):
+    monkeypatch.setenv("AP_STATE", str(tmp_path))
+    mod = _notify(tmp_path, monkeypatch)
+    calls = _wired(mod, monkeypatch)
+    mod.send("title", "body")
+    mod.send("title", "body")          # same title+body, same instant — dropped
+    assert len(calls) == 1
+
+
+def test_dedupe_allows_a_different_body(tmp_path, monkeypatch):
+    monkeypatch.setenv("AP_STATE", str(tmp_path))
+    mod = _notify(tmp_path, monkeypatch)
+    calls = _wired(mod, monkeypatch)
+    mod.send("title", "body one")
+    mod.send("title", "body two")      # different body — not a duplicate
+    assert len(calls) == 2
+
+
+def test_dedupe_allows_a_repeat_after_the_window_expires(tmp_path, monkeypatch):
+    monkeypatch.setenv("AP_STATE", str(tmp_path))
+    mod = _notify(tmp_path, monkeypatch)
+    calls = _wired(mod, monkeypatch)
+    clock = [1_000_000.0]
+    monkeypatch.setattr(mod.time, "time", lambda: clock[0])
+    mod.send("title", "body")
+    clock[0] += mod.DEDUPE_WINDOW_SEC + 1
+    mod.send("title", "body")          # identical, but the window has passed
+    assert len(calls) == 2
+
+
+def test_dedupe_never_blocks_on_a_corrupt_state_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("AP_STATE", str(tmp_path))
+    (tmp_path / ".notify-last").write_text("not json{")
+    mod = _notify(tmp_path, monkeypatch)
+    calls = _wired(mod, monkeypatch)
+    mod.send("title", "body")          # must not raise despite the garbage state
+    assert len(calls) == 1
+
+
+def test_dedupe_never_blocks_when_state_dir_is_unwritable(tmp_path, monkeypatch):
+    monkeypatch.setenv("AP_STATE", str(tmp_path / "does-not-exist"))
+    mod = _notify(tmp_path, monkeypatch)
+    calls = _wired(mod, monkeypatch)
+    mod.send("title", "body")          # can't persist state — must still send
+    assert len(calls) == 1
+
+
+def test_dedupe_never_raises_on_a_lone_surrogate_in_the_message(tmp_path, monkeypatch):
+    """A lone surrogate (garbled input from wherever the caller sourced title/
+    message) raises UnicodeEncodeError from a strict .encode() - this must
+    not escape _is_duplicate and break the "never raises" contract the whole
+    module promises."""
+    monkeypatch.setenv("AP_STATE", str(tmp_path))
+    mod = _notify(tmp_path, monkeypatch)
+    calls = _wired(mod, monkeypatch)
+    mod.send("title", "bad \udcff surrogate")
+    assert len(calls) == 1

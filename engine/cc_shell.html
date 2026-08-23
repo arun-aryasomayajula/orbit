@@ -706,12 +706,6 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
         <button class="btn btn-go btn-mini" id="qaDevStartBtn" onclick="qaServicesStart()">▶ Start app</button>
         <button class="btn btn-stop btn-mini" id="qaDevStopBtn" style="display:none" onclick="qaServicesStop()">■ Stop app</button>
       </div>
-      <!-- Workers strip (Task 7) - one row per $AP_STATE/workers/<slot>.pid,
-           concurrency's per-slot answer to "what is actually running right
-           now". Independent of qa.services: renders whenever build_state
-           served a `workers` key at all, self-hides otherwise (see
-           renderWorkers). -->
-      <div id="workersStrip" style="display:none;margin-top:10px"></div>
     </div>
     <!-- ── New test / Record — the web equivalent of `orbit teach` ── -->
     <div class="band" id="qaTeachBand" style="display:none">
@@ -997,7 +991,7 @@ function card(t,kind){
   if(kind==='run'){live='live';
     timer=`<div class="meta"><span class="orbmark orbmark-sm" aria-hidden="true"></span> ${S&&S.stopped?'⏸ pause pending — finishing this cycle':'in orbit'} <span class="timer" data-start="${t._start||''}">…</span>`+
       `<div class="wd"><i data-wd="${t._start||''}" style="width:0%"></i></div></div>`;
-    btns=`<button class="btn btn-stop btn-mini" onclick="if(confirm('Abort the running cycle and set ${esc(t.id)} aside?'))post('/killtask',{id:'${esc(t.id)}'})">Abort &amp; skip</button>`;
+    btns=`<button class="btn btn-stop btn-mini" onclick="if(confirm('Abort the running cycle and set ${escJsAttr(t.id)} aside?'))post('/killtask',{id:'${escJsAttr(t.id)}'})">Abort &amp; skip</button>`;
   }else if(kind==='next'){
     btns=`<button class="btn btn-go btn-mini" title="move it to the front and resume the loop" onclick="post('/runnow',{id:'${esc(t.id)}'})">Run this next</button>
       <button class="btn btn-mini" title="move up in the queue" onclick="post('/move',{id:'${esc(t.id)}',dir:'up'})">▲</button>
@@ -1101,10 +1095,10 @@ const COL_HELP={
   'Deep space':'Proposals only — NOTHING here happens until you press "Queue it". Read the plain line + 👉 hint on each card to decide.',
   'Graveyard orbit':'Parked tasks. The robot never touches them; bring one back anytime.',
 };
-function col(title,cls,items,kind,emptyMsg){
+function col(title,cls,items,kind,emptyMsg,extra){
   const body=items.length?items.map(t=>card(t,kind)).join(''):`<div class=empty>${emptyMsg||'—'}</div>`;
   const help=COL_HELP[title.split(' · ')[0]];
-  return `<section class="col ${cls}"><h2>${title}<span class=cnt>${items.length}</span></h2>${help?`<div class=colsub>${help}</div>`:''}${body}</section>`;
+  return `<section class="col ${cls}"><h2>${title}<span class=cnt>${items.length}</span></h2>${extra||''}${help?`<div class=colsub>${help}</div>`:''}${body}</section>`;
 }
 
 /* ── topbar + orbit + rail ──────────────────────────────────────────────── */
@@ -1141,13 +1135,29 @@ function idleWhy(r,t){
       : {tag:'Armed', msg:`Waiting for the next cycle. ${beat}.`, cls:'green'};  // no false interval claim
   }
 }
+// Slot-aware "who's actually running": the workers array (Task 7) is real
+// per-slot liveness, strictly more accurate than the single global
+// current_task claim file it sits alongside (which only ever named ONE
+// task even when several slots ran concurrently). Used wherever the hero
+// would otherwise name "the" running task - never changes cycle_running/
+// cycle_start/idle branching itself, only the wording once a branch is
+// already known to be "a cycle is running".
+function liveWorkers(r){return (r.workers||[]).filter(w=>w.alive);}
+function tidsCompact(ws){
+  const shown=ws.slice(0,3).map(w=>esc(w.tid||'claiming…'));
+  const extra=ws.length-shown.length;
+  return shown.join(', ')+(extra>0?` +${extra} more`:'');
+}
 function renderTop(){
-  if(!S)return; const r=S,t=srvClock(),ib=inboxItems();
+  if(!S)return; const r=S,t=srvClock(),ib=inboxItems(),lw=liveWorkers(r);
   // status sentence
   const money=`$${(r.daily_spend||0).toFixed(2)} est.`;
   let s;
   if(r.stopped)s=`⏸ <b>Paused.</b> Nothing runs or spends until you resume · ${r.counts.next} queued · ${money} today`;
-  else if(r.cycle_running&&r.cycle_start)s=`<b>In orbit: ${esc(r.current_task||'claiming a task…')}</b>${r.current_task_tentative?' <span class=mut>(confirming…)</span>':''} · ${fmt(t-r.cycle_start)} elapsed · ${r.daily_count}/${r.max_tasks} tasks + ${money} today · ${r.counts.next} queued behind it`;
+  else if(r.cycle_running&&r.cycle_start)s=(lw.length
+      ? `<b>In orbit: ${lw.length} cycle${lw.length===1?'':'s'} live</b> <span class=mut>(${tidsCompact(lw)})</span>`
+      : `<b>In orbit: ${esc(r.current_task||'claiming a task…')}</b>${r.current_task_tentative?' <span class=mut>(confirming…)</span>':''}`)
+    +` · ${fmt(t-r.cycle_start)} elapsed · ${r.daily_count}/${r.max_tasks} tasks + ${money} today · ${r.counts.next} queued behind it`;
   else {const w=idleWhy(r,t); s=`<b>${w.tag}.</b> ${w.msg} · ${r.daily_count}/${r.max_tasks} tasks + ${money} today · ${r.counts.next} queued`;}
   if(ib.n)s+=` · <span class=hot>${ib.n} item${ib.n===1?'':'s'} need you</span>`;
   document.getElementById('statusText').innerHTML=s;
@@ -1161,7 +1171,9 @@ function renderTop(){
     const p=Math.min(1,(t-r.cycle_start)/r.cycle_timeout);
     orbit.className='orbit';arc.style.strokeDashoffset=ORBIT_C*(1-p);
     arc.style.stroke=p>.8?'var(--amber)':'var(--blue)';
-    hs.innerHTML=`In orbit <span class=mut>· ${esc(r.current_task||'claiming a task…')}${r.current_task_tentative?' (confirming…)':''}</span>`;
+    hs.innerHTML = lw.length
+      ? `In orbit <span class=mut>· ${lw.length} cycle${lw.length===1?'':'s'} live (${tidsCompact(lw)})</span>`
+      : `In orbit <span class=mut>· ${esc(r.current_task||'claiming a task…')}${r.current_task_tentative?' (confirming…)':''}</span>`;
     hsub.innerHTML=`<b>${fmt(t-r.cycle_start)}</b> elapsed of a ${Math.floor(r.cycle_timeout/60)}m watchdog window · one atomic commit per cycle, pushed to its own branch.`;}
   else{const w=idleWhy(r,t);
     orbit.className='orbit idle';arc.style.strokeDashoffset=ORBIT_C*0.25;
@@ -1297,10 +1309,12 @@ function renderQueue(){
     ? 'Paused — resume the loop to send a task into orbit.'
     : `Nothing in orbit right now — <b>${esc(w.tag)}</b>. ${esc(w.msg)}<br>A task appears here while a cycle is actively working it.`;
   document.getElementById('queueCols').innerHTML=
-    col('In orbit','hl-run',r.running.map(x=>({...x,_start:r.cycle_start})),'run',orbitEmpty)+
+    col('In orbit','hl-run',r.running.map(x=>({...x,_start:r.cycle_start})),'run',orbitEmpty,
+        '<div id="workersStrip" style="display:none;margin:0 0 8px"></div>')+
     col('Launch pad','hl-next',r.next_up,'next',r.auto_feed
       ?'Launch pad is dry — Auto-feed found nothing safe to promote.<br><b>Queue something from Deep space.</b>'
       :'Launch pad is dry.<br><b>Queue something from Deep space, or switch on Auto-feed.</b>');
+  renderWorkers();
 }
 
 /* ── epics band (planning tier: plan → approve spec → decompose) ─────────── */
@@ -1391,13 +1405,58 @@ function prdActionBtn(r,a){
   const body=`{run:'${escJsAttr(r.run_id)}',action:'${a}'${pii?",ack_pii:'1'":''}}`;
   return `<button class="btn ${cls} btn-mini" onclick="if(confirm('${escJsAttr(msg)}')${gate})post('/prd-action',${body})">${esc(label)}</button>`;
 }
+/* Publish is handled OUTSIDE the generic next_actions -> prdActionBtn map:
+   once a run has been published, the button becomes a smaller "re-publish"
+   affordance next to a badge + link, which the generic one-button-per-action
+   map has no way to express. The server still lists 'publish' in
+   next_actions for as long as it's legal (status done && confluence
+   configured) - filtered from the generic map below, read here instead. */
+function prdPublishBtn(r){
+  const already=!!(r.published&&r.published.url);
+  const label=already?'↻ re-publish':'⬆ Publish';
+  const msg=already
+    ?`Re-publish '${r.run_id}'? The existing Confluence page is updated in place.`
+    :`Publish '${r.run_id}' to Confluence?`;
+  const cls=already?'btn btn-mini':'btn btn-go btn-mini';
+  return `<button class="${cls}" onclick="if(confirm('${escJsAttr(msg)}'))post('/prd-action',{run:'${escJsAttr(r.run_id)}',action:'publish'})">${label}</button>`;
+}
+/* http(s)-only, mirroring publish.py's _safe_href defense-in-depth: escAttr
+   stops attribute breakout (a stray '"') but does nothing about the SCHEME -
+   a marker carrying `url: "javascript:...".` would otherwise become a live
+   anchor the moment the card renders. Never trust the marker to already be
+   clean; check it again here, at the one place it becomes an href. */
+function isSafeLinkUrl(u){return typeof u==='string'&&/^https?:\/\//i.test(u);}
+/* Publish failure surfacing (build_state's publish_error - see command_center
+   .py's _publish_reconcile): absent unless a launched publish actually
+   failed, so this renders nothing for the overwhelming common case. The log
+   link reuses the Run view's own /api/cmdlog route - `err.log` is already
+   the bare stem _cmdlog_name_ok expects as `name`, never a filesystem path. */
+function publishErrorLine(err){
+  if(!err)return'';
+  const log=err.log?`<a href="#" onclick="openText('publish log - ${escJsAttr(err.log)}','/api/cmdlog?name=${encodeURIComponent(err.log)}',false);return false">view log</a>`:'';
+  return `<div class=meta style="color:var(--red)">⚠ publish failed: ${esc(err.reason||'error')}${log?' - '+log:''}</div>`;
+}
+function prdPublishArea(r){
+  const legal=(r.next_actions||[]).includes('publish');
+  const pub=r.published;
+  const url=(pub&&pub.url)?String(pub.url):'';
+  if(!legal&&!url)return'';
+  const link=url?(isSafeLinkUrl(url)
+    ?` <a href="${escAttr(url)}" target="_blank" rel="noopener">${esc(url)}</a>`
+    :` ${esc(url)}`)
+    :'';
+  const bd=url?badge('published','ok'):'';
+  return `${bd}${link} ${legal?prdPublishBtn(r):''}`;
+}
 function prdCard(r){
   const tamper=(r.tamper&&r.tamper.length)?`<div class=meta style="color:var(--red)">⚠ tamper: ${esc(r.tamper.join('; '))}</div>`:'';
-  const btns=(r.next_actions||[]).map(a=>prdActionBtn(r,a)).join('');
+  const pubErr=publishErrorLine(r.publish_error);
+  const btns=(r.next_actions||[]).filter(a=>a!=='publish').map(a=>prdActionBtn(r,a)).join('');
+  const pubArea=prdPublishArea(r);
   return `<div class=card><div class="card-h"><span class=tid>${esc(r.run_id)}</span> ${prdStatusBadge(r.status)}${r.pii_touch?' '+badge('PII','warn'):''}</div>
     <div class=title>${esc(r.title)}</div>
-    <div class=meta>${prdStageDots(r.stages)}</div>${tamper}
-    <div class=btns>${btns}${prdArtifactLinks(r)}</div></div>`;
+    <div class=meta>${prdStageDots(r.stages)}</div>${tamper}${pubErr}
+    <div class=btns>${btns}${pubArea}${prdArtifactLinks(r)}</div></div>`;
 }
 function newPrd(){
   document.getElementById('pfRun').value=''; document.getElementById('pfTitle').value='';
@@ -1444,6 +1503,27 @@ function artifactRow(label,url,name){
     <span>${esc(name)}</span>
     <button class="btn btn-mini" onclick="openText('${escJsAttr(label)}','${url}',false)">View</button></div>`;
 }
+/* Insight rows get a second action the generic artifactRow has no room for:
+   File→Jira when publish.jira is configured and the doc hasn't been filed
+   yet, or the recorded key once it has - absent-unless-configured, same as
+   the PRD band's Publish button. */
+function insightArtifactRow(d){
+  const jiraOk=!!(S.publish_channels&&S.publish_channels.jira);
+  let action='';
+  if(d.jira_key){
+    action=`<span class=meta>${esc(d.jira_key)}</span>`;
+  }else if(jiraOk){
+    const msg=`File insight '${d.name}' as a Jira issue?`;
+    action=`<button class="btn btn-mini" onclick="if(confirm('${escJsAttr(msg)}'))post('/artifact-action',{kind:'insight',name:'${escJsAttr(d.name)}',action:'file-jira'})">File→Jira</button>`;
+  }
+  return `<div style="padding:4px 0">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+    <span>${esc(d.name)}</span>
+    <span style="display:flex;gap:6px;align-items:center">
+      <button class="btn btn-mini" onclick="openText('${escJsAttr(d.name)}','/product-artifact?kind=insight&name=${encodeURIComponent(d.name)}',false)">View</button>
+      ${action}
+    </span></div>${publishErrorLine(d.publish_error)}</div>`;
+}
 function artifactGroup(title,rowsHtml){
   return rowsHtml?`<div class=meta style="margin-top:10px"><b>${esc(title)}</b></div>${rowsHtml}`:'';
 }
@@ -1453,7 +1533,7 @@ function renderArtifacts(){
   const insights=(S.insight_docs)||[];
   const prds=((S.prd)||[]).filter(r=>(r.stages||[]).some(s=>s.name==='draft'&&s.stamped_at));
   const surveys=((S.surveys)||[]).filter(s=>s.has_report);
-  const insightRows=insights.map(n=>artifactRow(n,`/product-artifact?kind=insight&name=${encodeURIComponent(n)}`,n)).join('');
+  const insightRows=insights.map(insightArtifactRow).join('');
   const prdRows=prds.map(r=>artifactRow(`PRD draft - ${r.run_id}`,`/prd-artifact?run=${encodeURIComponent(r.run_id)}&file=04-prd.md`,r.title||r.run_id)).join('');
   const surveyRows=surveys.map(s=>artifactRow(`Survey report - ${s.name}`,`/product-artifact?kind=survey&name=${encodeURIComponent(s.name)}`,s.name)).join('');
   const body=artifactGroup('Insights',insightRows)+artifactGroup('PRDs',prdRows)+artifactGroup('Survey reports',surveyRows);
@@ -1760,11 +1840,14 @@ function workerRow(w){
     <span class=aside>${w.started?esc(w.started):''}</span><span class=spacer></span>${badge(w.alive?'alive':'gone',w.alive?'ok':'muted')}</div>`;
 }
 function renderWorkers(){
-  // Independent of qa.services - this is per-slot concurrency liveness
-  // (Task 7), not the dev-session app. Self-hides on its own whenever
-  // build_state omitted `workers` entirely (unconfigured, concurrency==1
-  // with nothing running); see workers_state()'s docstring for the exact
-  // absent-vs-empty contract.
+  // Per-slot concurrency liveness (Task 7) - independent of qa.services and
+  // of the dev-session app. Lives beside the Queue view's "In orbit" column
+  // header (Task 9 moved it off the QA Dev-session band, which had nothing
+  // to do with per-slot workers). Self-hides on its own whenever build_state
+  // omitted `workers` entirely (unconfigured, concurrency==1 with nothing
+  // running); see workers_state()'s docstring for the exact absent-vs-empty
+  // contract. Called from renderQueue() every render cycle, same as any
+  // other DOM this innerHTML-replaces wholesale.
   const el=document.getElementById('workersStrip');
   if(!el)return;
   const workers=S&&S.workers;
@@ -1777,39 +1860,25 @@ function renderQaDev(){
   const band=document.getElementById('qaDevBand');
   if(!band)return;
   const qs=S&&S.qa_services;
-  const workers=S&&S.workers;
-  // The band itself now serves two independent stories (dev-session app,
-  // per-slot workers) - show it if EITHER has something to say, so a
-  // concurrency>1 target with no qa.services still sees its workers strip.
-  if(!qs&&!workers){band.style.display='none';return;}
+  // Task 9: the workers strip moved to the Queue view (beside the "In orbit"
+  // column's live count) - this band is dev-session-app-only again.
+  if(!qs){band.style.display='none';return;}
   band.style.display='';
   const stateEl=document.getElementById('qaDevState');
   const noteEl=document.getElementById('qaDevNote');
   const svcEl=document.getElementById('qaDevServices');
   const startBtn=document.getElementById('qaDevStartBtn'),stopBtn=document.getElementById('qaDevStopBtn');
-  if(qs){
-    const stLabel={stopped:'stopped',starting:'starting…',running:'running',error:'error'}[qs.state]||qs.state;
-    const stClass={stopped:'muted',starting:'warn',running:'ok',error:'stop'}[qs.state]||'muted';
-    if(stateEl)stateEl.innerHTML=badge(stLabel,stClass);
-    if(noteEl)noteEl.textContent=qs.state==='running'
-      ? 'Tests run against the warm app (attach) — no reboot.'
-      : qs.state==='error' ? (qs.error||'could not bring the app up')
-      : 'Bring the app up once, then flows/teach attach instead of relaunching it every run.';
-    if(svcEl)svcEl.innerHTML=(qs.services||[]).map(qaDevServiceRow).join('');
-    const busy=qs.state==='running'||qs.state==='starting';
-    if(startBtn)startBtn.style.display=busy?'none':'';
-    if(stopBtn)stopBtn.style.display=busy?'':'none';
-  }else{
-    // No qa.services configured on this target - the dev-session-specific
-    // controls have nothing to show; the workers strip below still renders
-    // on its own.
-    if(stateEl)stateEl.innerHTML='';
-    if(noteEl)noteEl.textContent='';
-    if(svcEl)svcEl.innerHTML='';
-    if(startBtn)startBtn.style.display='none';
-    if(stopBtn)stopBtn.style.display='none';
-  }
-  renderWorkers();
+  const stLabel={stopped:'stopped',starting:'starting…',running:'running',error:'error'}[qs.state]||qs.state;
+  const stClass={stopped:'muted',starting:'warn',running:'ok',error:'stop'}[qs.state]||'muted';
+  if(stateEl)stateEl.innerHTML=badge(stLabel,stClass);
+  if(noteEl)noteEl.textContent=qs.state==='running'
+    ? 'Tests run against the warm app (attach) — no reboot.'
+    : qs.state==='error' ? (qs.error||'could not bring the app up')
+    : 'Bring the app up once, then flows/teach attach instead of relaunching it every run.';
+  if(svcEl)svcEl.innerHTML=(qs.services||[]).map(qaDevServiceRow).join('');
+  const busy=qs.state==='running'||qs.state==='starting';
+  if(startBtn)startBtn.style.display=busy?'none':'';
+  if(stopBtn)stopBtn.style.display=busy?'':'none';
 }
 function renderQa(){
   renderQaDev();
@@ -2845,22 +2914,32 @@ function collectChecks(id){return [...document.querySelectorAll('#set-'+id+' inp
    in a hand-edited config.yaml renders as a blank/defaulted row instead of
    throwing. */
 let watchRows=[];
+// Rows carry a stable client-only `_id` (never sent to the server -
+// validateWatchRows() below rebuilds plain {name,question,cadence_hours,
+// category} objects) rather than being addressed by array index: an index
+// is only ever the row's position in THIS render, so a Remove/oninput
+// handler baked in at render time would silently target the wrong row the
+// instant a row above it is added or removed. _id is assigned once, at
+// creation, and never reused.
+let _watchRowSeq=0;
 function _sanitizeWatchRow(w){
   w=(w&&typeof w==='object')?w:{};
   const cats=['insight','funnel','hypothesis'];
-  return {name:typeof w.name==='string'?w.name:'',
+  return {_id:++_watchRowSeq,
+          name:typeof w.name==='string'?w.name:'',
           question:typeof w.question==='string'?w.question:'',
           cadence_hours:(Number.isInteger(w.cadence_hours)&&w.cadence_hours>0)?w.cadence_hours:168,
           category:cats.includes(w.category)?w.category:'insight'};
 }
-function watchRowHtml(w,i){
-  const cats=['insight','funnel','hypothesis'];
-  return `<div class=watchrow data-i="${i}">
-    <input class=w-name placeholder="name (slug)" value="${escAttr(w.name)}" oninput="watchRows[${i}].name=this.value">
-    <input class=w-question placeholder="question" value="${escAttr(w.question)}" oninput="watchRows[${i}].question=this.value">
-    <input class=w-cadence type=number min=1 placeholder="cadence (h)" value="${escAttr(w.cadence_hours)}" oninput="watchRows[${i}].cadence_hours=parseInt(this.value,10)">
-    <select class=w-category onchange="watchRows[${i}].category=this.value">${cats.map(o=>`<option value="${o}" ${w.category===o?'selected':''}>${esc(o)}</option>`).join('')}</select>
-    <button class="btn btn-stop btn-mini" onclick="removeWatchRow(${i})">Remove</button></div>`;
+function _watchRowById(id){return watchRows.find(r=>r._id===id);}
+function watchRowHtml(w){
+  const cats=['insight','funnel','hypothesis'],id=w._id;
+  return `<div class=watchrow data-id="${id}">
+    <input class=w-name placeholder="name (slug)" value="${escAttr(w.name)}" oninput="_watchRowById(${id}).name=this.value">
+    <input class=w-question placeholder="question" value="${escAttr(w.question)}" oninput="_watchRowById(${id}).question=this.value">
+    <input class=w-cadence type=number min=1 placeholder="cadence (h)" value="${escAttr(w.cadence_hours)}" oninput="_watchRowById(${id}).cadence_hours=parseInt(this.value,10)">
+    <select class=w-category onchange="_watchRowById(${id}).category=this.value">${cats.map(o=>`<option value="${o}" ${w.category===o?'selected':''}>${esc(o)}</option>`).join('')}</select>
+    <button class="btn btn-stop btn-mini" onclick="removeWatchRow(${id})">Remove</button></div>`;
 }
 function renderWatchesCard(){
   const el=document.getElementById('watchRowsList');if(!el)return;
@@ -2868,7 +2947,7 @@ function renderWatchesCard(){
     :'<div class=meta style="padding:2px 0 6px">No watches yet.</div>';
 }
 function addWatchRow(){watchRows.push(_sanitizeWatchRow(null));renderWatchesCard();}
-function removeWatchRow(i){watchRows.splice(i,1);renderWatchesCard();}
+function removeWatchRow(id){watchRows=watchRows.filter(r=>r._id!==id);renderWatchesCard();}
 // Client-side mirror of config.py's watches[i] rules (name slug, non-empty
 // question, positive cadence) - same discipline as the mcp card's "deep
 // validation runs on save" hint: this just saves an operator the round trip
@@ -3096,7 +3175,7 @@ document.addEventListener('click',e=>{
 });
 
 /* ── render pipeline ────────────────────────────────────────────────────── */
-function sig(r){return JSON.stringify([r.running,r.next_up,r.done,r.board,r.skipped,r.escalated,r.runlog,r.history,r.funnel,r.feature_builds,r.spend_history,r.branches,r.epics,r.qa_flows,r.qa_services,r.onboarding,r.prd,r.watches,r.surveys,r.insight_docs,r.workers]);}
+function sig(r){return JSON.stringify([r.running,r.next_up,r.done,r.board,r.skipped,r.escalated,r.runlog,r.history,r.funnel,r.feature_builds,r.spend_history,r.branches,r.epics,r.qa_flows,r.qa_services,r.onboarding,r.prd,r.watches,r.surveys,r.insight_docs,r.workers,r.publish_channels]);}
 function renderViews(){
   // Preserve column scroll positions across rebuilds.
   const colsEl=document.getElementById('queueCols');

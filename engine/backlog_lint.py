@@ -35,6 +35,7 @@ KNOWN_CATEGORIES = {
                        # it writes questionnaire.md, and the lint reads only
                        # insights/*.md and surveys/*/report.md)
     "survey_analysis", # survey analysis (safe; its report.md IS insight_lint-gated)
+    "design_review",   # named screen/flow design audit (safe; its insights/*.md IS insight_lint-gated)
 }
 
 

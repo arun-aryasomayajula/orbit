@@ -273,8 +273,11 @@ Config `concurrency: N` (default 1) says how many independent slots a workspace 
 Each slot is its own `engine/run.sh` process, with its own worktree and its own exclusive ledger claim, so two slots can never pick the same task.
 Slot 0 keeps every legacy filename and stays the deployment's housekeeper (queue refresh, knowledge refresh, the regression sweep, reaping stalled tasks); slot 1+ only claims and runs cycles.
 Raising `concurrency` in `.autopilot/config.yaml` does nothing by itself - something has to actually start the extra slot processes.
-The installed background service is not that something: `orbit install` writes ONE launchd/systemd unit with no `ORBIT_SLOT`, so a service-managed workspace runs slot 0 only, whatever `concurrency` says.
-Multi-slot service units are planned (M5); until then the extra slots come from the launcher below, or from running `ORBIT_SLOT=<n> engine/run.sh <target>` yourself.
+`orbit install` is that something for a service-managed workspace: it writes ONE launchd/systemd unit PER slot (0..`concurrency`-1), each with `ORBIT_SLOT`/`ORBIT_SLOTS` baked into its environment.
+Slot 0 keeps the legacy label/unit name (`com.orbit.orbit-<slug>` / `orbit-<slug>.service`) so an existing single-slot install upgrades in place; slots 1..N-1 get a `-slotN` suffix.
+Re-running `orbit install` after changing `concurrency` reconciles: it installs any slot missing a unit and removes the units for slots that no longer fit.
+`orbit doctor` warns (advisory, never fails) when the installed unit count for a workspace doesn't match its configured `concurrency`.
+The extra slots can also come from the launcher below, or from running `ORBIT_SLOT=<n> engine/run.sh <target>` yourself.
 
 That something is `engine/launcher.py`: a standalone front door (`http://127.0.0.1:8787` by default) that sits in front of every registered workspace's own dashboard.
 It shows one tab per workspace, lets you create a new one (plain or `--product`) straight from the browser, and gives each tab its own Start/Stop loop control that spawns or stops exactly that workspace's `concurrency` slot processes.
@@ -295,6 +298,12 @@ Design: section 4 of `docs/superpowers/specs/2026-08-20-orbit-product-teams-desi
 
 Beyond the PRD pipeline, product workspaces cover the rest of the PM loop: `/orbit-analyze-funnel` and `/orbit-hypothesis` turn a question into a cited insight doc, `/orbit-survey-design` and `/orbit-survey-analyze` take a survey from questionnaire to a grounded report (verbatim quotes required, same `insight_lint` gate), standing `watches:` re-file a question on a cadence via the `metric_watch` adapter, and `engine/browse.py` gives cycles a minimal read-only fetch/screenshot driver with saved, re-runnable scrapers.
 Design: `docs/superpowers/plans/2026-08-21-orbit-product-m3.md`.
+
+Design review and publishing close the loop between a workspace's grounded output and the outside world.
+`/orbit-design-review <screen-or-flow>` audits one named screen against hierarchy, spacing, consistency, interaction-state, and accessibility rubrics - every accessibility finding is CRITICAL, unconditionally - sourced from Figma frames when the workspace's `mcp:` block declares a `figma` server, and otherwise abstaining into a `## Coverage gaps` section rather than guessing at a screen it never saw.
+Once a PRD reaches `status: done` (human sign-off) or a finding passes `insight_lint` on its own, `engine/publish.py` files it out of the workspace: the PRD to a Confluence page, the finding to a Jira issue, both gated on that approval and idempotent on every re-run - a re-published PRD updates the same page, a re-filed finding no-ops and prints the key already on record.
+The dashboard carries the same publish actions as buttons on an approved PRD's card and an approved finding's artifact view.
+Design: `docs/superpowers/plans/2026-08-22-orbit-product-m5.md`.
 
 ## Requirements
 

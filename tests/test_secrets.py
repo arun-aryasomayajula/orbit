@@ -257,3 +257,130 @@ def test_secrets_are_loaded_per_iteration_not_once_at_startup():
     assert marker in iteration
     assert iteration.index(marker) < iteration.index("prepare_worktree"), \
         "secrets must load before the cycle runs, not after"
+
+
+def test_doctor_warns_publish_configured_without_atlassian_secrets(tmp_path):
+    """Doctor should warn if publish is configured but ATLASSIAN_* secrets are missing."""
+    _init_product(tmp_path)
+    cfg = tmp_path / ".autopilot" / "config.yaml"
+    cfg.write_text(cfg.read_text() + '\npublish:\n  confluence:\n    base_url: "https://wiki.example.com"\n'
+                   '    space: "PROD"\n  jira:\n    base_url: "https://jira.example.com"\n'
+                   '    project: "ORB"\n    issue_type: "Task"\n')
+
+    env = dict(os.environ, ORBIT_HOME=str(ORBIT))
+    env.pop("ATLASSIAN_EMAIL", None)
+    env.pop("ATLASSIAN_API_TOKEN", None)
+
+    r = subprocess.run([sys.executable, str(ORBIT / "engine" / "doctor.py"), str(tmp_path)],
+                       capture_output=True, text=True, env=env)
+
+    assert "publish:" in r.stdout and ("ATLASSIAN_EMAIL" in r.stdout or "ATLASSIAN_API_TOKEN" in r.stdout), \
+        f"doctor should warn about missing Atlassian secrets: {r.stdout}"
+
+
+def test_doctor_quiet_publish_configured_with_atlassian_secrets_in_env(tmp_path):
+    """Doctor should not warn if publish is configured and ATLASSIAN_* secrets are in the environment."""
+    _init_product(tmp_path)
+    cfg = tmp_path / ".autopilot" / "config.yaml"
+    cfg.write_text(cfg.read_text() + '\npublish:\n  confluence:\n    base_url: "https://wiki.example.com"\n'
+                   '    space: "PROD"\n  jira:\n    base_url: "https://jira.example.com"\n'
+                   '    project: "ORB"\n    issue_type: "Task"\n')
+
+    env = dict(os.environ, ORBIT_HOME=str(ORBIT), ATLASSIAN_EMAIL="pm@example.com",
+               ATLASSIAN_API_TOKEN="tok123")
+
+    r = subprocess.run([sys.executable, str(ORBIT / "engine" / "doctor.py"), str(tmp_path)],
+                       capture_output=True, text=True, env=env)
+
+    assert "publish:" not in r.stdout or ("ATLASSIAN_EMAIL" not in r.stdout and "ATLASSIAN_API_TOKEN" not in r.stdout), \
+        f"doctor should not warn when Atlassian secrets are in environment: {r.stdout}"
+    assert "ALL CHECKS PASSED" in r.stdout, f"doctor should pass: {r.stdout}"
+
+
+def test_doctor_quiet_publish_configured_with_atlassian_secrets_in_file(tmp_path):
+    """Doctor should not warn if publish is configured and ATLASSIAN_* secrets are in .secrets.env."""
+    _init_product(tmp_path)
+    cfg = tmp_path / ".autopilot" / "config.yaml"
+    cfg.write_text(cfg.read_text() + '\npublish:\n  confluence:\n    base_url: "https://wiki.example.com"\n'
+                   '    space: "PROD"\n  jira:\n    base_url: "https://jira.example.com"\n'
+                   '    project: "ORB"\n    issue_type: "Task"\n')
+
+    secrets = tmp_path / ".autopilot" / ".secrets.env"
+    secrets.write_text("ATLASSIAN_EMAIL=pm@example.com\nATLASSIAN_API_TOKEN=tok123\n")
+
+    env = dict(os.environ, ORBIT_HOME=str(ORBIT))
+    env.pop("ATLASSIAN_EMAIL", None)
+    env.pop("ATLASSIAN_API_TOKEN", None)
+
+    r = subprocess.run([sys.executable, str(ORBIT / "engine" / "doctor.py"), str(tmp_path)],
+                       capture_output=True, text=True, env=env)
+
+    assert "publish:" not in r.stdout or ("ATLASSIAN_EMAIL" not in r.stdout and "ATLASSIAN_API_TOKEN" not in r.stdout), \
+        f"doctor should not warn when Atlassian secrets are in .secrets.env: {r.stdout}"
+    assert "ALL CHECKS PASSED" in r.stdout, f"doctor should pass: {r.stdout}"
+
+
+def test_doctor_informational_atlassian_secrets_without_publish(tmp_path):
+    """Doctor should show informational note if ATLASSIAN_* secrets are present but publish unconfigured."""
+    _init_product(tmp_path)
+
+    secrets = tmp_path / ".autopilot" / ".secrets.env"
+    secrets.write_text("ATLASSIAN_EMAIL=pm@example.com\nATLASSIAN_API_TOKEN=tok123\n")
+
+    env = dict(os.environ, ORBIT_HOME=str(ORBIT))
+
+    r = subprocess.run([sys.executable, str(ORBIT / "engine" / "doctor.py"), str(tmp_path)],
+                       capture_output=True, text=True, env=env)
+
+    assert "Atlassian secrets are set but publish:" in r.stdout and "unconfigured" in r.stdout, \
+        f"doctor should show informational note about unused Atlassian secrets: {r.stdout}"
+
+
+def test_doctor_warns_publish_configured_with_blank_atlassian_secrets_in_file(tmp_path):
+    """A key present in .secrets.env but set to an empty value is 'absent' to
+    publish.py's own _auth() (`(env.get(v) or "").strip()`), which treats a
+    blank the same as a missing var - doctor's advisory must agree, not pass
+    a bare 'is the key present' membership test that would tell an operator
+    everything is fine right up until the first real publish attempt."""
+    _init_product(tmp_path)
+    cfg = tmp_path / ".autopilot" / "config.yaml"
+    cfg.write_text(cfg.read_text() + '\npublish:\n  confluence:\n    base_url: "https://wiki.example.com"\n'
+                   '    space: "PROD"\n  jira:\n    base_url: "https://jira.example.com"\n'
+                   '    project: "ORB"\n    issue_type: "Task"\n')
+
+    secrets = tmp_path / ".autopilot" / ".secrets.env"
+    secrets.write_text("ATLASSIAN_EMAIL=\nATLASSIAN_API_TOKEN=   \n")
+
+    env = dict(os.environ, ORBIT_HOME=str(ORBIT))
+    env.pop("ATLASSIAN_EMAIL", None)
+    env.pop("ATLASSIAN_API_TOKEN", None)
+
+    r = subprocess.run([sys.executable, str(ORBIT / "engine" / "doctor.py"), str(tmp_path)],
+                       capture_output=True, text=True, env=env)
+
+    assert "publish:" in r.stdout and ("ATLASSIAN_EMAIL" in r.stdout or "ATLASSIAN_API_TOKEN" in r.stdout), \
+        f"doctor should warn about blank Atlassian secrets: {r.stdout}"
+
+
+def test_doctor_quiet_on_blank_env_var_when_secrets_file_has_a_real_value(tmp_path):
+    """A blank exported shell variable must not shadow a real value sitting
+    in .secrets.env - same non-blank-wins-if-present precedence publish.py's
+    _auth() gets from dict.update() (secrets file overwrites the environment
+    key), just checked independently here rather than assumed."""
+    _init_product(tmp_path)
+    cfg = tmp_path / ".autopilot" / "config.yaml"
+    cfg.write_text(cfg.read_text() + '\npublish:\n  confluence:\n    base_url: "https://wiki.example.com"\n'
+                   '    space: "PROD"\n  jira:\n    base_url: "https://jira.example.com"\n'
+                   '    project: "ORB"\n    issue_type: "Task"\n')
+
+    secrets = tmp_path / ".autopilot" / ".secrets.env"
+    secrets.write_text("ATLASSIAN_EMAIL=pm@example.com\nATLASSIAN_API_TOKEN=tok123\n")
+
+    env = dict(os.environ, ORBIT_HOME=str(ORBIT), ATLASSIAN_EMAIL="", ATLASSIAN_API_TOKEN="")
+
+    r = subprocess.run([sys.executable, str(ORBIT / "engine" / "doctor.py"), str(tmp_path)],
+                       capture_output=True, text=True, env=env)
+
+    assert "publish:" not in r.stdout or ("ATLASSIAN_EMAIL" not in r.stdout and "ATLASSIAN_API_TOKEN" not in r.stdout), \
+        f"doctor should not warn when a real value is in .secrets.env, even with a blank env var: {r.stdout}"
+    assert "ALL CHECKS PASSED" in r.stdout, f"doctor should pass: {r.stdout}"

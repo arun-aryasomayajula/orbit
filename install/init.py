@@ -95,11 +95,11 @@ max_tasks_per_day: 8
 cycle_timeout_seconds: 3600
 
 # How many task cycles run in parallel (one "slot" = one worker with its own
-# worktree). Default 1, max 32. Raising it does NOT by itself start more
-# workers: the installed service (`orbit install`) runs slot 0 only today.
-# The extra slots come from the launcher's per-tab Start control
-# (`orbit web`) or from `ORBIT_SLOT=<n> engine/run.sh <target>` by hand.
-# Multi-slot service units are planned (M5).
+# worktree). Default 1, max 32. Raising it then re-running `orbit install`
+# adds one launchd/systemd unit per new slot (ORBIT_SLOT/ORBIT_SLOTS baked
+# in); lowering it removes the units that no longer fit. Slots also start
+# from the launcher's per-tab Start control (`orbit web`) or from
+# `ORBIT_SLOT=<n> engine/run.sh <target>` by hand.
 # concurrency: 1
 
 spec: null
@@ -111,7 +111,7 @@ gates:
     cwd: "."
     needs: []
 
-workable_categories: [insight, funnel, hypothesis, survey_design, survey_analysis, documentation]
+workable_categories: [insight, funnel, hypothesis, survey_design, survey_analysis, design_review, documentation]
 sources: [backlog, metric_watch]
 
 # Standing metric watches (optional): each names a question that gets re-asked
@@ -137,6 +137,27 @@ sources: [backlog, metric_watch]
 #     tools: [metaql_list_verticals, metaql_list_projects, metaql_list_use_cases,
 #             metaql_list_explores, metaql_get_explore_fields, metaql_generate_query,
 #             metaql_execute_query]
+#   figma:                            # once declared, orbit-prd-research and
+#     transport: stdio                # orbit-design-review cite the frames
+#     command: npx                    # they open as typed figma-kind research
+#     args: ["-y", "figma-mcp"]       # sources instead of abstaining
+#     env_passthrough: [FIGMA_TOKEN]
+#     tools: "*"
+
+# Publishing approved PRDs to Confluence and grounded insights to Jira
+# (optional). Credentials: .autopilot/.secrets.env with ATLASSIAN_EMAIL and
+# ATLASSIAN_API_TOKEN (0600, gitignored). base_url must be https://, or
+# http:// only to loopback (127.0.0.1/localhost/::1). See config/schema.yaml
+# for the full publish: block reference.
+# publish:
+#   confluence:
+#     base_url: "https://<org>.atlassian.net"
+#     space: "PROD"
+#     parent_id: null
+#   jira:
+#     base_url: "https://<org>.atlassian.net"
+#     project: "ORB"
+#     issue_type: "Task"
 
 branch_prefix: "orbit-product"
 commit_trailer: ""
@@ -155,11 +176,11 @@ max_tasks_per_day: 12
 cycle_timeout_seconds: 3600
 
 # How many task cycles run in parallel (one "slot" = one worker with its own
-# worktree). Default 1, max 32. Raising it does NOT by itself start more
-# workers: the installed service (`orbit install`) runs slot 0 only today.
-# The extra slots come from the launcher's per-tab Start control
-# (`orbit web`) or from `ORBIT_SLOT=<n> engine/run.sh <target>` by hand.
-# Multi-slot service units are planned (M5).
+# worktree). Default 1, max 32. Raising it then re-running `orbit install`
+# adds one launchd/systemd unit per new slot (ORBIT_SLOT/ORBIT_SLOTS baked
+# in); lowering it removes the units that no longer fit. Slots also start
+# from the launcher's per-tab Start control (`orbit web`) or from
+# `ORBIT_SLOT=<n> engine/run.sh <target>` by hand.
 # concurrency: 1
 
 spec: null                   # optional: path to a standing spec the loop rereads (e.g. docs/VISION.md)

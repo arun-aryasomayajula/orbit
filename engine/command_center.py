@@ -27,6 +27,7 @@ import contextlib
 import hmac
 import json
 import os
+import platform
 import re
 import secrets
 import shutil
@@ -49,6 +50,7 @@ from qa_teach import _bad_flows_dir_reason
 import qa_env
 import qa_teach
 import prd_flow
+import publish
 import secrets_env
 
 # ── path model ───────────────────────────────────────────────────────────────
@@ -204,7 +206,7 @@ CYCLE_TIMEOUT = int(os.environ.get("ORBIT_CYCLE_TIMEOUT") or os.environ.get("AP_
 PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}
 PRIORITY_LADDER = ["low", "medium", "high"]
 SAFE = {"testing", "documentation", "dependencies", "code_quality", "developer_experience",
-        "insight", "funnel", "hypothesis", "survey_design", "survey_analysis"}
+        "insight", "funnel", "hypothesis", "survey_design", "survey_analysis", "design_review"}
 # What the loop CAN work when promoted (autopilot:allow). Must match
 # backlog_to_tasks.EMITTABLE_CATEGORIES. HUMAN_ONLY is never loop-pickable.
 EMITTABLE = SAFE | {"bug", "feature", "refactor"}
@@ -212,6 +214,13 @@ HUMAN_ONLY = {"security", "infrastructure", "release_management", "git_practices
 _LOGTS = re.compile(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\]")
 _TERMINAL = re.compile(r"pushed origin/|cycle produced no changes|cycle rc=|REFUSING|"
                        r"single-cycle|cycle committed|cycle left uncommitted|no-op|daily budget|daily task cap")
+# run.sh's log() writes "[<ts>] [slot N] <message>" (from M4) - the tag sits
+# immediately after the timestamp bracket _LOGTS just matched. Legacy lines
+# (logs written before slot tagging existed, or a single-slot deployment's
+# untagged history) carry no tag at all; those are grouped under _NO_SLOT so
+# they keep pairing against each other exactly as before.
+_SLOT_TAG = re.compile(r"^\s*\[slot (\S+)\]")
+_NO_SLOT = "\x00legacy"
 
 
 # ── data loaders ─────────────────────────────────────────────────────────────
@@ -322,9 +331,20 @@ def workers_state() -> list | None:
 def loop_loaded() -> bool:
     try:
         out = subprocess.run(["launchctl", "list"], capture_output=True, text=True).stdout
-        return LAUNCHD_LABEL in out
     except Exception:
         return False
+    # Exact match against each line's OWN label field (the last whitespace-
+    # separated column of `launchctl list`'s "PID\tStatus\tLabel" output), not
+    # a substring test of the whole blob: LAUNCHD_LABEL (slot 0's legacy
+    # label, e.g. com.orbit.orbit-app) is a PREFIX of every other slot's own
+    # label (com.orbit.orbit-app-slot1, ...) now that units are per-slot
+    # (Task 7) - `LAUNCHD_LABEL in out` would count a slot-1-only load as
+    # "the loop is loaded" even when slot 0 itself never came up.
+    for line in out.splitlines():
+        cols = line.split()
+        if cols and cols[-1] == LAUNCHD_LABEL:
+            return True
+    return False
 
 
 _CYCLE_LOG_STAMP = re.compile(r"(\d{8}T\d{6})\.log$")
@@ -386,9 +406,21 @@ def probe_runtime(workers: list | None = None) -> dict:
             start = None
 
     # Heartbeat + completed-cycle durations from autopilot.log (turnaround time).
+    # Turnaround is measured by PAIRING each "cycle start" line with the next
+    # terminal line - keyed by the line's "[slot N]" tag, since several slots
+    # interleave their lines into this one shared orbit.log. Pairing by
+    # position alone (M4's original approach) would let slot 1's terminal line
+    # close slot 0's start, reporting the gap between two unrelated events; M4
+    # dealt with that by suppressing the metric outright whenever more than
+    # one worker was live. Keying by slot tag instead pairs each slot's own
+    # start with its own terminal line regardless of interleaving, so the
+    # metric no longer needs to go dark at concurrency > 1. Untagged legacy
+    # lines (logs from before slot tagging existed) have no tag to key on, so
+    # they all share the _NO_SLOT bucket and keep pairing against each other
+    # exactly as they did before this change.
     heartbeat = None
     last_dur = None
-    last_start = None
+    last_start_by_slot: dict[str, float] = {}
     durs = []
     if APLOG.exists():
         for ln in APLOG.read_text(errors="ignore").splitlines()[-1200:]:
@@ -399,25 +431,15 @@ def probe_runtime(workers: list | None = None) -> dict:
             if ep is None:
                 continue
             heartbeat = ep
+            sm = _SLOT_TAG.match(ln[m.end():])
+            slot_key = sm.group(1) if sm else _NO_SLOT
             if "cycle start" in ln:
-                last_start = ep
-            elif _TERMINAL.search(ln) and last_start:
-                last_dur = max(0, int(ep - last_start))
+                last_start_by_slot[slot_key] = ep
+            elif _TERMINAL.search(ln) and slot_key in last_start_by_slot:
+                last_dur = max(0, int(ep - last_start_by_slot.pop(slot_key)))
                 durs.append(last_dur)
-                last_start = None
     recent = durs[-12:]
     avg_cycle = round(sum(recent) / len(recent)) if recent else None
-    # Turnaround is measured by PAIRING a "cycle start" line with the next
-    # terminal line in one shared orbit.log. With several slots interleaving
-    # their lines into that log, the pairing is arbitrary: slot 1's terminal
-    # line closes slot 0's start, and the "duration" is the gap between two
-    # unrelated events. Rather than publish a number that is wrong in a way
-    # nobody can see, suppress it while more than one worker is live (the UI
-    # renders null as "—"). Slot-tagged pairing - the honest fix, since every
-    # line already carries "[slot N]" - is M5.
-    if len(live_tids) > 1:
-        last_dur = avg_cycle = None
-        durs = []
 
     today = datetime.now().strftime("%Y-%m-%d")
     try:
@@ -2878,6 +2900,28 @@ atexit.register(_teach_atexit_cleanup)
 # silently mix an old run's output into the next one's tail.
 _CMDLOG_ALLOW = {"intake", "knowledge"}
 _KNOWLEDGE_SUBS = {"build", "refresh"}
+# publish-{prd,finding}-* logs (do_prd_action's `publish` branch, do_artifact_
+# action's `file-jira` branch) are the same fixed-name-under-logs/ shape as
+# intake/knowledge, just parameterized by a run id / insight stem instead of
+# hardcoded - so _CMDLOG_ALLOW's plain set membership can't name them ahead of
+# time. _cmdlog_name_ok extends the SAME confinement discipline (never a bare
+# filesystem path from the client) with a shape check instead: the run id
+# after "publish-prd-" must match _PRD_RUN_RE, the stem after "publish-
+# finding-" must match _ARTIFACT_NAME_RE - both already forbid "/" and "..",
+# so there is no traversal to guard against beyond that, same as every other
+# confined reader in this module.
+_PUBLISH_PRD_LOG_PREFIX = "publish-prd-"
+_PUBLISH_FINDING_LOG_PREFIX = "publish-finding-"
+
+
+def _cmdlog_name_ok(name: str) -> bool:
+    if name in _CMDLOG_ALLOW:
+        return True
+    if name.startswith(_PUBLISH_PRD_LOG_PREFIX):
+        return bool(_PRD_RUN_RE.match(name[len(_PUBLISH_PRD_LOG_PREFIX):]))
+    if name.startswith(_PUBLISH_FINDING_LOG_PREFIX):
+        return bool(_ARTIFACT_NAME_RE.match(name[len(_PUBLISH_FINDING_LOG_PREFIX):]))
+    return False
 
 
 def do_intake_run() -> str:
@@ -2909,12 +2953,12 @@ def do_knowledge_run(sub: str) -> str:
 
 def read_cmdlog(name: str, max_lines: int = 400) -> str:
     """Tail of $AP_STATE/logs/<name>.log for the Run view's live poll. `name`
-    must be pre-validated by the caller (do_GET checks membership in
-    _CMDLOG_ALLOW BEFORE calling this, same confinement discipline as
-    read_qa_shot/read_qa_report) — double-checked here too. Never raises and
-    never 500s: a log that hasn't been written yet (action never run) yields
-    an empty string, not an error — the Run view treats that as 'idle'."""
-    if name not in _CMDLOG_ALLOW:
+    must be pre-validated by the caller (do_GET checks _cmdlog_name_ok BEFORE
+    calling this, same confinement discipline as read_qa_shot/read_qa_report)
+    - double-checked here too. Never raises and never 500s: a log that hasn't
+    been written yet (action never run) yields an empty string, not an error
+    - the Run view treats that as 'idle'."""
+    if not _cmdlog_name_ok(name):
         return ""
     p = LOGDIR / f"{name}.log"
     if not p.is_file():
@@ -3136,7 +3180,15 @@ _PRD_ARTIFACT_NAMES = {"01-intake.json", "02-research.json", "03-synthesis.json"
 # legal from every status except "intake" itself (already there) - appended
 # below, not listed per-entry. A "done" run keeps it explicitly: signing off is
 # not the end of a PRD's life, and reopening one was otherwise a dead end that
-# forced the PM to hand-edit the marker.
+# forced the PM to hand-edit the marker. "publish" is also "done"-only - the
+# marker's `status: done` IS the human sign-off publish_prd requires - but
+# unlike the others it carries a SECOND gate (publish.confluence must be
+# configured) that lives outside the status machine, so it is state-machine
+# legal here and filtered back out of what the UI actually offers
+# (prd_pipeline_state) when that config is missing. do_prd_action's own
+# legality check (`action not in _prd_next_actions(status)`) reads this table
+# unfiltered - a `publish` call with no confluence config is a config error,
+# never a "wrong status" one.
 _PRD_STATUS_ACTIONS = {
     "intake": ["run-intake"],
     "awaiting-scope-approval": ["approve-scope", "revise-intake"],
@@ -3145,7 +3197,7 @@ _PRD_STATUS_ACTIONS = {
     "draft": ["run-chain"],
     "review": ["run-chain"],
     "awaiting-signoff": ["approve-prd", "revise-draft", "revise-research", "revise-synthesis"],
-    "done": ["revise-intake"],
+    "done": ["publish", "revise-intake"],
 }
 
 
@@ -3154,6 +3206,127 @@ def _prd_next_actions(status: str) -> list:
     if status != "intake" and "revise-intake" not in actions:
         actions.append("revise-intake")
     return actions
+
+
+def _publish_channels() -> dict:
+    """{"confluence": bool, "jira": bool} - whether each publish.py channel is
+    configured well enough to publish through, read from the profile ONCE per
+    request (build_state/prd_pipeline_state/do_artifact_action each call this
+    rather than re-parsing config.yaml). Deliberately lenient - it only checks
+    the fields publish.py's own _channel() requires are present and non-blank,
+    never the base_url scheme or reachability; publish.py re-validates the
+    full shape before a single byte reaches the network. This is only so the
+    dashboard can hide a button that would otherwise fail immediately -
+    absent-unless-configured discipline for the UI, not a second gate."""
+    pub = _load_cfg().get("publish")
+    if not isinstance(pub, dict):
+        return {"confluence": False, "jira": False}
+
+    def _ok(name: str, required: tuple) -> bool:
+        block = pub.get(name)
+        return isinstance(block, dict) and all(
+            isinstance(block.get(k), str) and block.get(k).strip() for k in required)
+
+    return {"confluence": _ok("confluence", ("base_url", "space")),
+            "jira": _ok("jira", ("base_url", "project", "issue_type"))}
+
+
+# ── publish failure surfacing ──────────────────────────────────────────────
+# do_prd_action's `publish` branch and do_artifact_action's `file-jira` branch
+# each launch publish.py detached and return immediately (same discipline as
+# do_intake_run/do_knowledge_run) - the log tells an operator willing to go
+# looking what happened, but nothing before this pointed the board AT a
+# failure, so a bad config/secret/lint/HTTP/lock result was invisible unless
+# someone thought to open logs/publish-*.log by hand.
+#
+# The mechanism: the launcher writes a small pending-record json next to the
+# log (pid + the log's own name-without-suffix, i.e. exactly what /api/cmdlog
+# takes as `name`, + when it was launched). prd_pipeline_state/
+# insight_docs_state reconcile it on every poll:
+#   - pid still alive               -> still publishing, nothing to show yet
+#   - pid gone, a success record exists AT OR AFTER the launch time
+#     (the marker's published.confluence block / the doc's mtime, whichever
+#     applies) -> this attempt (or one that superseded it) succeeded; the
+#     pending file is deleted and nothing is shown
+#   - pid gone, no qualifying success record -> failed; the pending file is
+#     LEFT (so a stale reconcile computation is retried next poll rather than
+#     the failure only ever being reported once and then forgotten) and a
+#     short reason is derived from publish.py's own `publish[<code>]: <msg>`
+#     stderr line (see publish.py main()) - never the raw log body.
+_PUBLISH_CODE_REASON = {2: "config", 3: "secrets", 4: "unapproved/lint",
+                        5: "HTTP failure", 6: "lock contention"}
+_PUBLISH_ERR_RE = re.compile(r"^publish\[(\d+)\]:\s*(.*)$", re.M)
+
+
+def _publish_pending_path(log: Path) -> Path:
+    return log.with_name(log.stem + ".pending.json")
+
+
+def _write_publish_pending(log: Path, pid: int) -> None:
+    """Record a just-launched publish.py invocation for later reconciliation
+    (see the module note above). Best-effort: a write failure here only
+    costs this one run's error surfacing on the board, never the publish
+    itself - it is already launched by the time this runs."""
+    try:
+        _publish_pending_path(log).write_text(
+            json.dumps({"pid": pid, "log": log.stem, "launched_at": time.time()}))
+    except OSError:
+        pass
+
+
+def _publish_log_reason(log: Path) -> str:
+    """Best-effort short reason for a failed publish.py run, parsed from the
+    LAST `publish[<code>]: <message>` line in its log (publish-{prd,finding}
+    logs are append-mode, reused across re-runs, like intake/knowledge - so
+    more than one run's output can be in there). Only this short,
+    already-derived classification ever reaches build_state's JSON; the raw
+    log text is never included (view it via /api/cmdlog if you need it)."""
+    try:
+        text = log.read_text(errors="ignore")
+    except OSError:
+        return "publish failed"
+    matches = _PUBLISH_ERR_RE.findall(text)
+    if not matches:
+        return "publish failed"
+    code_s, msg = matches[-1]
+    try:
+        code = int(code_s)
+    except ValueError:
+        return "publish failed"
+    if code == 5:
+        m = re.search(r"HTTP (\d+)", msg)
+        if m:
+            return f"HTTP {m.group(1)}"
+    return _PUBLISH_CODE_REASON.get(code, "publish failed")
+
+
+def _publish_reconcile(pending_path: Path, success_mtime: float | None) -> dict | None:
+    """One `publish_error` entry (or None - nothing to show) for the pending
+    publish launch recorded at `pending_path`. `success_mtime` is the mtime
+    of whatever file records success for this artifact (the PRD marker / the
+    insight doc) if a success record exists there at all, else None - see
+    the module note above for the full reconciliation table."""
+    try:
+        pending = json.loads(pending_path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(pending, dict):
+        return None
+    pid = pending.get("pid")
+    log_stem = pending.get("log")
+    launched_at = pending.get("launched_at")
+    if pid is not None and locks.pid_alive(pid):
+        return None  # still publishing
+    if (success_mtime is not None and isinstance(launched_at, (int, float))
+            and success_mtime >= launched_at):
+        try:
+            pending_path.unlink()
+        except OSError:
+            pass
+        return None
+    if not isinstance(log_stem, str) or not log_stem:
+        return {"reason": "publish failed", "log": None}
+    return {"reason": _publish_log_reason(LOGDIR / f"{log_stem}.log"), "log": log_stem}
 
 
 def _prd_research_root() -> Path:
@@ -3168,6 +3341,7 @@ def prd_pipeline_state() -> list | None:
     root = _prd_research_root()
     if not root.is_dir():
         return None
+    channels = _publish_channels()
     runs = []
     for d in sorted(p for p in root.iterdir() if p.is_dir()):
         if not (d / prd_flow.MARKER_NAME).exists():
@@ -3185,10 +3359,41 @@ def prd_pipeline_state() -> list | None:
                   "ok": (stamps[name].get("evals", {}).get("ok") if name in stamps else None),
                   "stamped_at": (stamps[name].get("stamped_at") if name in stamps else None)}
                  for name in prd_flow.STAGES]
+        # The marker's published.confluence block ({page_id, url, at}), if
+        # publish.py has ever written one - None otherwise, never a partial
+        # shape, so the shell can test truthiness on `.url` alone.
+        pub_block = marker.get("published")
+        published = pub_block.get("confluence") if isinstance(pub_block, dict) else None
+        if not isinstance(published, dict):
+            published = None
+        # `publish` is state-machine-legal from "done" (_PRD_STATUS_ACTIONS)
+        # regardless of config, but the button is UI noise nobody can click
+        # successfully without publish.confluence configured - filtered out
+        # here, not in _prd_next_actions, so do_prd_action's own legality
+        # check still sees `publish` as a real "done"-only action and can
+        # tell "wrong status" apart from "not configured".
+        next_actions = _prd_next_actions(status)
+        if "publish" in next_actions and not channels["confluence"]:
+            next_actions = [a for a in next_actions if a != "publish"]
+        # Publish failure surfacing (see the module note above
+        # _publish_reconcile): a pending record only exists once a publish
+        # was launched for this run, so this is absent-unless-something-to-
+        # show for the overwhelming common case (never published, or the
+        # last publish succeeded and its pending file was already reconciled
+        # away).
+        publish_error = None
+        pending_path = _publish_pending_path(LOGDIR / f"publish-prd-{d.name}.log")
+        if pending_path.exists():
+            try:
+                success_mtime = (d / prd_flow.MARKER_NAME).stat().st_mtime if published else None
+            except OSError:
+                success_mtime = None
+            publish_error = _publish_reconcile(pending_path, success_mtime)
         runs.append({"run_id": marker.get("run_id", d.name), "title": marker.get("title", ""),
                     "status": status, "stages": stages, "tamper": tamper,
                     "pii_touch": bool(marker.get("pii_touch")),
-                    "next_actions": _prd_next_actions(status)})
+                    "published": published, "publish_error": publish_error,
+                    "next_actions": next_actions})
     return runs
 
 
@@ -3251,6 +3456,24 @@ def do_prd_action(run: str, action: str, title: str = "", brief: str = "",
             subprocess.Popen(cmd, stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
                              start_new_session=True)
         return f"Stage '{stage}' launched for '{run}' - the card updates as it works (log: logs/{log.name})"
+    if action == "publish":
+        # Status already checked above (publish is "done"-only per
+        # _PRD_STATUS_ACTIONS) - this is the SECOND gate, config rather than
+        # status, which is why it gets its own clear message instead of
+        # folding into the "cannot '...' from status '...'" one above.
+        if not _publish_channels()["confluence"]:
+            return (f"cannot publish '{run}': publish.confluence is not configured "
+                    "in .autopilot/config.yaml")
+        script = str(ENGINE / "publish.py")
+        log = AP_STATE / "logs" / f"publish-prd-{run}.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("ab") as lf:
+            proc = subprocess.Popen([sys.executable, script, "prd", str(REPO), run],
+                                    stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
+                                    start_new_session=True)
+        _write_publish_pending(log, proc.pid)
+        return (f"Publish launched for '{run}' - the card shows the page once "
+                f"the marker records it (log: logs/{log.name})")
     return f"unknown prd action '{action}'"
 
 
@@ -3381,18 +3604,87 @@ def surveys_state() -> list | None:
     return out
 
 
+def _confined(root: Path, rel: str) -> Path | None:
+    """`root / rel`, resolved, iff it stays under the RESOLVED `root` and is a
+    real file - else None. The exact resolve -> assert -> is_file template
+    every confined reader in this module hand-rolled separately
+    (read_prd_artifact, read_knowledge_doc, and formerly read_product_artifact
+    inline); factored out here so read_product_artifact and
+    do_artifact_action share one confinement check instead of two copies that
+    could drift. A symlink escape resolves outside `root` and fails the
+    startswith test; the trailing os.sep stops `root` itself (no separator)
+    from matching a root-adjacent sibling like "insights2/...")."""
+    resolved_root = root.resolve()
+    resolved = (root / rel).resolve()
+    if not str(resolved).startswith(str(resolved_root) + os.sep) or not resolved.is_file():
+        return None
+    return resolved
+
+
+_JIRA_KEY_TAIL_BYTES = 4096   # publish.py's _append_record always adds the record as the LAST line - see its docstring
+
+
+def _insight_jira_key(doc: Path) -> str | None:
+    """The Jira key recorded in a published insight doc (publish.py's
+    `<!-- published: jira KEY -->` line), or None if it was never filed.
+    Reads only the tail of the file first - the record is always appended as
+    the doc's last line, so the last few KB are enough regardless of how long
+    the finding itself runs, and a large doc never costs a full read just to
+    paint a browser row. Falls back to a full-file scan on a tail miss
+    (cheap: this only fires for the rare doc where the record isn't in the
+    last _JIRA_KEY_TAIL_BYTES) rather than silently reporting "not filed" the
+    day that contract drifts."""
+    try:
+        size = doc.stat().st_size
+        with doc.open("rb") as f:
+            f.seek(max(0, size - _JIRA_KEY_TAIL_BYTES))
+            tail = f.read().decode("utf-8", "ignore")
+    except OSError:
+        return None
+    m = publish.JIRA_RECORD_RE.search(tail)
+    if m:
+        return m.group(1)
+    if size <= _JIRA_KEY_TAIL_BYTES:
+        return None   # the tail read already covered the whole file
+    try:
+        full = doc.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    m = publish.JIRA_RECORD_RE.search(full)
+    return m.group(1) if m else None
+
+
 def insight_docs_state() -> list | None:
-    """Deep space artifact browser's Insights group: stems of insights/*.md,
-    filtered to _ARTIFACT_NAME_RE for the same list-what-you-serve reason
-    surveys_state filters directory names. None (key omitted from
-    build_state) unless <repo>/insights/ exists."""
+    """Deep space artifact browser's Insights group: one entry per
+    insights/*.md, filtered to _ARTIFACT_NAME_RE for the same
+    list-what-you-serve reason surveys_state filters directory names. Each
+    entry carries `jira_key` (None unless publish.py has filed it) so the
+    browser can show the recorded key instead of a File→Jira button once one
+    exists. None (key omitted from build_state) unless <repo>/insights/
+    exists."""
     root = _insights_root()
     if not root.is_dir():
         return None
     try:
-        return sorted(p.stem for p in root.glob("*.md") if _ARTIFACT_NAME_RE.match(p.stem))
+        stems = sorted(p.stem for p in root.glob("*.md") if _ARTIFACT_NAME_RE.match(p.stem))
     except OSError:
         return []
+    out = []
+    for s in stems:
+        doc = root / f"{s}.md"
+        jira_key = _insight_jira_key(doc)
+        # Publish failure surfacing - same reconciliation as prd_pipeline_
+        # state's publish_error, keyed to this doc's own pending record.
+        publish_error = None
+        pending_path = _publish_pending_path(LOGDIR / f"publish-finding-{s}.log")
+        if pending_path.exists():
+            try:
+                success_mtime = doc.stat().st_mtime if jira_key else None
+            except OSError:
+                success_mtime = None
+            publish_error = _publish_reconcile(pending_path, success_mtime)
+        out.append({"name": s, "jira_key": jira_key, "publish_error": publish_error})
+    return out
 
 
 # kind -> (root dir, relative-path template) for read_product_artifact. The
@@ -3405,18 +3697,45 @@ def read_product_artifact(kind: str, name: str) -> str | None:
     """Confined GET for the product artifact browser - insights/<name>.md or
     surveys/<name>/report.md. Same template as read_prd_artifact/
     read_knowledge_doc: shape-check `kind` (fixed allowlist) and `name`
-    (_ARTIFACT_NAME_RE), then resolve -> assert the RESOLVED path stays under
-    the RESOLVED kind-scoped root -> is_file() (catches a symlink escape)."""
+    (_ARTIFACT_NAME_RE), then _confined() resolves -> asserts the RESOLVED
+    path stays under the RESOLVED kind-scoped root -> is_file()."""
     spec = _ARTIFACT_KINDS.get(kind)
     if spec is None or not isinstance(name, str) or not _ARTIFACT_NAME_RE.match(name):
         return None
     root_fn, rel_tmpl = spec
-    root = root_fn()
-    resolved_root = root.resolve()
-    resolved = (root / rel_tmpl.format(name)).resolve()
-    if not str(resolved).startswith(str(resolved_root) + os.sep) or not resolved.is_file():
+    resolved = _confined(root_fn(), rel_tmpl.format(name))
+    if resolved is None:
         return None
     return resolved.read_text(errors="ignore")
+
+
+def do_artifact_action(kind: str, name: str, action: str) -> str:
+    """Drive publish.py's `finding` path from the artifact browser - the
+    Jira-filing sibling of do_prd_action's `publish`. Only insight docs file
+    to Jira (surveys have no such channel), and `name` gets the exact same
+    confinement read_product_artifact uses (_ARTIFACT_NAME_RE, then
+    _confined() under insights/ - never a filesystem path taken on faith)."""
+    if action != "file-jira":
+        return f"unknown artifact action '{action}'"
+    if kind != "insight":
+        return f"cannot file-jira for kind '{kind}' - only insight docs file to Jira"
+    if not isinstance(name, str) or not _ARTIFACT_NAME_RE.match(name):
+        return "invalid artifact name"
+    resolved = _confined(_insights_root(), f"{name}.md")
+    if resolved is None:
+        return f"no insight doc named '{name}'"
+    if not _publish_channels()["jira"]:
+        return "cannot file to Jira: publish.jira is not configured in .autopilot/config.yaml"
+    script = str(ENGINE / "publish.py")
+    log = AP_STATE / "logs" / f"publish-finding-{name}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("ab") as lf:
+        proc = subprocess.Popen([sys.executable, script, "finding", str(REPO), name],
+                                stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
+                                start_new_session=True)
+    _write_publish_pending(log, proc.pid)
+    return (f"Filing '{name}' to Jira - the browser shows the key once it's "
+            f"recorded (log: logs/{log.name})")
 
 
 def load_calibration_candidates() -> list:
@@ -3519,7 +3838,7 @@ def do_delete_branches_bulk(kind: str) -> str:
 CATEGORIES_ALL = ["bug", "feature", "refactor", "code_quality", "testing", "documentation",
                   "dependencies", "developer_experience", "security", "infrastructure",
                   "release_management", "git_practices",
-                  "insight", "funnel", "hypothesis", "survey_design", "survey_analysis"]
+                  "insight", "funnel", "hypothesis", "survey_design", "survey_analysis", "design_review"]
 SOURCES_ALL = ["backlog", "backlog-research", "maturity-score", "logwatch", "ui-test",
                "code-review", "security-review", "network-review", "metric_watch"]
 HOSTS_ALL = ["bitbucket", "github", "gitlab"]
@@ -3861,6 +4180,126 @@ def do_restart(label: str, delay: float = 0) -> str:
     if r.returncode != 0:
         return f"Restart of {label} failed: {(r.stderr or r.stdout).strip()[:200]}"
     return f"✓ Restarted {label}."
+
+
+# ── restart ALL of this target's installed units, not just slot 0 ─────────
+# LAUNCHD_LABEL (and its use above) names ONE unit: slot 0's LEGACY label
+# (com.orbit.<slug>), which predates per-slot units (Task 7). do_restart_
+# loop_all fixes the bug where clicking "Restart loop" only ever bounced
+# that one slot even when `concurrency` had installed several - it enumerates
+# every on-disk unit file for THIS target's slug, verifies each one's own
+# baked-in ORBIT_TARGET (never trusting a filename match alone - the same
+# slug-collision hazard install_service.sh/doctor.py's _unit_owner_on_disk
+# guard against), and restarts each one individually.
+def _service_slug() -> str:
+    """This target's service slug - byte-identical to install_service.sh's
+    SLUG, launcher.py's _slug, and doctor.py's _service_slug: 'orbit-' + the
+    repo's basename with every non-alphanumeric character replaced by a
+    dash, trailing dashes stripped."""
+    name = re.sub(r"[^a-zA-Z0-9]", "-", REPO.name)
+    return "orbit-" + name.rstrip("-")
+
+
+def _unit_owner_on_disk(name: str, is_darwin: bool) -> str | None:
+    """The ORBIT_TARGET baked into the on-disk unit file for a launchctl
+    label (macOS - ~/Library/LaunchAgents/<name>.plist) or a systemd unit
+    name (Linux - ~/.config/systemd/user/<name>). None if the file is
+    missing or unreadable - callers then fall back to the filename match
+    alone.
+
+    Deliberately mirrors doctor.py's `_unit_owner_on_disk` line for line
+    (which itself mirrors install_service.sh's bash `unit_owner()`) rather
+    than importing it: doctor.py is a top-level script keyed off sys.argv,
+    not an importable module, so a real import would re-run its whole body.
+    Keep the two in sync by hand if this check ever changes."""
+    try:
+        if is_darwin:
+            path = os.path.expanduser(f"~/Library/LaunchAgents/{name}.plist")
+            if not os.path.exists(path):
+                return None
+            import plistlib
+            with open(path, "rb") as f:
+                data = plistlib.load(f)
+            return (data.get("EnvironmentVariables") or {}).get("ORBIT_TARGET")
+        else:
+            path = os.path.expanduser(f"~/.config/systemd/user/{name}")
+            if not os.path.exists(path):
+                return None
+            for line in open(path):
+                if line.startswith("Environment=ORBIT_TARGET="):
+                    return line.rstrip("\n").split("=", 2)[2]
+            return None
+    except (OSError, ValueError):
+        return None
+
+
+def _installed_target_units(is_darwin: bool | None = None) -> list[str]:
+    """Every on-disk unit label (Darwin: the launchd label, e.g.
+    'com.orbit.orbit-app' / 'com.orbit.orbit-app-slot1') or unit filename
+    (Linux: 'orbit-app.service' / 'orbit-app-slot1.service') that belongs to
+    THIS target - slot 0's legacy name plus any `-slotN` sibling, filtered to
+    the ones whose file's own ORBIT_TARGET actually matches this repo. A
+    same-named file belonging to a DIFFERENT target (the slug-collision case
+    install_service.sh/doctor.py guard against) is excluded outright, never
+    counted as one of this target's own slots - a file with no readable
+    ORBIT_TARGET at all is kept (best-effort: a daemon-reported unit's file
+    may have moved since; see doctor.py's own `_installed_slot_labels` for
+    the same fallback)."""
+    if is_darwin is None:
+        is_darwin = platform.system() == "Darwin"
+    slug = _service_slug()
+    target = os.path.abspath(str(REPO))
+    if is_darwin:
+        d = Path(os.path.expanduser("~/Library/LaunchAgents"))
+        if not d.is_dir():
+            return []
+        files = sorted(d.glob(f"com.orbit.{slug}.plist")) + sorted(d.glob(f"com.orbit.{slug}-slot*.plist"))
+        names = [p.stem for p in files]
+    else:
+        d = Path(os.path.expanduser("~/.config/systemd/user"))
+        if not d.is_dir():
+            return []
+        files = sorted(d.glob(f"{slug}.service")) + sorted(d.glob(f"{slug}-slot*.service"))
+        names = [p.name for p in files]
+    owned = []
+    for name in names:
+        owner = _unit_owner_on_disk(name, is_darwin)
+        if owner is not None and owner != target:
+            continue  # foreign-owned collision - never restarted as ours
+        owned.append(name)
+    return owned
+
+
+def do_restart_loop_all(is_darwin: bool | None = None) -> str:
+    """Restart EVERY installed unit belonging to this target - the fix for
+    'Restart loop' only ever bouncing slot 0 (do_restart(LAUNCHD_LABEL) named
+    exactly one legacy label, which says nothing about slot 1..N-1's own
+    separate units once `concurrency` > 1 installed several - see the
+    module note above _service_slug). Darwin-only for the actual restart
+    action, same as do_restart always was; enumeration itself is
+    cross-platform (see _installed_target_units) so the ownership check and
+    its tests aren't tied to one OS. `is_darwin` defaults to the real
+    platform - overridable for tests."""
+    if is_darwin is None:
+        is_darwin = platform.system() == "Darwin"
+    units = _installed_target_units(is_darwin)
+    if not units:
+        return "No installed service units found for this target - nothing to restart."
+    if not is_darwin:
+        return (f"Found {len(units)} installed unit(s) for this target, but "
+                "restart-from-the-dashboard is launchd (macOS) only for now - "
+                f"restart them by hand: systemctl --user restart {' '.join(units)}")
+    ok, failed = [], []
+    for label in units:
+        target = f"gui/{os.getuid()}/{label}"
+        r = subprocess.run(["launchctl", "kickstart", "-k", target], capture_output=True, text=True)
+        if r.returncode == 0:
+            ok.append(label)
+        else:
+            failed.append(f"{label}: {(r.stderr or r.stdout).strip()[:200]}")
+    if failed:
+        return f"Restarted {len(ok)}/{len(units)} unit(s); failed: {'; '.join(failed)}"
+    return f"✓ Restarted {len(ok)} unit(s): {', '.join(ok)}."
 
 
 # ── state assembly (JSON for the SPA) ─────────────────────────────────────────
@@ -4369,6 +4808,12 @@ def build_state() -> dict:
     if workers is not None:
         rt["workers"] = workers
     rt["onboarding"] = onboarding_state()
+    # Always present (unlike the absent-unless-configured trio above) - two
+    # cheap booleans, never a secret, that the PRD band and artifact browser
+    # both need to decide whether to render a Publish/File→Jira button at
+    # all. A target with neither channel configured still gets these keys,
+    # just both false.
+    rt["publish_channels"] = _publish_channels()
     return rt
 
 
@@ -4434,7 +4879,7 @@ class Handler(BaseHTTPRequestHandler):
             # Confined tail for the Run view's live poll — name must be in the
             # fixed allowlist (never a filesystem path from the client).
             name = (qs.get("name", [""])[0]).strip()
-            if name not in _CMDLOG_ALLOW:
+            if not _cmdlog_name_ok(name):
                 self._send(b"invalid name", "text/plain", 400); return
             self._send(read_cmdlog(name).encode(), "text/plain; charset=utf-8")
         elif path == "/api/knowledge-doc":
@@ -4650,6 +5095,12 @@ class Handler(BaseHTTPRequestHandler):
                                     data.get("brief", [""])[0],
                                     ack_pii=(data.get("ack_pii", [""])[0] == "1"),
                                     pm=data.get("pm", [""])[0])
+            elif path == "/artifact-action":
+                name = (data.get("name", [""])[0]).strip()
+                if not name:
+                    self._send(b'{"ok":false,"msg":"missing artifact name"}', "application/json", 400); return
+                msg = do_artifact_action((data.get("kind", [""])[0]).strip(), name,
+                                        (data.get("action", [""])[0]).strip())
             elif path == "/calibration-action":
                 if not tid:
                     self._send(b'{"ok":false,"msg":"missing candidate id"}', "application/json", 400); return
@@ -4685,7 +5136,7 @@ class Handler(BaseHTTPRequestHandler):
                     payload = {}
                 msg = do_save_secrets(payload)
             elif path == "/restart-loop":
-                msg = do_restart(LAUNCHD_LABEL)
+                msg = do_restart_loop_all()
             elif path == "/restart-dashboard":
                 msg = do_restart(_dashboard_label(), delay=1)
             else:

@@ -22,7 +22,7 @@ def test_product_config_validates_and_carries_insight_gate(tmp_path):
     _init_product(tmp_path)
     cfg = (tmp_path / ".autopilot" / "config.yaml").read_text()
     assert "insight_lint" in cfg
-    assert "workable_categories: [insight, funnel, hypothesis, survey_design, survey_analysis, documentation]" in cfg
+    assert "workable_categories: [insight, funnel, hypothesis, survey_design, survey_analysis, design_review, documentation]" in cfg
     r = subprocess.run([sys.executable, str(ORBIT / "engine" / "config.py"),
                         "validate", str(tmp_path)], capture_output=True, text=True)
     assert r.returncode == 0, r.stdout
@@ -40,11 +40,15 @@ def test_product_scaffold_installs_funnel_and_hypothesis_skills(tmp_path):
     assert (cmd_dir / "orbit-survey-design.md").exists()
     assert (cmd_dir / "orbit-survey-analyze.md").exists()
 
+def test_product_scaffold_installs_design_review_skill(tmp_path):
+    _init_product(tmp_path)
+    assert (tmp_path / ".claude" / "commands" / "orbit-design-review.md").exists()
+
 def test_funnel_and_hypothesis_known_to_lint_and_emitter(monkeypatch, tmp_path):
     monkeypatch.setenv("AP_HOME", str(tmp_path / ".autopilot"))
     sys.path.insert(0, str(ORBIT / "engine"))
     import backlog_lint, backlog_to_tasks
-    for cat in ("funnel", "hypothesis", "survey_design", "survey_analysis"):
+    for cat in ("funnel", "hypothesis", "survey_design", "survey_analysis", "design_review"):
         assert cat in backlog_lint.KNOWN_CATEGORIES, cat
         assert cat in backlog_to_tasks.SAFE_CATEGORIES, cat
 
@@ -60,8 +64,9 @@ def test_funnel_and_hypothesis_known_to_lint_and_emitter(monkeypatch, tmp_path):
     sys.modules.pop("command_center", None)
     cc_mod = importlib.import_module("command_center")
     importlib.reload(cc_mod)
-    for cat in ("funnel", "hypothesis", "survey_design", "survey_analysis"):
+    for cat in ("funnel", "hypothesis", "survey_design", "survey_analysis", "design_review"):
         assert cat in cc_mod.SAFE, cat
+        assert cat in cc_mod.CATEGORIES_ALL, cat
 
 def test_product_scaffold_installs_prd_skills(tmp_path):
     _init_product(tmp_path)
@@ -167,10 +172,11 @@ def test_router_yaml_parses_and_has_funnel_hypothesis_categories():
     import yaml
     router = yaml.safe_load((ORBIT / "router" / "router.yaml").read_text())
     cats = router.get("categories", {})
-    for cat in ("funnel", "hypothesis", "survey_design", "survey_analysis"):
+    for cat in ("funnel", "hypothesis", "survey_design", "survey_analysis", "design_review"):
         assert cat in cats, cat
         assert cats[cat].get("maker", {}).get("agent") == "analyst"
         assert cats[cat].get("maker", {}).get("model") == "opus"
+    assert router.get("goldens", {}).get("by_category", {}).get("design_review") == "always"
 
 def test_doctor_warns_on_missing_mcp_token_env(tmp_path):
     _init_product(tmp_path)
@@ -183,3 +189,35 @@ def test_doctor_warns_on_missing_mcp_token_env(tmp_path):
     r = subprocess.run([sys.executable, str(ORBIT / "engine" / "doctor.py"), str(tmp_path)],
                        capture_output=True, text=True, env=env)
     assert "METAQL_TOKEN" in r.stdout
+
+def test_figma_mcp_stanza_scaffolded_in_product_template():
+    """install/init.py's PRODUCT config template's commented mcp: example must
+    show a figma stanza alongside metaql, so a workspace operator sees how to
+    declare one without reading the schema doc separately."""
+    src = (ORBIT / "install" / "init.py").read_text()
+    assert "#   figma:" in src
+    assert '#     args: ["-y", "figma-mcp"]' in src
+
+def test_figma_sources_paragraph_in_prd_research_skill():
+    text = (ORBIT / "skills" / "orbit-prd-research.md").read_text()
+    assert "figma" in text.lower()
+    assert "kind: figma" in text
+
+def test_design_review_skill_scaffold_and_rubric():
+    """Frontmatter matches orbit-hypothesis's shape (Read, Grep, Glob, Write,
+    Edit, mcp__*, Bash scoped to browse.py only), model opus, and the body
+    names every one of the four interaction-lifecycle states plus the
+    accessibility-is-always-critical rule."""
+    text = (ORBIT / "skills" / "orbit-design-review.md").read_text()
+    assert text.startswith("---\n")
+    assert "model: opus" in text
+    assert "Read, Grep, Glob, Write, Edit, mcp__*, Bash(python3:*)" in text
+    assert "python3 $ORBIT_HOME/engine/browse.py fetch" in text
+    for state in ("loading", "error", "empty", "success"):
+        assert state in text.lower()
+    assert "hierarchy" in text.lower()
+    assert "spacing" in text.lower()
+    assert "consistency" in text.lower()
+    assert "CRITICAL" in text
+    assert "accessibility" in text.lower()
+    assert "gstack" in text.lower()

@@ -6,7 +6,7 @@ referenced tracks exist · referenced skills resolve · dry-run routing per queu
 Usage: doctor.py <target-repo>  [--all]
 Env:   ORBIT_HOME (engine dir; defaults to this file's repo root)
 """
-import sys, os, json, shutil, subprocess
+import sys, os, json, shutil, subprocess, re, platform
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import secrets_env
@@ -37,6 +37,20 @@ def _secrets_env(target):
     shared parser (engine/secrets_env.py) so doctor, the dashboard's secrets
     panel, run.sh's loop and prd_flow's stage children all agree on the format."""
     return secrets_env.read(target)
+
+
+def _var_set(name, secrets, check_environ=True):
+    """True if `name` is set to a NON-BLANK value in the environment (when
+    `check_environ`) or in `secrets` (the parsed .secrets.env mapping).
+    Mirrors publish.py's own _auth(), which requires
+    `(env.get(v) or "").strip()` truthy - a `key present but blank` line in
+    .secrets.env, or an exported-but-empty shell variable, passes a bare
+    membership test but still fails publish.py at run time. Advisory doctor
+    output must agree with the thing it is advising about, or it tells an
+    operator everything is fine right up until the first publish attempt."""
+    if check_environ and (os.environ.get(name) or "").strip():
+        return True
+    return bool((secrets.get(name) or "").strip())
 
 print(f"\nORBIT DOCTOR — {TARGET}\n")
 
@@ -81,11 +95,28 @@ if jcfg:
 elif "jira" in sources:
     check("jira in sources has a jira: config block", False, "add a jira: block (see config/schema.yaml)")
 
-# 2d. mcp servers (optional): advisory only — a missing token_env doesn't
+# 2d. publish (optional): advisory only — missing ATLASSIAN_* secrets is the
+# top setup failure, but it doesn't fail doctor itself since a workspace may be
+# mid-setup or only publishes occasionally.
+pub_cfg = cfg.get("publish") if isinstance(cfg.get("publish"), dict) else {}
+secrets = _secrets_env(TARGET)
+if pub_cfg:
+    has_confluence = isinstance(pub_cfg.get("confluence"), dict)
+    has_jira = isinstance(pub_cfg.get("jira"), dict)
+    if has_confluence or has_jira:
+        email_set = _var_set("ATLASSIAN_EMAIL", secrets)
+        token_set = _var_set("ATLASSIAN_API_TOKEN", secrets)
+        if not (email_set and token_set):
+            missing = []
+            if not email_set: missing.append("ATLASSIAN_EMAIL")
+            if not token_set: missing.append("ATLASSIAN_API_TOKEN")
+            print(f"  · publish: {' and '.join(missing)} missing — set them in "
+                  f"{os.path.join(AP, '.secrets.env')} (0600) or the environment")
+
+# 2e. mcp servers (optional): advisory only — a missing token_env doesn't
 # fail doctor, since the server may simply not be reached by any queued
 # task yet, but it's the top setup failure a PM will hit once one is.
 mcp_cfg = cfg.get("mcp") if isinstance(cfg.get("mcp"), dict) else {}
-secrets = _secrets_env(TARGET)
 for name, s in mcp_cfg.items():
     te = isinstance(s, dict) and s.get("token_env")
     if te and te not in os.environ and te not in secrets:
@@ -93,13 +124,120 @@ for name, s in mcp_cfg.items():
               f"will reach {name} unauthenticated; a service-mode loop needs it in the "
               f"service environment too")
 
-# Check .secrets.env permissions (if it exists)
+# Check .secrets.env permissions (if it exists) and informational note for
+# Atlassian secrets without publish config
 secrets_path = os.path.join(AP, ".secrets.env")
 if os.path.exists(secrets_path):
     st = os.stat(secrets_path)
     mode = st.st_mode & 0o777
     if mode & 0o077:
         print(f"  · .secrets.env exists with mode {oct(mode)} — group/other bits are readable; should be 0600 or stricter for security")
+    if not pub_cfg:
+        email_set = _var_set("ATLASSIAN_EMAIL", secrets, check_environ=False)
+        token_set = _var_set("ATLASSIAN_API_TOKEN", secrets, check_environ=False)
+        if email_set or token_set:
+            print(f"  · Atlassian secrets are set but publish: unconfigured — if you plan to publish to Confluence/Jira, add a publish: block (see config/schema.yaml)")
+
+# 2f. installed service slot count vs concurrency (advisory, best-effort;
+# never fatal - launchctl/systemctl may be slow, absent, or the daemon may
+# not be reachable in this shell). Silent when NO unit for this target is
+# installed at all: most workspaces run interactively or via the launcher
+# and were never `orbit install`ed, so "0 installed" is not a problem to
+# report - it is the common case.
+def _service_slug(path):
+    """The service slug for a target repo. Must stay byte-identical to
+    install_service.sh and engine.launcher._slug: 'orbit-' + the basename
+    with every non-alphanumeric character replaced by a dash, trailing
+    dashes stripped."""
+    name = re.sub(r"[^a-zA-Z0-9]", "-", os.path.basename(path.rstrip(os.sep)))
+    return "orbit-" + name.rstrip("-")
+
+def _unit_owner_on_disk(name, is_darwin):
+    """Best-effort: the ORBIT_TARGET baked into the on-disk unit file for a
+    launchctl label (macOS - file at ~/Library/LaunchAgents/<name>.plist) or
+    a systemd unit name (Linux - file at ~/.config/systemd/user/<name>).
+    Returns None when the file is missing or unreadable - callers then fall
+    back to the label/unit-name match alone, since a daemon-reported unit's
+    file may have since moved or been deleted. Guards against the same
+    naming collision install_service.sh guards against: a DIFFERENT
+    target's slug can produce a byte-identical label/unit name to one of
+    THIS target's derived `-slotN` units."""
+    try:
+        if is_darwin:
+            path = os.path.expanduser(f"~/Library/LaunchAgents/{name}.plist")
+            if not os.path.exists(path):
+                return None
+            import plistlib
+            with open(path, "rb") as f:
+                data = plistlib.load(f)
+            return (data.get("EnvironmentVariables") or {}).get("ORBIT_TARGET")
+        else:
+            path = os.path.expanduser(f"~/.config/systemd/user/{name}")
+            if not os.path.exists(path):
+                return None
+            for line in open(path):
+                if line.startswith("Environment=ORBIT_TARGET="):
+                    return line.rstrip("\n").split("=", 2)[2]
+            return None
+    except (OSError, ValueError):
+        return None
+
+def _installed_slot_labels(slug):
+    """Best-effort: the set of installed unit labels/names for THIS target's
+    slug (slot 0's legacy name plus any `-slotN`), via `launchctl list`
+    (macOS) or `systemctl --user list-units` (Linux). Returns None on any
+    failure - including an unrecognized platform - which callers treat the
+    same as "can't tell", never as "zero installed". A label/unit name that
+    matches by prefix but whose on-disk file's ORBIT_TARGET names a
+    DIFFERENT target (the naming-collision case install_service.sh also
+    guards against) is excluded - when the file can't be read at all, the
+    prefix match is kept as-is (best effort, not a false negative)."""
+    try:
+        if platform.system() == "Darwin":
+            r = subprocess.run(["launchctl", "list"], capture_output=True, text=True, timeout=10)
+            if r.returncode != 0:
+                return None
+            labels = set()
+            for line in r.stdout.splitlines():
+                cols = line.split()
+                if not cols:
+                    continue
+                label = cols[-1]
+                if label == f"com.orbit.{slug}" or label.startswith(f"com.orbit.{slug}-slot"):
+                    owner = _unit_owner_on_disk(label, is_darwin=True)
+                    if owner is not None and owner != TARGET:
+                        continue
+                    labels.add(label)
+            return labels
+        elif platform.system() == "Linux":
+            r = subprocess.run(["systemctl", "--user", "list-units", "--all", "--plain", "--no-legend"],
+                                capture_output=True, text=True, timeout=10)
+            if r.returncode != 0:
+                return None
+            labels = set()
+            for line in r.stdout.splitlines():
+                cols = line.split()
+                if not cols:
+                    continue
+                unit = cols[0]
+                if unit == f"{slug}.service" or (unit.startswith(f"{slug}-slot") and unit.endswith(".service")):
+                    owner = _unit_owner_on_disk(unit, is_darwin=False)
+                    if owner is not None and owner != TARGET:
+                        continue
+                    labels.add(unit)
+            return labels
+        return None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+
+_installed = _installed_slot_labels(_service_slug(TARGET))
+if _installed:
+    _want = cfg.get("concurrency", 1)
+    if not isinstance(_want, int) or isinstance(_want, bool) or _want <= 0:
+        _want = 1
+    if len(_installed) != _want:
+        print(f"  · service: {len(_installed)} installed unit(s) for this target, concurrency wants {_want} "
+              f"- re-run `orbit install {TARGET}` to reconcile")
 
 # 3. router — target's .autopilot/router.yaml overrides the engine default at router/router.yaml
 router_path = find("router.yaml") or (

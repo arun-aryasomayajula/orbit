@@ -6,6 +6,11 @@ After=network-online.target
 Type=simple
 Environment=ORBIT_HOME=__HOME__
 Environment=ORBIT_TARGET=__TARGET__
+Environment=ORBIT_SLOT=__SLOT__
+Environment=ORBIT_SLOTS=__SLOTS__
+# __RUN__/__TARGET__ are substituted unquoted - a path containing a space
+# would split into extra ExecStart words. Pre-existing limitation, not
+# addressed here; keep target/orbit-home paths space-free until it is.
 ExecStart=/bin/bash __RUN__ __TARGET__
 Restart=always
 RestartSec=30

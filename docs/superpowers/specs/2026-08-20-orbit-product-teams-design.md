@@ -26,7 +26,7 @@ Three references shaped it:
 7. **Parallelism**: multiple products in parallel via a Chrome-style tab UI in the launcher, and concurrent tasks within one workspace.
 8. **Tabs are dashboard-only in v1**. Interactive chat stays in the terminal. An embedded web chat is a v2 candidate.
 9. **The dashboard is the PM's control surface** (added 2026-08-21): everything a PM needs to operate Orbit is configurable in the UI — workspace creation from the launcher, MCP servers and tokens, backlog/task entry, PRD gates, metric watches, publish settings. The CLI remains the power path; no feature may be UI-only for the operator, and no PM flow may require the terminal after initial install.
-10. **Token delivery** (added 2026-08-21, supersedes the M1 "Keychain is M2" placeholder): secrets live in `<target>/.autopilot/.secrets.env` (0600, gitignored alongside `.jira_token`), written by the dashboard's settings UI or by hand. `run.sh` sources it at each iteration start, so interactive runs and launchd/systemd services get the same environment. Doctor validates presence of every `token_env` named in `mcp:`. Keychain integration stays optional-later.
+10. **Token delivery** (added 2026-08-21, supersedes the M1 "Keychain is M2" placeholder): secrets live in `<target>/.autopilot/.secrets.env` (0600, gitignored alongside `.jira_token`), written by the dashboard's settings UI or by hand. `run.sh` parses it line-by-line at each iteration start (never sources/executes it - a security property, not an implementation detail), so interactive runs and launchd/systemd services get the same environment. Doctor validates presence of every `token_env` named in `mcp:`. Keychain integration stays optional-later.
 
 ## Design
 
@@ -182,10 +182,10 @@ Every engine piece gets pytest coverage in the existing hermetic style, with env
 Build order:
 
 - **M1**: MCP seam, workspace template, `orbit-insight`. First PM value. (Shipped 2026-08-21, merge c6e67c5.)
-- **M2**: PRD pipeline and review gate; secrets file + `run.sh` sourcing (decision 10); dashboard: PRD pipeline view, product settings panel, secrets panel, insight quick-add.
-- **M3**: funnel and hypothesis skills, metric watches, surveys; native browse/scrape layer (section 8); dashboard: watch and survey status, artifact browser.
-- **M4**: parallelism and tabs (launcher becomes the process manager, workspace creation from the launcher).
-- **M5**: Figma read-side, publish adapters, `orbit doctor --product` installer hardening (Playwright install checks, secrets checks).
+- **M2**: PRD pipeline and review gate; secrets file + `run.sh` sourcing (decision 10); dashboard: PRD pipeline view, product settings panel, secrets panel, insight quick-add. (Shipped 2026-08-21, merge 8eed0a3.)
+- **M3**: funnel and hypothesis skills, metric watches, surveys; native browse/scrape layer (section 8); dashboard: watch and survey status, artifact browser. (Shipped 2026-08-22, merge f38927c.)
+- **M4**: parallelism and tabs (launcher becomes the process manager, workspace creation from the launcher). (Shipped 2026-08-22, merge d34d10e.)
+- **M5**: Figma read-side, publish adapters, `orbit doctor --product` installer hardening (Playwright install checks, secrets checks). (Shipped 2026-08-23 (this branch).)
 
 Pilot: Arun plus one PM on one real product.
 
@@ -197,9 +197,16 @@ Pilot: Arun plus one PM on one real product.
 - **Concurrency touches the loop's oldest code.** Mitigated by the claims-and-locks design and existing worktree isolation, and by shipping it in M4 after the workflows are proven serial.
 - **Survey source assumption**: v1 assumes CSV/Sheets exports. If the team standardizes on a survey tool with an API, that adapter moves up.
 
-## Out of scope for v1
+## Future
 
-- Figma write-side design generation (v1.5).
-- Embedded web chat per tab (v2).
-- Direct survey-tool API integrations.
-- Any shared or hosted deployment.
+Ideas considered and consciously set aside, not v1 gaps waiting to be filled.
+Each carries the reasoning for revisiting it, or not.
+
+- **Keychain secret delivery.** Decision 10 chose `.autopilot/.secrets.env` over Keychain for M1-M5: a plain file that `run.sh` parses (never sources) every iteration, so interactive runs and launchd/systemd services see the same environment without extra plumbing. Keychain integration stays optional-later, only worth building if file-based secrets prove to be the actual friction point for a PM.
+- **Embedded web chat per tab** (decision 8, v2 candidate). Tabs are dashboard-only in v1; interactive chat stays in the terminal.
+- **Figma write-side design generation** (section 7, v1.5 candidate). Read-side (frames as cited research/design-review sources) shipped in M5; write-side is the least-proven MCP surface, and a bad auto-generated design would cost PM trust in everything else.
+- **PRD stages as loop queue items.** Section 4 already ruled this out as a permanent design choice, not a deferral: PRD runs have their own state machine and gates, so the repo-task queue is the wrong dispatcher for them (amended 2026-08-21 during M2). Listed here only because it keeps resurfacing operationally; revisit only if the PRD state machine's own needs change, not because the loop queue is expected to grow this capability.
+- **DNS-rebinding close.** `command_center.py` and `launcher.py` already exact-match the `Host` header, reject cross-origin `Origin`/`Referer`, and require a per-process token on every state-changing request (see `command_center.py`'s CSRF/DNS-rebinding comment, exercised in `tests/test_launcher.py`). Flagged here for a final audit pass across any network entry point added after that defense was written (for example `publish.py`'s outbound REST calls, which are a different trust boundary - outbound to Atlassian, not inbound to the dashboard) rather than a confirmed gap in what exists today.
+- **Per-slot `orbit.log` split.** Every slot currently appends to the SAME shared `orbit.log`, tagged `[slot N]` per line (`run.sh`'s `log()`/`logf()`); command_center's turnaround metric already parses that tag (M5 Task 8). Splitting into one log file per slot is deferred until the shared file's size or read cost actually becomes a problem.
+- Direct survey-tool API integrations (v1 assumes CSV/Sheets exports; moves up if the team standardizes on a tool with an API).
+- Any shared or hosted deployment (decision 1: each PM runs Orbit locally with their own MCP credentials).

@@ -346,6 +346,56 @@ button (visible only when enabled), or from your own scheduler — there is no
 `--if-changed`/cursor variant and no `run.sh` wiring; a human decides when to
 explore.
 
+## 7. Product workspaces (PM mode, optional)
+Everything above this section describes a code workspace.
+A product workspace runs the same loop, gates, and dashboard, but its work items are grounded data insights instead of code changes, and it adds an MCP seam, a PRD pipeline, and publish adapters on top.
+Full design: `docs/superpowers/specs/2026-08-20-orbit-product-teams-design.md`.
+
+### 7.1 Scaffold one
+```bash
+orbit init <dir> --product        # or: ~/orbit/install.sh <dir> --product
+```
+Scaffolds `knowledge/`, `insights/`, `research/`, `surveys/`, and a `CLAUDE.md` briefing doc alongside the usual `.autopilot/`.
+`workable_categories` becomes `[insight, funnel, hypothesis, survey_design, survey_analysis, design_review, documentation]`, each gated by `engine/insight_lint.py` (structure, citation integrity, no `TBD`/`TODO`) rather than a test suite.
+The PRD pipeline (`engine/prd_flow.py`: intake, research, synthesis, draft, review, each stamped and Tier-A-evaluated) runs from the dashboard's PRD view; scope approval and sign-off are human gates, never auto-approved.
+
+### 7.2 MCP servers
+```yaml
+mcp:
+  metaql: {transport: http, url: "https://<host>/mcp", token_env: METAQL_TOKEN, tools: [metaql_execute_query]}
+  figma:  {transport: stdio, command: npx, args: ["-y", "figma-mcp"], env_passthrough: [FIGMA_TOKEN], tools: "*"}
+```
+Declares which MCP servers a cycle may reach and which of their tools are allowed.
+`engine/mcp.py` turns this into a per-run `--mcp-config` plus matching `mcp__<server>__*` permission entries, so nothing beyond what you list here is reachable - an absent or empty `tools:` loads the server but permits none of it.
+Once a `figma` server is declared, `orbit-prd-research` and `orbit-design-review` cite its frames as typed sources instead of abstaining into `## Coverage gaps`.
+Full field reference: `config/schema.yaml`.
+
+### 7.3 Secrets
+Tokens - `METAQL_TOKEN`, `FIGMA_TOKEN`, and the `ATLASSIAN_EMAIL`/`ATLASSIAN_API_TOKEN` pair publishing uses - live in `.autopilot/.secrets.env`: one `KEY=VALUE` per line, mode 0600, gitignored.
+Write it by hand, or from the dashboard's Settings > Secrets panel (values masked in the UI, never echoed back in full).
+`run.sh` parses this file (never sources or executes it) once per loop iteration, so a token saved mid-run reaches the very next cycle without a service restart, and `prd_flow.py`/`publish.py` read it the same way for a stage or a publish launched straight from the dashboard.
+`orbit doctor` checks that every `token_env` named under `mcp:`, and the two `ATLASSIAN_*` names a configured `publish:` block needs, actually resolve.
+
+### 7.4 Concurrency
+`concurrency: N` in `.autopilot/config.yaml` runs N independent slots, each its own `engine/run.sh` process with its own worktree and its own exclusive ledger claim.
+`orbit install` writes one launchd/systemd unit per slot (`ORBIT_SLOT`/`ORBIT_SLOTS` baked into its environment), reconciling on every re-run as `concurrency` changes - installing units for new slots, removing them for slots that no longer fit.
+Before writing or removing any unit file, `orbit install` verifies the file's baked-in `ORBIT_TARGET` matches this target, and refuses to touch a unit that belongs to a different one - two targets whose derived slugs collide on the same filename can never clobber each other's service.
+See the README's "Concurrency and the launcher" section for the full picture, including the launcher's per-tab Start/Stop as the other way to run extra slots.
+
+### 7.5 Publishing approved work
+```yaml
+publish:
+  confluence: {base_url: "https://<org>.atlassian.net", space: "PROD", parent_id: null}
+  jira:       {base_url: "https://<org>.atlassian.net", project: "ORB", issue_type: "Task"}
+```
+`engine/publish.py` files a workspace's approved output out to Atlassian over plain REST, not MCP, so it works on networks that block `mcp.atlassian.com`.
+`publish.py prd <target> <run>` publishes a PRD whose marker has reached `status: done` (the human sign-off gate) to a Confluence page; a re-run UPDATES the same recorded page instead of creating a second one.
+`publish.py finding <target> <insight-stem>` files an `insights/*.md` doc that passes `engine/insight_lint.py` on its own as a Jira issue; a re-run NO-OPS, printing the key already recorded in the doc's `<!-- published: jira KEY -->` line, so a second run never spams the ticket with a duplicate comment.
+`base_url` must be `https://`, or `http://` only to loopback (127.0.0.1/localhost/::1) - publishing sends an `Authorization` header, and plain HTTP anywhere else would put the credential on the wire in clear.
+The dashboard carries the same buttons: an approved PRD's card gets a Publish action, and an approved finding's artifact view gets a File to Jira action, both driving this exact module.
+Exit codes: 2 bad or missing `publish:` config, 3 missing secrets, 4 the artifact isn't gated to publish yet, 5 an HTTP failure (status code only - response bodies and tokens never reach stdout or stderr), 6 the remote write succeeded but the local record of it didn't, with the message saying how to reconcile by hand.
+Full field reference: `config/schema.yaml`.
+
 ## Opt-in task sources (signal adapters)
 Beyond the native `backlog.yaml`, every extra name in `sources:` runs a matching
 `<name>_to_backlog.py` each cycle — resolved from YOUR repo's `.autopilot/adapters/` first,

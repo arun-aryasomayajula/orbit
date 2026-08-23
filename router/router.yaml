@@ -36,6 +36,7 @@ skills:
   orbit-hypothesis:              orbit-hypothesis                       # single-hypothesis triangulation (built-in, skills/orbit-hypothesis.md)
   orbit-survey-design:           orbit-survey-design                    # falsifiable-hypothesis survey design (built-in, skills/orbit-survey-design.md)
   orbit-survey-analyze:          orbit-survey-analyze                   # grounded survey response analysis (built-in, skills/orbit-survey-analyze.md)
+  orbit-design-review:           orbit-design-review                    # named screen/flow design audit (built-in, skills/orbit-design-review.md)
 
 defaults:
   checker: { agent: checker, model: sonnet }      # the gate — always runs
@@ -68,6 +69,7 @@ goldens:
     hypothesis: always           # no dedicated card yet - verify-before-done applies
     survey_design: always        # no dedicated card yet - verify-before-done applies
     survey_analysis: always      # no dedicated card yet - verify-before-done applies
+    design_review: always        # no dedicated card yet - verify-before-done applies
     # dependencies / developer_experience / observability / infrastructure → `always` card only
 
 # category → routing. `policy`: allow = auto-pickable; human = only if forced:true
@@ -164,6 +166,13 @@ categories:
     skill: orbit-survey-analyze     # methodology brief (skills/orbit-survey-analyze.md)
     tracks: []
     discipline: analyze survey responses with no fact without a source; doc must pass insight_lint
+
+  design_review:
+    policy: allow
+    maker: { agent: analyst, model: opus, effort: high }
+    skill: orbit-design-review      # methodology brief (skills/orbit-design-review.md)
+    tracks: []
+    discipline: audit hierarchy/spacing/consistency/interaction states/accessibility; accessibility findings are always CRITICAL; doc must pass insight_lint
 
   # ---- escalate-unless-forced (operator-excluded from auto-pick) ----
   observability:
