@@ -12,10 +12,26 @@
 # dashboard/launcher already read that name (engine/launcher.py's
 # launchd_label()). Slots 1..N-1 get a `-slotN` suffix.
 #
-# Re-running reconciles: installs any slot 0..N-1 missing a unit, and removes
-# units for slots >= N left over from a higher `concurrency` (matched by this
-# target's exact slug under the `com.orbit.` prefix - never touches another
-# target's service or a non-orbit unit).
+# Naming COLLISION between DIFFERENT targets: a target's derived
+# `<slug>-slotN` filename can be byte-identical to a different target's own
+# LEGACY filename (e.g. target dir `app`'s slot-1 unit is named exactly
+# like target dir `app-slot1`'s slot-0 unit) - the slug-plus-suffix scheme
+# alone cannot tell those apart. Every unit this script writes bakes in
+# ORBIT_TARGET, so before writing OR removing ANY file matched by this
+# target's naming pattern, the script reads that file's ORBIT_TARGET back
+# and compares it to THIS target's path:
+#   - write: an existing file belonging to a DIFFERENT target is never
+#     overwritten - the write is REFUSED (loud error, nonzero exit) instead.
+#     Two units cannot share one filename, so this is a real, unresolvable
+#     conflict; the operator must rename one of the two target directories.
+#   - remove (reconcile-down / uninstall): a foreign-owned file is left
+#     alone with a loud warning, never deleted.
+# A file with no readable ORBIT_TARGET (not one of ours, or unreadable) is
+# treated as foreign for both purposes.
+#
+# Re-running reconciles: installs any slot 0..N-1 missing a unit, and
+# removes units for slots >= N left over from a higher `concurrency`
+# (subject to the ownership check above).
 #
 # Usage:
 #   install_service.sh <target-repo> <orbit-home>
@@ -46,6 +62,7 @@ SLUG="orbit-$(basename "$TARGET" | tr -c 'a-zA-Z0-9' '-' | sed 's/-*$//')"
 RUN="$ORBIT_HOME/engine/run.sh"
 LOG="$TARGET/.autopilot/state/logs"
 mkdir -p "$LOG"
+FAILED=0   # set to 1 when a slot's WRITE is refused for belonging to another target
 
 # Concurrency -> slot count. Uninstall doesn't need it (removes everything
 # matching regardless of what the config currently says - the workspace may
@@ -64,12 +81,67 @@ fi
 label_for() { if [ "$1" -eq 0 ]; then echo "com.orbit.$SLUG"; else echo "com.orbit.$SLUG-slot$1"; fi; }
 unit_for()  { if [ "$1" -eq 0 ]; then echo "$SLUG.service"; else echo "$SLUG-slot$1.service"; fi; }
 
-# Slot numbers with a unit file already on disk for THIS slug, found by
-# scanning filenames (never launchctl/systemctl - keeps reconcile testable
-# and independent of the daemon being reachable). Dedups plist+service
-# hits for the same slot (relevant only in --generate-only, which writes
-# both). Guarded to `com.orbit.<this exact slug>` / `<this exact slug>` so a
-# neighboring target's service, or any non-orbit unit, is never matched.
+# The ORBIT_TARGET baked into an existing plist or systemd unit file, or
+# empty if the file is absent/unreadable/doesn't have one.
+unit_owner() {  # unit_owner <file>
+  local f="$1"
+  case "$f" in
+    *.plist)   sed -n 's|.*<key>ORBIT_TARGET</key><string>\(.*\)</string>.*|\1|p' "$f" 2>/dev/null | head -1 ;;
+    *.service) sed -n 's|^Environment=ORBIT_TARGET=||p' "$f" 2>/dev/null | head -1 ;;
+  esac
+}
+
+# true (0) if $1 does not exist yet, OR exists and already belongs to THIS
+# target (its baked-in ORBIT_TARGET equals $TARGET) - i.e. safe to (over)write.
+ours_or_absent() {
+  local f="$1" owner
+  [ -e "$f" ] || return 0
+  owner="$(unit_owner "$f")"
+  [ -n "$owner" ] && [ "$owner" = "$TARGET" ]
+}
+
+# true (0) if $1 exists AND belongs to THIS target - i.e. safe to delete/unload.
+ours() {
+  local f="$1" owner
+  [ -e "$f" ] || return 1
+  owner="$(unit_owner "$f")"
+  [ -n "$owner" ] && [ "$owner" = "$TARGET" ]
+}
+
+# Write $3 via generator function $2 into path $1, but only if ours_or_absent
+# ($1) - otherwise refuse (loud error, FAILED=1) rather than clobber a
+# different target's unit that happens to share this filename.
+write_guarded() {  # write_guarded <path> <gen-fn> <slot>
+  local path="$1" fn="$2" slot="$3"
+  if ours_or_absent "$path"; then
+    "$fn" "$slot" "$path"
+    return 0
+  fi
+  echo "✗ refusing to write $path (slot $slot): it belongs to a DIFFERENT target ($(unit_owner "$path")) - name collision between that target's own slug and this target's slug ($SLUG). Two units cannot share one filename; rename one of the two target directories to resolve it." >&2
+  FAILED=1
+  return 1
+}
+
+# Delete $1 (after running $2, if given - e.g. 'launchctl unload' or
+# 'systemctl --user disable --now') only if `ours`($1) - otherwise leave it
+# alone with a loud warning. Never counts as a failure: declining to touch
+# someone else's unit is correct behavior, not an error in THIS target's install.
+delete_guarded() {  # delete_guarded <path> [stop-cmd...]
+  local path="$1"; shift
+  [ -e "$path" ] || return 1
+  if ours "$path"; then
+    if [ $# -gt 0 ]; then "$@" "$path" 2>/dev/null || true; fi
+    rm -f "$path"
+    return 0
+  fi
+  echo "! leaving $path alone: it belongs to a DIFFERENT target ($(unit_owner "$path")) - name collision with this target's slug ($SLUG), not this target's own unit" >&2
+  return 1
+}
+
+# CANDIDATE slot numbers: any file in <dir> matching this slug's naming
+# pattern, regardless of ownership. Ownership is verified separately, per
+# file, immediately before any mutation (write_guarded/delete_guarded above) -
+# this only narrows WHICH filenames are even in play.
 existing_slots() {  # existing_slots <dir>
   local dir="$1" f base n
   [ -d "$dir" ] || return 0
@@ -110,18 +182,21 @@ if [ "$MODE" = "generate-only" ]; then
   n=0
   while [ "$n" -lt "$SLOTS" ]; do
     label="$(label_for "$n")"; unit="$(unit_for "$n")"
-    gen_plist "$n" "$GEN_DIR/$label.plist"
-    gen_systemd "$n" "$GEN_DIR/$unit"
-    echo "✓ generated $label.plist + $unit (slot $n/$SLOTS)"
+    plist_ok=0; service_ok=0
+    write_guarded "$GEN_DIR/$label.plist" gen_plist "$n" && plist_ok=1
+    write_guarded "$GEN_DIR/$unit" gen_systemd "$n" && service_ok=1
+    [ "$plist_ok" -eq 1 ] && [ "$service_ok" -eq 1 ] && echo "✓ generated $label.plist + $unit (slot $n/$SLOTS)"
     n=$((n + 1))
   done
   for n in $(existing_slots "$GEN_DIR"); do
     if [ "$n" -ge "$SLOTS" ]; then
-      rm -f "$GEN_DIR/$(label_for "$n").plist" "$GEN_DIR/$(unit_for "$n")"
-      echo "✓ removed stale slot $n - concurrency is now $SLOTS"
+      removed=0
+      delete_guarded "$GEN_DIR/$(label_for "$n").plist" && removed=1
+      delete_guarded "$GEN_DIR/$(unit_for "$n")" && removed=1
+      [ "$removed" -eq 1 ] && echo "✓ removed stale slot $n - concurrency is now $SLOTS"
     fi
   done
-  exit 0
+  exit "$FAILED"
 fi
 
 case "$(uname -s)" in
@@ -130,27 +205,24 @@ case "$(uname -s)" in
     if [ "$MODE" = "uninstall" ]; then
       for n in $(existing_slots "$UNIT_DIR"); do
         label="$(label_for "$n")"; plist="$UNIT_DIR/$label.plist"
-        launchctl unload "$plist" 2>/dev/null || true
-        rm -f "$plist"
-        echo "✓ removed $label"
+        delete_guarded "$plist" launchctl unload && echo "✓ removed $label"
       done
       exit 0
     fi
     n=0
     while [ "$n" -lt "$SLOTS" ]; do
       label="$(label_for "$n")"; plist="$UNIT_DIR/$label.plist"
-      gen_plist "$n" "$plist"
-      launchctl unload "$plist" 2>/dev/null || true
-      launchctl load "$plist"
-      echo "✓ launchd agent $label loaded (slot $n/$SLOTS, RunAtLoad + KeepAlive). Logs: $LOG"
+      if write_guarded "$plist" gen_plist "$n"; then
+        launchctl unload "$plist" 2>/dev/null || true
+        launchctl load "$plist"
+        echo "✓ launchd agent $label loaded (slot $n/$SLOTS, RunAtLoad + KeepAlive). Logs: $LOG"
+      fi
       n=$((n + 1))
     done
     for n in $(existing_slots "$UNIT_DIR"); do
       if [ "$n" -ge "$SLOTS" ]; then
         label="$(label_for "$n")"; plist="$UNIT_DIR/$label.plist"
-        launchctl unload "$plist" 2>/dev/null || true
-        rm -f "$plist"
-        echo "✓ removed stale slot $n ($label) - concurrency is now $SLOTS"
+        delete_guarded "$plist" launchctl unload && echo "✓ removed stale slot $n ($label) - concurrency is now $SLOTS"
       fi
     done
     echo "  stop:  $ORBIT_HOME/install/install_service.sh $TARGET $ORBIT_HOME --uninstall"
@@ -160,30 +232,39 @@ case "$(uname -s)" in
     if [ "$MODE" = "uninstall" ]; then
       for n in $(existing_slots "$UNIT_DIR"); do
         unit="$(unit_for "$n")"
-        systemctl --user disable --now "$unit" 2>/dev/null || true
-        rm -f "$UNIT_DIR/$unit"
-        echo "✓ removed $unit"
+        if ours "$UNIT_DIR/$unit"; then
+          systemctl --user disable --now "$unit" 2>/dev/null || true
+          rm -f "$UNIT_DIR/$unit"
+          echo "✓ removed $unit"
+        else
+          echo "! leaving $UNIT_DIR/$unit alone: it belongs to a DIFFERENT target ($(unit_owner "$UNIT_DIR/$unit")) - name collision with this target's slug ($SLUG), not this target's own unit" >&2
+        fi
       done
       systemctl --user daemon-reload 2>/dev/null || true
       exit 0
     fi
     n=0
     while [ "$n" -lt "$SLOTS" ]; do
-      gen_systemd "$n" "$UNIT_DIR/$(unit_for "$n")"
+      write_guarded "$UNIT_DIR/$(unit_for "$n")" gen_systemd "$n"
       n=$((n + 1))
     done
     for n in $(existing_slots "$UNIT_DIR"); do
       if [ "$n" -ge "$SLOTS" ]; then
         unit="$(unit_for "$n")"
-        systemctl --user disable --now "$unit" 2>/dev/null || true
-        rm -f "$UNIT_DIR/$unit"
-        echo "✓ removed stale slot $n ($unit) - concurrency is now $SLOTS"
+        if ours "$UNIT_DIR/$unit"; then
+          systemctl --user disable --now "$unit" 2>/dev/null || true
+          rm -f "$UNIT_DIR/$unit"
+          echo "✓ removed stale slot $n ($unit) - concurrency is now $SLOTS"
+        else
+          echo "! leaving $UNIT_DIR/$unit alone: it belongs to a DIFFERENT target ($(unit_owner "$UNIT_DIR/$unit")) - name collision with this target's slug ($SLUG), not this target's own unit" >&2
+        fi
       fi
     done
     systemctl --user daemon-reload
     n=0
     while [ "$n" -lt "$SLOTS" ]; do
-      systemctl --user enable --now "$(unit_for "$n")"
+      unit="$(unit_for "$n")"
+      [ -e "$UNIT_DIR/$unit" ] && ours "$UNIT_DIR/$unit" && systemctl --user enable --now "$unit"
       n=$((n + 1))
     done
     echo "✓ systemd --user units enabled + started for $SLOTS slot(s). Logs: journalctl --user -u $SLUG -f"
@@ -191,3 +272,4 @@ case "$(uname -s)" in
     ;;
   *) echo "unsupported OS $(uname -s) - run each slot manually: ORBIT_SLOT=<n> ORBIT_SLOTS=$SLOTS ORBIT_HOME=$ORBIT_HOME $RUN $TARGET"; exit 1 ;;
 esac
+exit "$FAILED"

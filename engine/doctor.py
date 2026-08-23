@@ -138,12 +138,46 @@ def _service_slug(path):
     name = re.sub(r"[^a-zA-Z0-9]", "-", os.path.basename(path.rstrip(os.sep)))
     return "orbit-" + name.rstrip("-")
 
+def _unit_owner_on_disk(name, is_darwin):
+    """Best-effort: the ORBIT_TARGET baked into the on-disk unit file for a
+    launchctl label (macOS - file at ~/Library/LaunchAgents/<name>.plist) or
+    a systemd unit name (Linux - file at ~/.config/systemd/user/<name>).
+    Returns None when the file is missing or unreadable - callers then fall
+    back to the label/unit-name match alone, since a daemon-reported unit's
+    file may have since moved or been deleted. Guards against the same
+    naming collision install_service.sh guards against: a DIFFERENT
+    target's slug can produce a byte-identical label/unit name to one of
+    THIS target's derived `-slotN` units."""
+    try:
+        if is_darwin:
+            path = os.path.expanduser(f"~/Library/LaunchAgents/{name}.plist")
+            if not os.path.exists(path):
+                return None
+            import plistlib
+            with open(path, "rb") as f:
+                data = plistlib.load(f)
+            return (data.get("EnvironmentVariables") or {}).get("ORBIT_TARGET")
+        else:
+            path = os.path.expanduser(f"~/.config/systemd/user/{name}")
+            if not os.path.exists(path):
+                return None
+            for line in open(path):
+                if line.startswith("Environment=ORBIT_TARGET="):
+                    return line.rstrip("\n").split("=", 2)[2]
+            return None
+    except (OSError, ValueError):
+        return None
+
 def _installed_slot_labels(slug):
     """Best-effort: the set of installed unit labels/names for THIS target's
     slug (slot 0's legacy name plus any `-slotN`), via `launchctl list`
     (macOS) or `systemctl --user list-units` (Linux). Returns None on any
     failure - including an unrecognized platform - which callers treat the
-    same as "can't tell", never as "zero installed"."""
+    same as "can't tell", never as "zero installed". A label/unit name that
+    matches by prefix but whose on-disk file's ORBIT_TARGET names a
+    DIFFERENT target (the naming-collision case install_service.sh also
+    guards against) is excluded - when the file can't be read at all, the
+    prefix match is kept as-is (best effort, not a false negative)."""
     try:
         if platform.system() == "Darwin":
             r = subprocess.run(["launchctl", "list"], capture_output=True, text=True, timeout=10)
@@ -156,6 +190,9 @@ def _installed_slot_labels(slug):
                     continue
                 label = cols[-1]
                 if label == f"com.orbit.{slug}" or label.startswith(f"com.orbit.{slug}-slot"):
+                    owner = _unit_owner_on_disk(label, is_darwin=True)
+                    if owner is not None and owner != TARGET:
+                        continue
                     labels.add(label)
             return labels
         elif platform.system() == "Linux":
@@ -170,6 +207,9 @@ def _installed_slot_labels(slug):
                     continue
                 unit = cols[0]
                 if unit == f"{slug}.service" or (unit.startswith(f"{slug}-slot") and unit.endswith(".service")):
+                    owner = _unit_owner_on_disk(unit, is_darwin=False)
+                    if owner is not None and owner != TARGET:
+                        continue
                     labels.add(unit)
             return labels
         return None

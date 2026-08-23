@@ -151,6 +151,81 @@ def test_generate_only_reconcile_is_scoped_to_this_targets_slug(tmp_path):
     assert non_orbit.exists()
 
 
+def _generate_allow_fail(target, gen_dir):
+    """Like _generate, but for scenarios expected to (partially) fail -
+    a collision refusal exits nonzero even though the other slots still
+    got written."""
+    return subprocess.run(
+        ["bash", str(INSTALL_SERVICE), str(target), str(REPO_ROOT), "--generate-only", str(gen_dir)],
+        capture_output=True, text=True,
+    )
+
+
+def test_generate_only_refuses_to_overwrite_a_different_targets_colliding_unit(tmp_path):
+    """Regression: target `app`'s derived slot-1 filename
+    (`orbit-app-slot1.*`) is byte-identical to a DIFFERENT target dir named
+    literally `app-slot1`'s own legacy slot-0 filename. install_service.sh
+    must never let one target's install clobber the other's real unit just
+    because the names collide - it must refuse that slot's write instead.
+    """
+    app_slot1 = _target(tmp_path, concurrency=1, name="app-slot1")
+    app = _target(tmp_path, concurrency=3, name="app")
+    gen = tmp_path / "gen"
+
+    # app-slot1 installs FIRST, genuinely owning the shared filename as its
+    # own (legacy) slot 0.
+    r1 = _generate_allow_fail(app_slot1, gen)
+    assert r1.returncode == 0, r1.stderr
+    colliding_plist = gen / "com.orbit.orbit-app-slot1.plist"
+    colliding_service = gen / "orbit-app-slot1.service"
+    assert f"<string>{app_slot1}</string>" in colliding_plist.read_text()
+
+    # app installs SECOND. Its own slot 0 (orbit-app.*) and slot 2
+    # (orbit-app-slot2.*) are unique and must succeed; its slot 1
+    # (orbit-app-slot1.*) collides with app-slot1's real unit and must be
+    # REFUSED, not overwritten - the script must exit nonzero to signal it.
+    r2 = _generate_allow_fail(app, gen)
+    assert r2.returncode != 0, r2.stdout
+    assert "belongs to a DIFFERENT target" in r2.stderr
+    assert str(app_slot1) in r2.stderr
+
+    assert (gen / "com.orbit.orbit-app.plist").exists()
+    assert (gen / "com.orbit.orbit-app-slot2.plist").exists()
+    # The colliding unit is UNCHANGED - still app-slot1's, not app's.
+    assert f"<string>{app_slot1}</string>" in colliding_plist.read_text()
+    assert f"ORBIT_TARGET={app_slot1}" in colliding_service.read_text()
+    assert f"<string>{app}</string>" not in colliding_plist.read_text()
+
+
+def test_generate_only_reconcile_down_never_deletes_a_different_targets_unit(tmp_path):
+    """Continuation of the collision above: lowering `app`'s concurrency
+    must reconcile away app's OWN stale slots, but must never delete
+    app-slot1's real unit just because its filename matches app's naming
+    pattern for a slot app no longer wants."""
+    app_slot1 = _target(tmp_path, concurrency=1, name="app-slot1")
+    app = _target(tmp_path, concurrency=3, name="app")
+    gen = tmp_path / "gen"
+    assert _generate_allow_fail(app_slot1, gen).returncode == 0
+    assert _generate_allow_fail(app, gen).returncode != 0  # slot 1 refused, as above
+
+    # Lower app's concurrency: app's slot 1 and slot 2 both become "stale"
+    # from app's point of view. Slot 2 is genuinely app's own -> removed.
+    # Slot 1's file is genuinely app-slot1's -> must survive, untouched.
+    (app / ".autopilot" / "config.yaml").write_text(
+        'repo: "."\nbase_branch: "main"\ngates:\n  test: {cmd: "true", cwd: "."}\nconcurrency: 1\n')
+    r3 = _generate_allow_fail(app, gen)
+    assert r3.returncode == 0, r3.stdout + r3.stderr
+    assert "leaving" in r3.stderr and str(app_slot1) in r3.stderr
+
+    colliding_plist = gen / "com.orbit.orbit-app-slot1.plist"
+    colliding_service = gen / "orbit-app-slot1.service"
+    assert colliding_plist.exists() and colliding_service.exists()
+    assert f"<string>{app_slot1}</string>" in colliding_plist.read_text()
+    assert not (gen / "com.orbit.orbit-app-slot2.plist").exists()
+    assert not (gen / "orbit-app-slot2.service").exists()
+    assert (gen / "com.orbit.orbit-app.plist").exists()  # app's own slot 0 survives
+
+
 def test_install_service_script_is_syntactically_valid():
     r = subprocess.run(["bash", "-n", str(INSTALL_SERVICE)], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
@@ -228,6 +303,49 @@ def test_doctor_service_skips_silently_when_no_service_installed(tmp_path):
     lines = _advisory_lines(r.stdout)
     assert not any("service:" in ln for ln in lines), r.stdout
     assert "ALL CHECKS PASSED" in r.stdout
+
+
+def test_doctor_service_excludes_a_label_owned_by_a_different_target_on_disk(tmp_path):
+    """Regression: launchctl/systemctl can report a label/unit name that
+    matches THIS target's slug by prefix but is actually installed for a
+    DIFFERENT target whose own slug collides with one of ours (the same
+    `<slug>-slot<N>` collision install_service.sh guards against). doctor
+    must verify ORBIT_TARGET on disk and NOT count that label as ours - a
+    label doctor can't verify at all (no on-disk file) still falls back to
+    the prefix match, so this isn't a blanket "trust nothing" regression.
+    """
+    t = _target(tmp_path, concurrency=3, name="app")
+    slug = _slug("app")  # "orbit-app"
+
+    # Fake HOME so ~/Library/LaunchAgents and ~/.config/systemd/user are
+    # redirected into a tmp dir - os.path.expanduser("~...") honors $HOME.
+    fake_home = tmp_path / "fakehome"
+    la_dir = fake_home / "Library" / "LaunchAgents"
+    la_dir.mkdir(parents=True)
+    sysd_dir = fake_home / ".config" / "systemd" / "user"
+    sysd_dir.mkdir(parents=True)
+
+    # slot 1's label/unit is genuinely installed for a DIFFERENT target -
+    # its on-disk file says so.
+    (la_dir / f"com.orbit.{slug}-slot1.plist").write_text(
+        "<?xml version=\"1.0\"?><plist><dict>"
+        "<key>EnvironmentVariables</key><dict>"
+        "<key>ORBIT_TARGET</key><string>/somewhere/else/app-slot1</string>"
+        "</dict></dict></plist>")
+    (sysd_dir / f"{slug}-slot1.service").write_text("Environment=ORBIT_TARGET=/somewhere/else/app-slot1\n")
+    # slots 0 and 2 have no on-disk file doctor can check - best effort keeps
+    # trusting the launchctl/systemctl prefix match for those.
+
+    bindir = _fake_service_bin(tmp_path, slug, installed_slots=[0, 1, 2])
+    e = dict(os.environ)
+    e["PATH"] = str(bindir) + os.pathsep + e.get("PATH", "")
+    e["HOME"] = str(fake_home)
+    r = subprocess.run([sys.executable, str(DOCTOR), str(t)], capture_output=True, text=True, env=e)
+
+    lines = _advisory_lines(r.stdout)
+    # Naively, 3 labels match by prefix == concurrency 3 -> silent. With the
+    # ownership check, slot 1 is excluded (foreign) -> only 2 count -> advisory.
+    assert any("service:" in ln and "2 installed" in ln and "concurrency wants 3" in ln for ln in lines), r.stdout
 
 
 def test_doctor_service_advisory_never_fails_doctor(tmp_path):
