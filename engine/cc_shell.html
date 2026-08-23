@@ -1391,13 +1391,37 @@ function prdActionBtn(r,a){
   const body=`{run:'${escJsAttr(r.run_id)}',action:'${a}'${pii?",ack_pii:'1'":''}}`;
   return `<button class="btn ${cls} btn-mini" onclick="if(confirm('${escJsAttr(msg)}')${gate})post('/prd-action',${body})">${esc(label)}</button>`;
 }
+/* Publish is handled OUTSIDE the generic next_actions -> prdActionBtn map:
+   once a run has been published, the button becomes a smaller "re-publish"
+   affordance next to a badge + link, which the generic one-button-per-action
+   map has no way to express. The server still lists 'publish' in
+   next_actions for as long as it's legal (status done && confluence
+   configured) - filtered from the generic map below, read here instead. */
+function prdPublishBtn(r){
+  const already=!!(r.published&&r.published.url);
+  const label=already?'↻ re-publish':'⬆ Publish';
+  const msg=already
+    ?`Re-publish '${r.run_id}'? The existing Confluence page is updated in place.`
+    :`Publish '${r.run_id}' to Confluence?`;
+  const cls=already?'btn btn-mini':'btn btn-go btn-mini';
+  return `<button class="${cls}" onclick="if(confirm('${escJsAttr(msg)}'))post('/prd-action',{run:'${escJsAttr(r.run_id)}',action:'publish'})">${label}</button>`;
+}
+function prdPublishArea(r){
+  const legal=(r.next_actions||[]).includes('publish');
+  const pub=r.published;
+  if(!legal&&!(pub&&pub.url))return'';
+  const link=(pub&&pub.url)?` <a href="${escAttr(pub.url)}" target="_blank" rel="noopener">${esc(pub.url)}</a>`:'';
+  const bd=(pub&&pub.url)?badge('published','ok'):'';
+  return `${bd}${link} ${legal?prdPublishBtn(r):''}`;
+}
 function prdCard(r){
   const tamper=(r.tamper&&r.tamper.length)?`<div class=meta style="color:var(--red)">⚠ tamper: ${esc(r.tamper.join('; '))}</div>`:'';
-  const btns=(r.next_actions||[]).map(a=>prdActionBtn(r,a)).join('');
+  const btns=(r.next_actions||[]).filter(a=>a!=='publish').map(a=>prdActionBtn(r,a)).join('');
+  const pubArea=prdPublishArea(r);
   return `<div class=card><div class="card-h"><span class=tid>${esc(r.run_id)}</span> ${prdStatusBadge(r.status)}${r.pii_touch?' '+badge('PII','warn'):''}</div>
     <div class=title>${esc(r.title)}</div>
     <div class=meta>${prdStageDots(r.stages)}</div>${tamper}
-    <div class=btns>${btns}${prdArtifactLinks(r)}</div></div>`;
+    <div class=btns>${btns}${pubArea}${prdArtifactLinks(r)}</div></div>`;
 }
 function newPrd(){
   document.getElementById('pfRun').value=''; document.getElementById('pfTitle').value='';
@@ -1444,6 +1468,26 @@ function artifactRow(label,url,name){
     <span>${esc(name)}</span>
     <button class="btn btn-mini" onclick="openText('${escJsAttr(label)}','${url}',false)">View</button></div>`;
 }
+/* Insight rows get a second action the generic artifactRow has no room for:
+   File→Jira when publish.jira is configured and the doc hasn't been filed
+   yet, or the recorded key once it has - absent-unless-configured, same as
+   the PRD band's Publish button. */
+function insightArtifactRow(d){
+  const jiraOk=!!(S.publish_channels&&S.publish_channels.jira);
+  let action='';
+  if(d.jira_key){
+    action=`<span class=meta>${esc(d.jira_key)}</span>`;
+  }else if(jiraOk){
+    const msg=`File insight '${d.name}' as a Jira issue?`;
+    action=`<button class="btn btn-mini" onclick="if(confirm('${escJsAttr(msg)}'))post('/artifact-action',{kind:'insight',name:'${escJsAttr(d.name)}',action:'file-jira'})">File→Jira</button>`;
+  }
+  return `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0">
+    <span>${esc(d.name)}</span>
+    <span style="display:flex;gap:6px;align-items:center">
+      <button class="btn btn-mini" onclick="openText('${escJsAttr(d.name)}','/product-artifact?kind=insight&name=${encodeURIComponent(d.name)}',false)">View</button>
+      ${action}
+    </span></div>`;
+}
 function artifactGroup(title,rowsHtml){
   return rowsHtml?`<div class=meta style="margin-top:10px"><b>${esc(title)}</b></div>${rowsHtml}`:'';
 }
@@ -1453,7 +1497,7 @@ function renderArtifacts(){
   const insights=(S.insight_docs)||[];
   const prds=((S.prd)||[]).filter(r=>(r.stages||[]).some(s=>s.name==='draft'&&s.stamped_at));
   const surveys=((S.surveys)||[]).filter(s=>s.has_report);
-  const insightRows=insights.map(n=>artifactRow(n,`/product-artifact?kind=insight&name=${encodeURIComponent(n)}`,n)).join('');
+  const insightRows=insights.map(insightArtifactRow).join('');
   const prdRows=prds.map(r=>artifactRow(`PRD draft - ${r.run_id}`,`/prd-artifact?run=${encodeURIComponent(r.run_id)}&file=04-prd.md`,r.title||r.run_id)).join('');
   const surveyRows=surveys.map(s=>artifactRow(`Survey report - ${s.name}`,`/product-artifact?kind=survey&name=${encodeURIComponent(s.name)}`,s.name)).join('');
   const body=artifactGroup('Insights',insightRows)+artifactGroup('PRDs',prdRows)+artifactGroup('Survey reports',surveyRows);
@@ -3096,7 +3140,7 @@ document.addEventListener('click',e=>{
 });
 
 /* ── render pipeline ────────────────────────────────────────────────────── */
-function sig(r){return JSON.stringify([r.running,r.next_up,r.done,r.board,r.skipped,r.escalated,r.runlog,r.history,r.funnel,r.feature_builds,r.spend_history,r.branches,r.epics,r.qa_flows,r.qa_services,r.onboarding,r.prd,r.watches,r.surveys,r.insight_docs,r.workers]);}
+function sig(r){return JSON.stringify([r.running,r.next_up,r.done,r.board,r.skipped,r.escalated,r.runlog,r.history,r.funnel,r.feature_builds,r.spend_history,r.branches,r.epics,r.qa_flows,r.qa_services,r.onboarding,r.prd,r.watches,r.surveys,r.insight_docs,r.workers,r.publish_channels]);}
 function renderViews(){
   // Preserve column scroll positions across rebuilds.
   const colsEl=document.getElementById('queueCols');

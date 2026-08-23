@@ -49,6 +49,7 @@ from qa_teach import _bad_flows_dir_reason
 import qa_env
 import qa_teach
 import prd_flow
+import publish
 import secrets_env
 
 # ── path model ───────────────────────────────────────────────────────────────
@@ -3136,7 +3137,15 @@ _PRD_ARTIFACT_NAMES = {"01-intake.json", "02-research.json", "03-synthesis.json"
 # legal from every status except "intake" itself (already there) - appended
 # below, not listed per-entry. A "done" run keeps it explicitly: signing off is
 # not the end of a PRD's life, and reopening one was otherwise a dead end that
-# forced the PM to hand-edit the marker.
+# forced the PM to hand-edit the marker. "publish" is also "done"-only - the
+# marker's `status: done` IS the human sign-off publish_prd requires - but
+# unlike the others it carries a SECOND gate (publish.confluence must be
+# configured) that lives outside the status machine, so it is state-machine
+# legal here and filtered back out of what the UI actually offers
+# (prd_pipeline_state) when that config is missing. do_prd_action's own
+# legality check (`action not in _prd_next_actions(status)`) reads this table
+# unfiltered - a `publish` call with no confluence config is a config error,
+# never a "wrong status" one.
 _PRD_STATUS_ACTIONS = {
     "intake": ["run-intake"],
     "awaiting-scope-approval": ["approve-scope", "revise-intake"],
@@ -3145,7 +3154,7 @@ _PRD_STATUS_ACTIONS = {
     "draft": ["run-chain"],
     "review": ["run-chain"],
     "awaiting-signoff": ["approve-prd", "revise-draft", "revise-research", "revise-synthesis"],
-    "done": ["revise-intake"],
+    "done": ["publish", "revise-intake"],
 }
 
 
@@ -3154,6 +3163,29 @@ def _prd_next_actions(status: str) -> list:
     if status != "intake" and "revise-intake" not in actions:
         actions.append("revise-intake")
     return actions
+
+
+def _publish_channels() -> dict:
+    """{"confluence": bool, "jira": bool} - whether each publish.py channel is
+    configured well enough to publish through, read from the profile ONCE per
+    request (build_state/prd_pipeline_state/do_artifact_action each call this
+    rather than re-parsing config.yaml). Deliberately lenient - it only checks
+    the fields publish.py's own _channel() requires are present and non-blank,
+    never the base_url scheme or reachability; publish.py re-validates the
+    full shape before a single byte reaches the network. This is only so the
+    dashboard can hide a button that would otherwise fail immediately -
+    absent-unless-configured discipline for the UI, not a second gate."""
+    pub = _load_cfg().get("publish")
+    if not isinstance(pub, dict):
+        return {"confluence": False, "jira": False}
+
+    def _ok(name: str, required: tuple) -> bool:
+        block = pub.get(name)
+        return isinstance(block, dict) and all(
+            isinstance(block.get(k), str) and block.get(k).strip() for k in required)
+
+    return {"confluence": _ok("confluence", ("base_url", "space")),
+            "jira": _ok("jira", ("base_url", "project", "issue_type"))}
 
 
 def _prd_research_root() -> Path:
@@ -3168,6 +3200,7 @@ def prd_pipeline_state() -> list | None:
     root = _prd_research_root()
     if not root.is_dir():
         return None
+    channels = _publish_channels()
     runs = []
     for d in sorted(p for p in root.iterdir() if p.is_dir()):
         if not (d / prd_flow.MARKER_NAME).exists():
@@ -3185,10 +3218,27 @@ def prd_pipeline_state() -> list | None:
                   "ok": (stamps[name].get("evals", {}).get("ok") if name in stamps else None),
                   "stamped_at": (stamps[name].get("stamped_at") if name in stamps else None)}
                  for name in prd_flow.STAGES]
+        # The marker's published.confluence block ({page_id, url, at}), if
+        # publish.py has ever written one - None otherwise, never a partial
+        # shape, so the shell can test truthiness on `.url` alone.
+        pub_block = marker.get("published")
+        published = pub_block.get("confluence") if isinstance(pub_block, dict) else None
+        if not isinstance(published, dict):
+            published = None
+        # `publish` is state-machine-legal from "done" (_PRD_STATUS_ACTIONS)
+        # regardless of config, but the button is UI noise nobody can click
+        # successfully without publish.confluence configured - filtered out
+        # here, not in _prd_next_actions, so do_prd_action's own legality
+        # check still sees `publish` as a real "done"-only action and can
+        # tell "wrong status" apart from "not configured".
+        next_actions = _prd_next_actions(status)
+        if "publish" in next_actions and not channels["confluence"]:
+            next_actions = [a for a in next_actions if a != "publish"]
         runs.append({"run_id": marker.get("run_id", d.name), "title": marker.get("title", ""),
                     "status": status, "stages": stages, "tamper": tamper,
                     "pii_touch": bool(marker.get("pii_touch")),
-                    "next_actions": _prd_next_actions(status)})
+                    "published": published,
+                    "next_actions": next_actions})
     return runs
 
 
@@ -3251,6 +3301,23 @@ def do_prd_action(run: str, action: str, title: str = "", brief: str = "",
             subprocess.Popen(cmd, stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
                              start_new_session=True)
         return f"Stage '{stage}' launched for '{run}' - the card updates as it works (log: logs/{log.name})"
+    if action == "publish":
+        # Status already checked above (publish is "done"-only per
+        # _PRD_STATUS_ACTIONS) - this is the SECOND gate, config rather than
+        # status, which is why it gets its own clear message instead of
+        # folding into the "cannot '...' from status '...'" one above.
+        if not _publish_channels()["confluence"]:
+            return (f"cannot publish '{run}': publish.confluence is not configured "
+                    "in .autopilot/config.yaml")
+        script = str(ENGINE / "publish.py")
+        log = AP_STATE / "logs" / f"publish-prd-{run}.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("ab") as lf:
+            subprocess.Popen([sys.executable, script, "prd", str(REPO), run],
+                             stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
+                             start_new_session=True)
+        return (f"Publish launched for '{run}' - the card shows the page once "
+                f"the marker records it (log: logs/{log.name})")
     return f"unknown prd action '{action}'"
 
 
@@ -3381,18 +3448,60 @@ def surveys_state() -> list | None:
     return out
 
 
+def _confined(root: Path, rel: str) -> Path | None:
+    """`root / rel`, resolved, iff it stays under the RESOLVED `root` and is a
+    real file - else None. The exact resolve -> assert -> is_file template
+    every confined reader in this module hand-rolled separately
+    (read_prd_artifact, read_knowledge_doc, and formerly read_product_artifact
+    inline); factored out here so read_product_artifact and
+    do_artifact_action share one confinement check instead of two copies that
+    could drift. A symlink escape resolves outside `root` and fails the
+    startswith test; the trailing os.sep stops `root` itself (no separator)
+    from matching a root-adjacent sibling like "insights2/...")."""
+    resolved_root = root.resolve()
+    resolved = (root / rel).resolve()
+    if not str(resolved).startswith(str(resolved_root) + os.sep) or not resolved.is_file():
+        return None
+    return resolved
+
+
+_JIRA_KEY_TAIL_BYTES = 4096   # publish.py's _append_record always adds the record as the LAST line
+
+
+def _insight_jira_key(doc: Path) -> str | None:
+    """The Jira key recorded in a published insight doc (publish.py's
+    `<!-- published: jira KEY -->` line), or None if it was never filed.
+    Reads only the tail of the file - the record is always appended as the
+    doc's last line, so the last few KB are enough regardless of how long the
+    finding itself runs, and a large doc never costs a full read just to
+    paint a browser row."""
+    try:
+        size = doc.stat().st_size
+        with doc.open("rb") as f:
+            f.seek(max(0, size - _JIRA_KEY_TAIL_BYTES))
+            tail = f.read().decode("utf-8", "ignore")
+    except OSError:
+        return None
+    m = publish.JIRA_RECORD_RE.search(tail)
+    return m.group(1) if m else None
+
+
 def insight_docs_state() -> list | None:
-    """Deep space artifact browser's Insights group: stems of insights/*.md,
-    filtered to _ARTIFACT_NAME_RE for the same list-what-you-serve reason
-    surveys_state filters directory names. None (key omitted from
-    build_state) unless <repo>/insights/ exists."""
+    """Deep space artifact browser's Insights group: one entry per
+    insights/*.md, filtered to _ARTIFACT_NAME_RE for the same
+    list-what-you-serve reason surveys_state filters directory names. Each
+    entry carries `jira_key` (None unless publish.py has filed it) so the
+    browser can show the recorded key instead of a File→Jira button once one
+    exists. None (key omitted from build_state) unless <repo>/insights/
+    exists."""
     root = _insights_root()
     if not root.is_dir():
         return None
     try:
-        return sorted(p.stem for p in root.glob("*.md") if _ARTIFACT_NAME_RE.match(p.stem))
+        stems = sorted(p.stem for p in root.glob("*.md") if _ARTIFACT_NAME_RE.match(p.stem))
     except OSError:
         return []
+    return [{"name": s, "jira_key": _insight_jira_key(root / f"{s}.md")} for s in stems]
 
 
 # kind -> (root dir, relative-path template) for read_product_artifact. The
@@ -3405,18 +3514,44 @@ def read_product_artifact(kind: str, name: str) -> str | None:
     """Confined GET for the product artifact browser - insights/<name>.md or
     surveys/<name>/report.md. Same template as read_prd_artifact/
     read_knowledge_doc: shape-check `kind` (fixed allowlist) and `name`
-    (_ARTIFACT_NAME_RE), then resolve -> assert the RESOLVED path stays under
-    the RESOLVED kind-scoped root -> is_file() (catches a symlink escape)."""
+    (_ARTIFACT_NAME_RE), then _confined() resolves -> asserts the RESOLVED
+    path stays under the RESOLVED kind-scoped root -> is_file()."""
     spec = _ARTIFACT_KINDS.get(kind)
     if spec is None or not isinstance(name, str) or not _ARTIFACT_NAME_RE.match(name):
         return None
     root_fn, rel_tmpl = spec
-    root = root_fn()
-    resolved_root = root.resolve()
-    resolved = (root / rel_tmpl.format(name)).resolve()
-    if not str(resolved).startswith(str(resolved_root) + os.sep) or not resolved.is_file():
+    resolved = _confined(root_fn(), rel_tmpl.format(name))
+    if resolved is None:
         return None
     return resolved.read_text(errors="ignore")
+
+
+def do_artifact_action(kind: str, name: str, action: str) -> str:
+    """Drive publish.py's `finding` path from the artifact browser - the
+    Jira-filing sibling of do_prd_action's `publish`. Only insight docs file
+    to Jira (surveys have no such channel), and `name` gets the exact same
+    confinement read_product_artifact uses (_ARTIFACT_NAME_RE, then
+    _confined() under insights/ - never a filesystem path taken on faith)."""
+    if action != "file-jira":
+        return f"unknown artifact action '{action}'"
+    if kind != "insight":
+        return f"cannot file-jira for kind '{kind}' - only insight docs file to Jira"
+    if not isinstance(name, str) or not _ARTIFACT_NAME_RE.match(name):
+        return "invalid artifact name"
+    resolved = _confined(_insights_root(), f"{name}.md")
+    if resolved is None:
+        return f"no insight doc named '{name}'"
+    if not _publish_channels()["jira"]:
+        return "cannot file to Jira: publish.jira is not configured in .autopilot/config.yaml"
+    script = str(ENGINE / "publish.py")
+    log = AP_STATE / "logs" / f"publish-finding-{name}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("ab") as lf:
+        subprocess.Popen([sys.executable, script, "finding", str(REPO), name],
+                         stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
+                         start_new_session=True)
+    return (f"Filing '{name}' to Jira - the browser shows the key once it's "
+            f"recorded (log: logs/{log.name})")
 
 
 def load_calibration_candidates() -> list:
@@ -4369,6 +4504,12 @@ def build_state() -> dict:
     if workers is not None:
         rt["workers"] = workers
     rt["onboarding"] = onboarding_state()
+    # Always present (unlike the absent-unless-configured trio above) - two
+    # cheap booleans, never a secret, that the PRD band and artifact browser
+    # both need to decide whether to render a Publish/File→Jira button at
+    # all. A target with neither channel configured still gets these keys,
+    # just both false.
+    rt["publish_channels"] = _publish_channels()
     return rt
 
 
@@ -4650,6 +4791,12 @@ class Handler(BaseHTTPRequestHandler):
                                     data.get("brief", [""])[0],
                                     ack_pii=(data.get("ack_pii", [""])[0] == "1"),
                                     pm=data.get("pm", [""])[0])
+            elif path == "/artifact-action":
+                name = (data.get("name", [""])[0]).strip()
+                if not name:
+                    self._send(b'{"ok":false,"msg":"missing artifact name"}', "application/json", 400); return
+                msg = do_artifact_action((data.get("kind", [""])[0]).strip(), name,
+                                        (data.get("action", [""])[0]).strip())
             elif path == "/calibration-action":
                 if not tid:
                     self._send(b'{"ok":false,"msg":"missing candidate id"}', "application/json", 400); return

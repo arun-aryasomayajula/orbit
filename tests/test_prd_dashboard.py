@@ -613,7 +613,8 @@ def test_insight_docs_state_absent_without_insights_dir_present_with_stems(cc):
     (root / "funnel-drop.md").write_text("# Funnel drop\n")
 
     docs = cc.insight_docs_state()
-    assert docs == ["funnel-drop", "wow-signup"]
+    assert docs == [{"name": "funnel-drop", "jira_key": None},
+                    {"name": "wow-signup", "jira_key": None}]
     s = cc.build_state()
     assert s["insight_docs"] == docs
 
@@ -1078,3 +1079,165 @@ def test_watches_bad_row_rejected_by_config_py_and_rolled_back(cc):
     assert msg.startswith("Rejected")
     assert "watches[0].name" in msg
     assert cfg_path.read_text() == before
+
+
+# ── publish (Task 6: dashboard publish surfaces) ───────────────────────────
+# do_prd_action's `publish` (legal only from status done, second-gated on
+# publish.confluence being configured) and do_artifact_action's `file-jira`
+# (insight-only, gated on publish.jira, same confinement read_product_artifact
+# uses) - plus the state surfaces the shell reads to decide what to render:
+# prd_pipeline_state's `published` + filtered `next_actions`,
+# insight_docs_state's `jira_key`.
+
+CONFLUENCE_CFG = {"base_url": "https://confluence.example.com", "space": "PROD"}
+JIRA_CFG = {"base_url": "https://jira.example.com", "project": "PROD", "issue_type": "Task"}
+
+
+def _write_publish_config(cc, confluence=None, jira=None):
+    import yaml
+    cfg_path = Path(cc.AP_HOME) / "config.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text()) or {}
+    pub = {}
+    if confluence is not None:
+        pub["confluence"] = confluence
+    if jira is not None:
+        pub["jira"] = jira
+    cfg["publish"] = pub
+    cfg_path.write_text(yaml.safe_dump(cfg))
+
+
+def _done_run(cc, run="r1"):
+    cc.prd_flow.new(str(cc.REPO), run, "My PRD")
+    marker = cc.prd_flow.load_marker(str(cc.REPO), run)
+    marker["status"] = "done"
+    cc.prd_flow._write_marker(str(cc.REPO), run, marker)
+
+
+def test_publish_channels_absent_by_default(cc):
+    assert cc._publish_channels() == {"confluence": False, "jira": False}
+    s = cc.build_state()
+    assert s["publish_channels"] == {"confluence": False, "jira": False}
+
+
+def test_publish_channels_true_only_when_all_required_fields_present(cc):
+    _write_publish_config(cc, confluence={"base_url": "https://x"})   # missing space
+    assert cc._publish_channels()["confluence"] is False
+    _write_publish_config(cc, confluence=CONFLUENCE_CFG, jira=JIRA_CFG)
+    assert cc._publish_channels() == {"confluence": True, "jira": True}
+
+
+def test_publish_action_illegal_outside_done(cc):
+    cc.prd_flow.new(str(cc.REPO), "r1", "My PRD")   # status stays "intake"
+    _write_publish_config(cc, confluence=CONFLUENCE_CFG)
+    msg = cc.do_prd_action("r1", "publish")
+    assert "cannot" in msg.lower()
+    assert "status" in msg.lower()
+
+
+def test_publish_action_unconfigured_gives_clear_message_and_no_popen(cc, monkeypatch):
+    _done_run(cc)
+    calls = []
+    monkeypatch.setattr(cc.subprocess, "Popen", lambda *a, **kw: calls.append((a, kw)))
+    msg = cc.do_prd_action("r1", "publish")
+    assert "publish.confluence" in msg
+    assert "not configured" in msg
+    assert calls == []
+
+
+def test_publish_action_spawns_detached_popen_with_logging(cc, monkeypatch):
+    _done_run(cc)
+    _write_publish_config(cc, confluence=CONFLUENCE_CFG)
+    calls = []
+    monkeypatch.setattr(cc.subprocess, "Popen", lambda cmd, **kw: calls.append((cmd, kw)))
+    msg = cc.do_prd_action("r1", "publish")
+    assert "launched" in msg.lower()
+    assert len(calls) == 1
+    cmd, kwargs = calls[0]
+    assert cmd == [cc.sys.executable, str(Path(cc.ENGINE) / "publish.py"), "prd", str(cc.REPO), "r1"]
+    assert kwargs.get("start_new_session") is True
+    log = Path(cc.AP_STATE) / "logs" / "publish-prd-r1.log"
+    assert f"logs/{log.name}" in msg
+
+
+def test_next_actions_hides_publish_button_when_confluence_unconfigured(cc):
+    _done_run(cc)
+    run = cc.prd_pipeline_state()[0]
+    assert "publish" not in run["next_actions"]
+    assert run["published"] is None
+
+
+def test_next_actions_shows_publish_button_when_confluence_configured(cc):
+    _done_run(cc)
+    _write_publish_config(cc, confluence=CONFLUENCE_CFG)
+    run = cc.prd_pipeline_state()[0]
+    assert "publish" in run["next_actions"]
+
+
+def test_published_url_surfaced_from_seeded_marker(cc):
+    _done_run(cc)
+    marker = cc.prd_flow.load_marker(str(cc.REPO), "r1")
+    marker["published"] = {"confluence": {"page_id": "123",
+                                          "url": "https://confluence.example.com/x",
+                                          "at": "2026-08-22T00:00:00Z"}}
+    cc.prd_flow._write_marker(str(cc.REPO), "r1", marker)
+    run = cc.prd_pipeline_state()[0]
+    assert run["published"] == {"page_id": "123", "url": "https://confluence.example.com/x",
+                                "at": "2026-08-22T00:00:00Z"}
+    s = cc.build_state()
+    assert s["prd"][0]["published"]["url"] == "https://confluence.example.com/x"
+
+
+# ── /artifact-action: file-jira ─────────────────────────────────────────────
+
+def test_artifact_action_file_jira_unconfigured_gives_message_no_popen(cc, monkeypatch):
+    ir = Path(cc.REPO) / "insights"
+    ir.mkdir()
+    (ir / "wow-signup.md").write_text("# WoW signup\n## Answer\nit went up\n## Basis\n- S1: data\n")
+    calls = []
+    monkeypatch.setattr(cc.subprocess, "Popen", lambda *a, **kw: calls.append((a, kw)))
+    msg = cc.do_artifact_action("insight", "wow-signup", "file-jira")
+    assert "publish.jira" in msg
+    assert "not configured" in msg
+    assert calls == []
+
+
+def test_artifact_action_file_jira_spawns_detached_popen_with_logging(cc, monkeypatch):
+    ir = Path(cc.REPO) / "insights"
+    ir.mkdir()
+    (ir / "wow-signup.md").write_text("# WoW signup\n## Answer\nit went up\n## Basis\n- S1: data\n")
+    _write_publish_config(cc, jira=JIRA_CFG)
+    calls = []
+    monkeypatch.setattr(cc.subprocess, "Popen", lambda cmd, **kw: calls.append((cmd, kw)))
+    msg = cc.do_artifact_action("insight", "wow-signup", "file-jira")
+    assert "filing" in msg.lower()
+    assert len(calls) == 1
+    cmd, kwargs = calls[0]
+    assert cmd == [cc.sys.executable, str(Path(cc.ENGINE) / "publish.py"), "finding",
+                   str(cc.REPO), "wow-signup"]
+    assert kwargs.get("start_new_session") is True
+
+
+def test_artifact_action_rejects_traversal_and_unknown_kind(cc):
+    ir = Path(cc.REPO) / "insights"
+    ir.mkdir()
+    (ir / "real.md").write_text("# Real\n")
+    _write_publish_config(cc, jira=JIRA_CFG)
+
+    assert "invalid" in cc.do_artifact_action("insight", "../secret", "file-jira").lower()
+    assert "invalid" in cc.do_artifact_action("insight", "../../etc/passwd", "file-jira").lower()
+    assert "no insight doc" in cc.do_artifact_action("insight", "not-real", "file-jira").lower()
+    assert "only insight docs" in cc.do_artifact_action("survey", "real", "file-jira").lower()
+    assert "unknown artifact action" in cc.do_artifact_action("insight", "real", "bogus-action").lower()
+
+
+def test_insight_docs_state_surfaces_jira_key_when_record_line_exists(cc):
+    ir = Path(cc.REPO) / "insights"
+    ir.mkdir()
+    (ir / "wow-signup.md").write_text(
+        "# WoW signup\n## Answer\nit went up\n## Basis\n- S1: data\n\n"
+        "<!-- published: jira PROD-42 -->\n")
+    (ir / "unfiled.md").write_text("# Unfiled\n")
+
+    docs = {d["name"]: d["jira_key"] for d in cc.insight_docs_state()}
+    assert docs["wow-signup"] == "PROD-42"
+    assert docs["unfiled"] is None
