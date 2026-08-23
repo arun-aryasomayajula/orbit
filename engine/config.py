@@ -97,6 +97,17 @@ def needs(target):
                 seen.append(n)
     print("\n".join(seen))
 
+def _is_valid_publish_base_url(url):
+    """Check if base_url matches publisher rules: https anywhere, or http to loopback only."""
+    if url.startswith("https://"):
+        return True
+    if url.startswith("http://"):
+        # Extract host from http://host... (before /, :, or end of string)
+        rest = url[7:]  # skip "http://"
+        host = rest.split("/")[0].split(":")[0]
+        return host in ("127.0.0.1", "localhost", "::1")
+    return False
+
 def validate(target):
     cfg, raw = load(target)
     errs = []
@@ -299,8 +310,8 @@ def validate(target):
                             if not isinstance(val, str) or not val.strip():
                                 errs.append(f"publish.{ch}.{field} must be a non-empty string, got {val!r}")
                         base_url = block.get("base_url")
-                        if isinstance(base_url, str) and base_url.strip() and not (base_url.startswith("http://") or base_url.startswith("https://")):
-                            errs.append(f"publish.confluence.base_url must start with http:// or https://, got {base_url!r}")
+                        if isinstance(base_url, str) and base_url.strip() and not _is_valid_publish_base_url(base_url):
+                            errs.append(f"publish.confluence.base_url must be https://, or http:// to loopback (127.0.0.1/localhost/::1), got {base_url!r}")
                         if "parent_id" in block:
                             pid = block["parent_id"]
                             if pid is not None and not isinstance(pid, (str, int)):
@@ -313,8 +324,8 @@ def validate(target):
                             if not isinstance(val, str) or not val.strip():
                                 errs.append(f"publish.{ch}.{field} must be a non-empty string, got {val!r}")
                         base_url = block.get("base_url")
-                        if isinstance(base_url, str) and base_url.strip() and not (base_url.startswith("http://") or base_url.startswith("https://")):
-                            errs.append(f"publish.jira.base_url must start with http:// or https://, got {base_url!r}")
+                        if isinstance(base_url, str) and base_url.strip() and not _is_valid_publish_base_url(base_url):
+                            errs.append(f"publish.jira.base_url must be https://, or http:// to loopback (127.0.0.1/localhost/::1), got {base_url!r}")
     if errs:
         print("\n".join("  ✗ " + e for e in errs)); sys.exit(1)
     print("  ✓ config valid")

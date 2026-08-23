@@ -146,8 +146,9 @@ sources: [backlog, metric_watch]
 
 # Publishing approved PRDs to Confluence and grounded insights to Jira
 # (optional). Credentials: .autopilot/.secrets.env with ATLASSIAN_EMAIL and
-# ATLASSIAN_API_TOKEN (0600, gitignored). See config/schema.yaml for the
-# full publish: block reference.
+# ATLASSIAN_API_TOKEN (0600, gitignored). base_url must be https://, or
+# http:// only to loopback (127.0.0.1/localhost/::1). See config/schema.yaml
+# for the full publish: block reference.
 # publish:
 #   confluence:
 #     base_url: "https://<org>.atlassian.net"

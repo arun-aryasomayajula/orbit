@@ -232,13 +232,14 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
 # publish to a Confluence page, grounded insights file as Jira issues. Credentials
 # live in .autopilot/.secrets.env as ATLASSIAN_EMAIL and ATLASSIAN_API_TOKEN
 # (0600, never committed). The tokens never appear in logs or URLs.
+# base_url must be https://, or http:// only to loopback (127.0.0.1/localhost/::1).
 # publish:
 #   confluence:
-#     base_url: "https://<org>.atlassian.net"   # Confluence REST endpoint
+#     base_url: "https://<org>.atlassian.net"   # REST endpoint (https or loopback http)
 #     space: "PROD"                              # space key where pages land
 #     parent_id: null                            # optional: page id to nest under
 #   jira:
-#     base_url: "https://<org>.atlassian.net"   # Jira REST endpoint
+#     base_url: "https://<org>.atlassian.net"   # REST endpoint (https or loopback http)
 #     project: "ORB"                             # project key
 #     issue_type: "Task"                         # issue type name
 
