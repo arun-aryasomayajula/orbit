@@ -55,6 +55,11 @@ def test_research_source_kind_must_be_known():
     bad = dict(GOOD_RESEARCH, sources=[{"id": "S1", "kind": "unknown_kind", "ref": "q", "date": "2026-08-21", "summary": "x"}])
     assert any("kind" in e for e in prd_evals.check_research(bad))
 
+def test_research_accepts_figma_kind():
+    good = dict(GOOD_RESEARCH, sources=[{"id": "S1", "kind": "figma",
+                "ref": "https://figma.com/file/abc/node-id=1:2", "date": "2026-08-22", "summary": "pilot screen frame"}])
+    assert prd_evals.check_research(good) == []
+
 def test_research_coverage_gaps_must_be_list():
     bad = dict(GOOD_RESEARCH, coverage_gaps="not a list")
     assert any("coverage_gaps" in e for e in prd_evals.check_research(bad))

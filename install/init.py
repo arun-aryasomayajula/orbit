@@ -137,6 +137,12 @@ sources: [backlog, metric_watch]
 #     tools: [metaql_list_verticals, metaql_list_projects, metaql_list_use_cases,
 #             metaql_list_explores, metaql_get_explore_fields, metaql_generate_query,
 #             metaql_execute_query]
+#   figma:                            # once declared, orbit-prd-research and
+#     transport: stdio                # orbit-design-review cite the frames
+#     command: npx                    # they open as typed figma-kind research
+#     args: ["-y", "figma-mcp"]       # sources instead of abstaining
+#     env_passthrough: [FIGMA_TOKEN]
+#     tools: "*"
 
 branch_prefix: "orbit-product"
 commit_trailer: ""

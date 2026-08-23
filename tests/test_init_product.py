@@ -183,3 +183,16 @@ def test_doctor_warns_on_missing_mcp_token_env(tmp_path):
     r = subprocess.run([sys.executable, str(ORBIT / "engine" / "doctor.py"), str(tmp_path)],
                        capture_output=True, text=True, env=env)
     assert "METAQL_TOKEN" in r.stdout
+
+def test_figma_mcp_stanza_scaffolded_in_product_template():
+    """install/init.py's PRODUCT config template's commented mcp: example must
+    show a figma stanza alongside metaql, so a workspace operator sees how to
+    declare one without reading the schema doc separately."""
+    src = (ORBIT / "install" / "init.py").read_text()
+    assert "#   figma:" in src
+    assert '#     args: ["-y", "figma-mcp"]' in src
+
+def test_figma_sources_paragraph_in_prd_research_skill():
+    text = (ORBIT / "skills" / "orbit-prd-research.md").read_text()
+    assert "figma" in text.lower()
+    assert "kind: figma" in text

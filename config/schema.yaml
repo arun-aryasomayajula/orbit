@@ -201,6 +201,7 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
 #     args: ["-y", "figma-mcp"]
 #     env_passthrough: [FIGMA_TOKEN] # env var names forwarded to the server process as ${VAR}
 #     tools: "*"
+#   # once declared, orbit-prd-research and orbit-design-review cite the frames they open as typed `figma`-kind research sources instead of abstaining.
 
 # --- metric watches (optional, product workspaces) -----------------------------
 # Standing questions re-filed on a cadence via the `metric_watch` signal adapter
