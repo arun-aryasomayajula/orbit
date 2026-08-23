@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Publish approved artifacts out of an Orbit product workspace: an approved
-PRD to a Confluence page (Jira findings land next).
+PRD to a Confluence page, a lint-clean finding to a Jira issue.
 
 REST, not MCP (spec decision 10 + the M5 ledger ruling): the office network
 that these workspaces run on blocks mcp.atlassian.com, and the PM's tokens
@@ -13,10 +13,14 @@ stderr either, because an Atlassian error body can echo the request that
 carried the Authorization header. HTTP failures surface as the status code
 and nothing else.
 
-Publishing is GATED and IDEMPOTENT, never a duplicate-maker: a PRD publishes
-only from marker `status: done` (the human sign-off gate in prd_flow), and
-re-publishing UPDATES the page recorded in the marker's `published.confluence`
-block.
+Publishing is GATED and IDEMPOTENT, never a duplicate-maker:
+  - a PRD publishes only from marker `status: done` (the human sign-off gate
+    in prd_flow), and re-publishing UPDATES the page recorded in the marker's
+    `published.confluence` block;
+  - a finding publishes only if it passes insight_lint on its own, and
+    re-publishing NO-OPS, printing the key recorded in the doc's
+    `<!-- published: jira KEY -->` line (per the ledger ruling: commenting on
+    every re-run would spam the issue).
 
 Marker writes: this module owns the marker's `published` sub-block and
 nothing else. It takes a lock next to the marker, re-reads it, sets that one
@@ -31,6 +35,7 @@ Config: the profile's `publish:` block.
 
 CLI:
   publish.py prd <target> <run>              -> prints the page url
+  publish.py finding <target> <insight-stem> -> prints the issue key
 Exit codes: 0 ok, 2 missing/malformed config, 3 missing secrets,
 4 unapproved or ungated artifact, 5 HTTP failure (status code only).
 """
@@ -43,8 +48,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import insight_lint
 import locks
 import prd_flow
 import secrets_env
@@ -53,6 +60,14 @@ HTTP_TIMEOUT = 30
 LOCK_TIMEOUT = 30
 EMAIL_VAR = "ATLASSIAN_EMAIL"
 TOKEN_VAR = "ATLASSIAN_API_TOKEN"
+# The idempotence record appended to a published finding. Deliberately an HTML
+# comment: insight_lint reads structure (title, ## Answer, ## Basis), citations
+# and the TBD/TODO markers - none of which an HTML comment can trip - so a
+# published doc still passes the gate that let it publish (pinned in tests).
+JIRA_RECORD = "<!-- published: jira {key} -->"
+JIRA_RECORD_RE = re.compile(r"<!--\s*published:\s*jira\s+([A-Za-z][A-Za-z0-9_]*-\d+)\s*-->")
+BASIS_EXCERPT_LINES = 12
+BASIS_EXCERPT_CHARS = 1200
 
 
 class PublishError(RuntimeError):
@@ -303,6 +318,23 @@ def _channel(pub, name, required):
     return block, out
 
 
+def _repo_root(target):
+    """Where the workspace's artifacts live. `repo:` defaults to the target
+    itself (config.py's DEFAULTS), which is what every product workspace
+    uses; honoured here so a split target/repo layout still finds insights/."""
+    cfg_path = os.path.join(target, ".autopilot", "config.yaml")
+    repo = "."
+    if os.path.exists(cfg_path):
+        import yaml
+        try:
+            raw = yaml.safe_load(open(cfg_path)) or {}
+            if isinstance(raw, dict) and isinstance(raw.get("repo"), str):
+                repo = raw["repo"]
+        except yaml.YAMLError:
+            pass
+    return os.path.abspath(os.path.join(target, repo))
+
+
 def _auth(target):
     """(email, token) for Atlassian basic auth. The secrets file wins over an
     inherited environment variable - same precedence prd_flow uses for stage
@@ -493,6 +525,93 @@ def publish_prd(target, run):
 
 
 # --------------------------------------------------------------------------
+# Jira
+# --------------------------------------------------------------------------
+
+def _section(text, heading):
+    """The body of a `## <heading>` section, up to the next `## `."""
+    marker = f"\n## {heading}"
+    body = ("\n" + text).split(marker, 1)
+    if len(body) < 2:
+        return ""
+    rest = body[1].split("\n", 1)[1] if "\n" in body[1] else ""
+    return rest.split("\n## ", 1)[0].strip()
+
+
+def _doc_title(text):
+    for line in text.split("\n"):
+        if line.startswith("# "):
+            return line[2:].strip()
+    return ""
+
+
+def _basis_excerpt(text):
+    basis = _section(text, "Basis")
+    lines = [ln for ln in basis.split("\n") if ln.strip()][:BASIS_EXCERPT_LINES]
+    excerpt = "\n".join(lines)
+    if len(excerpt) > BASIS_EXCERPT_CHARS:
+        excerpt = excerpt[:BASIS_EXCERPT_CHARS].rstrip() + " ..."
+    return excerpt
+
+
+def _description(text, rel_path):
+    """The issue body: the finding's own Answer, enough Basis to judge it, and
+    where the full doc lives. Evidence travels with the ticket - a Jira issue
+    that just says "we found something" is the failure mode this avoids."""
+    return "\n".join([
+        _section(text, "Answer") or "(no Answer section)",
+        "",
+        "Basis (excerpt):",
+        _basis_excerpt(text) or "(no Basis lines)",
+        "",
+        f"Full finding: {rel_path} (Orbit workspace)",
+    ])
+
+
+def publish_finding(target, stem):
+    """File insights/<stem>.md as a Jira issue; return (key, created).
+
+    The gate is insight_lint on this one doc: the grounding contract's
+    mechanical half, run solo so a clean finding is not held back by an
+    unrelated doc failing in the same workspace. Re-running NO-OPS with the
+    recorded key (ledger ruling): the doc carries
+    `<!-- published: jira KEY -->` after the first file, and commenting on
+    every re-run would spam the issue."""
+    pub = _load_publish_cfg(target)
+    _block, cfg = _channel(pub, "jira", ("base_url", "project", "issue_type"))
+    rel_path = os.path.join("insights", f"{stem}.md")
+    doc = Path(_repo_root(target)) / rel_path
+    if not doc.is_file():
+        raise GateError(f"no insight doc at {doc}")
+    text = doc.read_text(encoding="utf-8")
+
+    already = JIRA_RECORD_RE.search(text)
+    if already:
+        return already.group(1), False
+
+    errs = insight_lint.lint_file(doc)
+    if errs:
+        raise GateError("insight_lint failed - a finding files only once it is "
+                        "grounded:\n" + "\n".join(f"  x {e}" for e in errs))
+
+    summary = _doc_title(text) or stem
+    payload = {"fields": {
+        "project": {"key": cfg["project"]},
+        "issuetype": {"name": cfg["issue_type"]},
+        "summary": summary,
+        "description": _description(text, rel_path),
+    }}
+    auth = _auth(target)
+    resp = _request("POST", f"{cfg['base_url']}/rest/api/2/issue", auth, payload)
+    key = resp.get("key")
+    if not key:
+        raise HttpError("jira create returned no issue key")
+    record = JIRA_RECORD.format(key=key)
+    doc.write_text(text.rstrip("\n") + "\n\n" + record + "\n", encoding="utf-8")
+    return key, True
+
+
+# --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 
@@ -502,7 +621,16 @@ def _cli_prd(rest):
     return publish_prd(rest[0], rest[1])
 
 
-CMDS = {"prd": _cli_prd}
+def _cli_finding(rest):
+    if len(rest) < 2:
+        raise ConfigError("usage: publish.py finding <target> <insight-stem>")
+    key, created = publish_finding(rest[0], rest[1])
+    if not created:
+        print(f"already filed as {key} - no new issue", file=sys.stderr)
+    return key
+
+
+CMDS = {"prd": _cli_prd, "finding": _cli_finding}
 
 
 def main(argv):

@@ -1,5 +1,5 @@
-"""engine/publish.py: markdown->storage rendering, and the Confluence
-adapter driven against a local stub server (never the network).
+"""engine/publish.py: markdown->storage rendering, and the two REST adapters
+driven against local stub servers (never the network).
 
 The stub deliberately answers errors with a body containing the token and a
 marker string, so the "no bodies, no tokens in output" contract is pinned by
@@ -19,12 +19,34 @@ import yaml
 
 ORBIT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ORBIT / "engine"))
+import insight_lint  # noqa: E402
 import prd_flow  # noqa: E402
 import publish  # noqa: E402
 
 EMAIL = "pm@example.com"
 TOKEN = "tok-super-secret"
 SECRET_BODY = "SECRET-BODY-MARKER"
+
+GOOD_INSIGHT = """# Checkout drop-off is card OTP
+
+## Answer
+
+Card OTP failures explain 62% (S1) of checkout drop-off, worth INR 4.1cr a
+month (S2).
+
+## Basis
+
+- S1: metaql checkout_funnel, 2026-08-01..2026-08-15
+- S2: finance export, same window
+"""
+
+BAD_INSIGHT = """# Half a finding
+
+## Answer
+
+Something happened.
+"""
+
 
 # --------------------------------------------------------------------------
 # render_storage
@@ -140,6 +162,12 @@ class _Handler(BaseHTTPRequestHandler):
             self.server.pages[pid] = {"version": 1, "body": json.loads(raw)}
             return self._send(200, {"id": pid, "_links": {
                 "base": self.server.base_url, "webui": f"/spaces/PS/pages/{pid}"}})
+        if self.path == "/rest/api/2/issue":
+            self.server.issue_seq += 1
+            key = f"ORB-{self.server.issue_seq}"
+            self.server.issues[key] = json.loads(raw)
+            return self._send(201, {"id": "1", "key": key,
+                                    "self": f"{self.server.base_url}/rest/api/2/issue/1"})
         self._send(404, {"message": "no such endpoint"})
 
     def do_GET(self):
@@ -169,8 +197,8 @@ class _Handler(BaseHTTPRequestHandler):
 @pytest.fixture
 def stub():
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-    srv.requests, srv.pages = [], {}
-    srv.page_seq = 0
+    srv.requests, srv.pages, srv.issues = [], {}, {}
+    srv.page_seq = srv.issue_seq = 0
     srv.fail_status = None
     srv.base_url = f"http://127.0.0.1:{srv.server_address[1]}"
     # poll fast: serve_forever's 0.5s default is pure teardown latency, paid
@@ -200,10 +228,13 @@ def _ws(tmp_path, stub=None, publish_block=True, secrets=True):
     ws = tmp_path / "workspace"
     (ws / ".autopilot").mkdir(parents=True)
     (ws / "research").mkdir()
+    (ws / "insights").mkdir()
     cfg = {"repo": "."}
     if publish_block:
         cfg["publish"] = {
             "confluence": {"base_url": stub.base_url, "space": "PS"},
+            "jira": {"base_url": stub.base_url, "project": "ORB",
+                     "issue_type": "Task"},
         }
     (ws / ".autopilot" / "config.yaml").write_text(yaml.safe_dump(cfg))
     if secrets:
@@ -412,6 +443,103 @@ def test_publish_writes_only_the_published_block(tmp_path, stub):
 def test_url_in_errors_never_carries_pasted_credentials():
     assert publish._safe_url("https://u:p@wiki.example.com/rest/api/content") == \
         "https://wiki.example.com/rest/api/content"
+
+
+# --------------------------------------------------------------------------
+# Jira
+# --------------------------------------------------------------------------
+
+def _insight(ws, stem="checkout-otp", text=GOOD_INSIGHT):
+    p = ws / "insights" / f"{stem}.md"
+    p.write_text(text)
+    return p
+
+
+def test_finding_files_an_issue_with_answer_basis_and_path(tmp_path, stub):
+    ws = _ws(tmp_path, stub)
+    doc = _insight(ws)
+    key, created = publish.publish_finding(str(ws), "checkout-otp")
+    assert (key, created) == ("ORB-1", True)
+
+    posts = [r for r in stub.requests if r["method"] == "POST"]
+    assert len(posts) == 1 and posts[0]["path"] == "/rest/api/2/issue"
+    fields = posts[0]["json"]["fields"]
+    assert fields["project"] == {"key": "ORB"}
+    assert fields["issuetype"] == {"name": "Task"}
+    assert fields["summary"] == "Checkout drop-off is card OTP"
+    assert "62% (S1)" in fields["description"]
+    assert "S1: metaql checkout_funnel" in fields["description"]
+    assert "insights/checkout-otp.md" in fields["description"]
+    assert doc.read_text().rstrip().endswith("<!-- published: jira ORB-1 -->")
+
+
+def test_the_record_comment_keeps_the_doc_lint_clean(tmp_path, stub):
+    """The gate that let the finding out must still pass afterwards, or the
+    next cycle's insight_lint run fails on a doc publishing itself broke."""
+    ws = _ws(tmp_path, stub)
+    doc = _insight(ws)
+    assert insight_lint.lint_file(doc) == []
+    publish.publish_finding(str(ws), "checkout-otp")
+    assert insight_lint.lint_file(doc) == []
+
+
+def test_refiling_no_ops_and_prints_the_recorded_key(tmp_path, stub, capsys):
+    ws = _ws(tmp_path, stub)
+    _insight(ws)
+    publish.publish_finding(str(ws), "checkout-otp")
+    before = len(stub.requests)
+
+    assert publish.main(["finding", str(ws), "checkout-otp"]) == 0
+    cap = capsys.readouterr()
+    assert cap.out.strip() == "ORB-1"
+    assert "already filed" in cap.err
+    assert len(stub.requests) == before
+    _assert_no_secrets(cap)
+
+
+def test_lint_failure_blocks_the_filing(tmp_path, stub, capsys):
+    ws = _ws(tmp_path, stub)
+    doc = _insight(ws, stem="half", text=BAD_INSIGHT)
+    assert publish.main(["finding", str(ws), "half"]) == 4
+    err = capsys.readouterr().err
+    assert "insight_lint failed" in err and "Basis" in err
+    assert not stub.requests
+    assert "published: jira" not in doc.read_text()
+
+
+def test_missing_insight_doc_exits_4(tmp_path, stub, capsys):
+    ws = _ws(tmp_path, stub)
+    assert publish.main(["finding", str(ws), "ghost"]) == 4
+    assert "no insight doc" in capsys.readouterr().err
+    assert not stub.requests
+
+
+def test_finding_http_failure_exits_5_and_leaves_no_record(tmp_path, stub, capsys):
+    ws = _ws(tmp_path, stub)
+    doc = _insight(ws)
+    stub.fail_status = 502
+    assert publish.main(["finding", str(ws), "checkout-otp"]) == 5
+    cap = capsys.readouterr()
+    assert "HTTP 502" in cap.err
+    _assert_no_secrets(cap)
+    assert "published: jira" not in doc.read_text()
+
+
+def test_finding_missing_secrets_exits_3(tmp_path, stub, capsys):
+    ws = _ws(tmp_path, stub, secrets=False)
+    _insight(ws)
+    assert publish.main(["finding", str(ws), "checkout-otp"]) == 3
+    assert publish.TOKEN_VAR in capsys.readouterr().err
+    assert not stub.requests
+
+
+def test_finding_success_prints_only_the_key(tmp_path, stub, capsys):
+    ws = _ws(tmp_path, stub)
+    _insight(ws)
+    assert publish.main(["finding", str(ws), "checkout-otp"]) == 0
+    cap = capsys.readouterr()
+    assert cap.out.strip() == "ORB-1"
+    _assert_no_secrets(cap)
 
 
 def test_no_command_prints_usage_and_exits_2(capsys):
