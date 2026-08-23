@@ -706,12 +706,6 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
         <button class="btn btn-go btn-mini" id="qaDevStartBtn" onclick="qaServicesStart()">▶ Start app</button>
         <button class="btn btn-stop btn-mini" id="qaDevStopBtn" style="display:none" onclick="qaServicesStop()">■ Stop app</button>
       </div>
-      <!-- Workers strip (Task 7) - one row per $AP_STATE/workers/<slot>.pid,
-           concurrency's per-slot answer to "what is actually running right
-           now". Independent of qa.services: renders whenever build_state
-           served a `workers` key at all, self-hides otherwise (see
-           renderWorkers). -->
-      <div id="workersStrip" style="display:none;margin-top:10px"></div>
     </div>
     <!-- ── New test / Record — the web equivalent of `orbit teach` ── -->
     <div class="band" id="qaTeachBand" style="display:none">
@@ -997,7 +991,7 @@ function card(t,kind){
   if(kind==='run'){live='live';
     timer=`<div class="meta"><span class="orbmark orbmark-sm" aria-hidden="true"></span> ${S&&S.stopped?'⏸ pause pending — finishing this cycle':'in orbit'} <span class="timer" data-start="${t._start||''}">…</span>`+
       `<div class="wd"><i data-wd="${t._start||''}" style="width:0%"></i></div></div>`;
-    btns=`<button class="btn btn-stop btn-mini" onclick="if(confirm('Abort the running cycle and set ${esc(t.id)} aside?'))post('/killtask',{id:'${esc(t.id)}'})">Abort &amp; skip</button>`;
+    btns=`<button class="btn btn-stop btn-mini" onclick="if(confirm('Abort the running cycle and set ${escJsAttr(t.id)} aside?'))post('/killtask',{id:'${escJsAttr(t.id)}'})">Abort &amp; skip</button>`;
   }else if(kind==='next'){
     btns=`<button class="btn btn-go btn-mini" title="move it to the front and resume the loop" onclick="post('/runnow',{id:'${esc(t.id)}'})">Run this next</button>
       <button class="btn btn-mini" title="move up in the queue" onclick="post('/move',{id:'${esc(t.id)}',dir:'up'})">▲</button>
@@ -1101,10 +1095,10 @@ const COL_HELP={
   'Deep space':'Proposals only — NOTHING here happens until you press "Queue it". Read the plain line + 👉 hint on each card to decide.',
   'Graveyard orbit':'Parked tasks. The robot never touches them; bring one back anytime.',
 };
-function col(title,cls,items,kind,emptyMsg){
+function col(title,cls,items,kind,emptyMsg,extra){
   const body=items.length?items.map(t=>card(t,kind)).join(''):`<div class=empty>${emptyMsg||'—'}</div>`;
   const help=COL_HELP[title.split(' · ')[0]];
-  return `<section class="col ${cls}"><h2>${title}<span class=cnt>${items.length}</span></h2>${help?`<div class=colsub>${help}</div>`:''}${body}</section>`;
+  return `<section class="col ${cls}"><h2>${title}<span class=cnt>${items.length}</span></h2>${extra||''}${help?`<div class=colsub>${help}</div>`:''}${body}</section>`;
 }
 
 /* ── topbar + orbit + rail ──────────────────────────────────────────────── */
@@ -1141,13 +1135,29 @@ function idleWhy(r,t){
       : {tag:'Armed', msg:`Waiting for the next cycle. ${beat}.`, cls:'green'};  // no false interval claim
   }
 }
+// Slot-aware "who's actually running": the workers array (Task 7) is real
+// per-slot liveness, strictly more accurate than the single global
+// current_task claim file it sits alongside (which only ever named ONE
+// task even when several slots ran concurrently). Used wherever the hero
+// would otherwise name "the" running task - never changes cycle_running/
+// cycle_start/idle branching itself, only the wording once a branch is
+// already known to be "a cycle is running".
+function liveWorkers(r){return (r.workers||[]).filter(w=>w.alive);}
+function tidsCompact(ws){
+  const shown=ws.slice(0,3).map(w=>esc(w.tid||'claiming…'));
+  const extra=ws.length-shown.length;
+  return shown.join(', ')+(extra>0?` +${extra} more`:'');
+}
 function renderTop(){
-  if(!S)return; const r=S,t=srvClock(),ib=inboxItems();
+  if(!S)return; const r=S,t=srvClock(),ib=inboxItems(),lw=liveWorkers(r);
   // status sentence
   const money=`$${(r.daily_spend||0).toFixed(2)} est.`;
   let s;
   if(r.stopped)s=`⏸ <b>Paused.</b> Nothing runs or spends until you resume · ${r.counts.next} queued · ${money} today`;
-  else if(r.cycle_running&&r.cycle_start)s=`<b>In orbit: ${esc(r.current_task||'claiming a task…')}</b>${r.current_task_tentative?' <span class=mut>(confirming…)</span>':''} · ${fmt(t-r.cycle_start)} elapsed · ${r.daily_count}/${r.max_tasks} tasks + ${money} today · ${r.counts.next} queued behind it`;
+  else if(r.cycle_running&&r.cycle_start)s=(lw.length
+      ? `<b>In orbit: ${lw.length} cycle${lw.length===1?'':'s'} live</b> <span class=mut>(${tidsCompact(lw)})</span>`
+      : `<b>In orbit: ${esc(r.current_task||'claiming a task…')}</b>${r.current_task_tentative?' <span class=mut>(confirming…)</span>':''}`)
+    +` · ${fmt(t-r.cycle_start)} elapsed · ${r.daily_count}/${r.max_tasks} tasks + ${money} today · ${r.counts.next} queued behind it`;
   else {const w=idleWhy(r,t); s=`<b>${w.tag}.</b> ${w.msg} · ${r.daily_count}/${r.max_tasks} tasks + ${money} today · ${r.counts.next} queued`;}
   if(ib.n)s+=` · <span class=hot>${ib.n} item${ib.n===1?'':'s'} need you</span>`;
   document.getElementById('statusText').innerHTML=s;
@@ -1161,7 +1171,9 @@ function renderTop(){
     const p=Math.min(1,(t-r.cycle_start)/r.cycle_timeout);
     orbit.className='orbit';arc.style.strokeDashoffset=ORBIT_C*(1-p);
     arc.style.stroke=p>.8?'var(--amber)':'var(--blue)';
-    hs.innerHTML=`In orbit <span class=mut>· ${esc(r.current_task||'claiming a task…')}${r.current_task_tentative?' (confirming…)':''}</span>`;
+    hs.innerHTML = lw.length
+      ? `In orbit <span class=mut>· ${lw.length} cycle${lw.length===1?'':'s'} live (${tidsCompact(lw)})</span>`
+      : `In orbit <span class=mut>· ${esc(r.current_task||'claiming a task…')}${r.current_task_tentative?' (confirming…)':''}</span>`;
     hsub.innerHTML=`<b>${fmt(t-r.cycle_start)}</b> elapsed of a ${Math.floor(r.cycle_timeout/60)}m watchdog window · one atomic commit per cycle, pushed to its own branch.`;}
   else{const w=idleWhy(r,t);
     orbit.className='orbit idle';arc.style.strokeDashoffset=ORBIT_C*0.25;
@@ -1297,10 +1309,12 @@ function renderQueue(){
     ? 'Paused — resume the loop to send a task into orbit.'
     : `Nothing in orbit right now — <b>${esc(w.tag)}</b>. ${esc(w.msg)}<br>A task appears here while a cycle is actively working it.`;
   document.getElementById('queueCols').innerHTML=
-    col('In orbit','hl-run',r.running.map(x=>({...x,_start:r.cycle_start})),'run',orbitEmpty)+
+    col('In orbit','hl-run',r.running.map(x=>({...x,_start:r.cycle_start})),'run',orbitEmpty,
+        '<div id="workersStrip" style="display:none;margin:0 0 8px"></div>')+
     col('Launch pad','hl-next',r.next_up,'next',r.auto_feed
       ?'Launch pad is dry — Auto-feed found nothing safe to promote.<br><b>Queue something from Deep space.</b>'
       :'Launch pad is dry.<br><b>Queue something from Deep space, or switch on Auto-feed.</b>');
+  renderWorkers();
 }
 
 /* ── epics band (planning tier: plan → approve spec → decompose) ─────────── */
@@ -1814,11 +1828,14 @@ function workerRow(w){
     <span class=aside>${w.started?esc(w.started):''}</span><span class=spacer></span>${badge(w.alive?'alive':'gone',w.alive?'ok':'muted')}</div>`;
 }
 function renderWorkers(){
-  // Independent of qa.services - this is per-slot concurrency liveness
-  // (Task 7), not the dev-session app. Self-hides on its own whenever
-  // build_state omitted `workers` entirely (unconfigured, concurrency==1
-  // with nothing running); see workers_state()'s docstring for the exact
-  // absent-vs-empty contract.
+  // Per-slot concurrency liveness (Task 7) - independent of qa.services and
+  // of the dev-session app. Lives beside the Queue view's "In orbit" column
+  // header (Task 9 moved it off the QA Dev-session band, which had nothing
+  // to do with per-slot workers). Self-hides on its own whenever build_state
+  // omitted `workers` entirely (unconfigured, concurrency==1 with nothing
+  // running); see workers_state()'s docstring for the exact absent-vs-empty
+  // contract. Called from renderQueue() every render cycle, same as any
+  // other DOM this innerHTML-replaces wholesale.
   const el=document.getElementById('workersStrip');
   if(!el)return;
   const workers=S&&S.workers;
@@ -1831,39 +1848,25 @@ function renderQaDev(){
   const band=document.getElementById('qaDevBand');
   if(!band)return;
   const qs=S&&S.qa_services;
-  const workers=S&&S.workers;
-  // The band itself now serves two independent stories (dev-session app,
-  // per-slot workers) - show it if EITHER has something to say, so a
-  // concurrency>1 target with no qa.services still sees its workers strip.
-  if(!qs&&!workers){band.style.display='none';return;}
+  // Task 9: the workers strip moved to the Queue view (beside the "In orbit"
+  // column's live count) - this band is dev-session-app-only again.
+  if(!qs){band.style.display='none';return;}
   band.style.display='';
   const stateEl=document.getElementById('qaDevState');
   const noteEl=document.getElementById('qaDevNote');
   const svcEl=document.getElementById('qaDevServices');
   const startBtn=document.getElementById('qaDevStartBtn'),stopBtn=document.getElementById('qaDevStopBtn');
-  if(qs){
-    const stLabel={stopped:'stopped',starting:'starting…',running:'running',error:'error'}[qs.state]||qs.state;
-    const stClass={stopped:'muted',starting:'warn',running:'ok',error:'stop'}[qs.state]||'muted';
-    if(stateEl)stateEl.innerHTML=badge(stLabel,stClass);
-    if(noteEl)noteEl.textContent=qs.state==='running'
-      ? 'Tests run against the warm app (attach) — no reboot.'
-      : qs.state==='error' ? (qs.error||'could not bring the app up')
-      : 'Bring the app up once, then flows/teach attach instead of relaunching it every run.';
-    if(svcEl)svcEl.innerHTML=(qs.services||[]).map(qaDevServiceRow).join('');
-    const busy=qs.state==='running'||qs.state==='starting';
-    if(startBtn)startBtn.style.display=busy?'none':'';
-    if(stopBtn)stopBtn.style.display=busy?'':'none';
-  }else{
-    // No qa.services configured on this target - the dev-session-specific
-    // controls have nothing to show; the workers strip below still renders
-    // on its own.
-    if(stateEl)stateEl.innerHTML='';
-    if(noteEl)noteEl.textContent='';
-    if(svcEl)svcEl.innerHTML='';
-    if(startBtn)startBtn.style.display='none';
-    if(stopBtn)stopBtn.style.display='none';
-  }
-  renderWorkers();
+  const stLabel={stopped:'stopped',starting:'starting…',running:'running',error:'error'}[qs.state]||qs.state;
+  const stClass={stopped:'muted',starting:'warn',running:'ok',error:'stop'}[qs.state]||'muted';
+  if(stateEl)stateEl.innerHTML=badge(stLabel,stClass);
+  if(noteEl)noteEl.textContent=qs.state==='running'
+    ? 'Tests run against the warm app (attach) — no reboot.'
+    : qs.state==='error' ? (qs.error||'could not bring the app up')
+    : 'Bring the app up once, then flows/teach attach instead of relaunching it every run.';
+  if(svcEl)svcEl.innerHTML=(qs.services||[]).map(qaDevServiceRow).join('');
+  const busy=qs.state==='running'||qs.state==='starting';
+  if(startBtn)startBtn.style.display=busy?'none':'';
+  if(stopBtn)stopBtn.style.display=busy?'':'none';
 }
 function renderQa(){
   renderQaDev();
@@ -2899,22 +2902,32 @@ function collectChecks(id){return [...document.querySelectorAll('#set-'+id+' inp
    in a hand-edited config.yaml renders as a blank/defaulted row instead of
    throwing. */
 let watchRows=[];
+// Rows carry a stable client-only `_id` (never sent to the server -
+// validateWatchRows() below rebuilds plain {name,question,cadence_hours,
+// category} objects) rather than being addressed by array index: an index
+// is only ever the row's position in THIS render, so a Remove/oninput
+// handler baked in at render time would silently target the wrong row the
+// instant a row above it is added or removed. _id is assigned once, at
+// creation, and never reused.
+let _watchRowSeq=0;
 function _sanitizeWatchRow(w){
   w=(w&&typeof w==='object')?w:{};
   const cats=['insight','funnel','hypothesis'];
-  return {name:typeof w.name==='string'?w.name:'',
+  return {_id:++_watchRowSeq,
+          name:typeof w.name==='string'?w.name:'',
           question:typeof w.question==='string'?w.question:'',
           cadence_hours:(Number.isInteger(w.cadence_hours)&&w.cadence_hours>0)?w.cadence_hours:168,
           category:cats.includes(w.category)?w.category:'insight'};
 }
-function watchRowHtml(w,i){
-  const cats=['insight','funnel','hypothesis'];
-  return `<div class=watchrow data-i="${i}">
-    <input class=w-name placeholder="name (slug)" value="${escAttr(w.name)}" oninput="watchRows[${i}].name=this.value">
-    <input class=w-question placeholder="question" value="${escAttr(w.question)}" oninput="watchRows[${i}].question=this.value">
-    <input class=w-cadence type=number min=1 placeholder="cadence (h)" value="${escAttr(w.cadence_hours)}" oninput="watchRows[${i}].cadence_hours=parseInt(this.value,10)">
-    <select class=w-category onchange="watchRows[${i}].category=this.value">${cats.map(o=>`<option value="${o}" ${w.category===o?'selected':''}>${esc(o)}</option>`).join('')}</select>
-    <button class="btn btn-stop btn-mini" onclick="removeWatchRow(${i})">Remove</button></div>`;
+function _watchRowById(id){return watchRows.find(r=>r._id===id);}
+function watchRowHtml(w){
+  const cats=['insight','funnel','hypothesis'],id=w._id;
+  return `<div class=watchrow data-id="${id}">
+    <input class=w-name placeholder="name (slug)" value="${escAttr(w.name)}" oninput="_watchRowById(${id}).name=this.value">
+    <input class=w-question placeholder="question" value="${escAttr(w.question)}" oninput="_watchRowById(${id}).question=this.value">
+    <input class=w-cadence type=number min=1 placeholder="cadence (h)" value="${escAttr(w.cadence_hours)}" oninput="_watchRowById(${id}).cadence_hours=parseInt(this.value,10)">
+    <select class=w-category onchange="_watchRowById(${id}).category=this.value">${cats.map(o=>`<option value="${o}" ${w.category===o?'selected':''}>${esc(o)}</option>`).join('')}</select>
+    <button class="btn btn-stop btn-mini" onclick="removeWatchRow(${id})">Remove</button></div>`;
 }
 function renderWatchesCard(){
   const el=document.getElementById('watchRowsList');if(!el)return;
@@ -2922,7 +2935,7 @@ function renderWatchesCard(){
     :'<div class=meta style="padding:2px 0 6px">No watches yet.</div>';
 }
 function addWatchRow(){watchRows.push(_sanitizeWatchRow(null));renderWatchesCard();}
-function removeWatchRow(i){watchRows.splice(i,1);renderWatchesCard();}
+function removeWatchRow(id){watchRows=watchRows.filter(r=>r._id!==id);renderWatchesCard();}
 // Client-side mirror of config.py's watches[i] rules (name slug, non-empty
 // question, positive cadence) - same discipline as the mcp card's "deep
 // validation runs on save" hint: this just saves an operator the round trip
