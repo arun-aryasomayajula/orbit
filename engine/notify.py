@@ -74,7 +74,12 @@ def _is_duplicate(title: str, message: str) -> bool:
     # that fails leaves the next call free to dedupe against whatever state
     # already exists, or to send too, either way never blocking the caller.
     now = time.time()
-    digest = hashlib.sha256(f"{title}\n{message}".encode()).hexdigest()
+    # errors="replace", not the strict default: a lone surrogate in title or
+    # message (garbled input from wherever the caller sourced it) would
+    # otherwise raise UnicodeEncodeError here, outside every try/except in
+    # this function - breaking the "never raises" contract the whole module
+    # promises for a mis-encoded string, not just a missing state file.
+    digest = hashlib.sha256(f"{title}\n{message}".encode(errors="replace")).hexdigest()
     is_dup = False
     try:
         with open(DEDUPE_FILE) as f:

@@ -70,7 +70,14 @@ FAILED=0   # set to 1 when a slot's WRITE is refused for belonging to another ta
 # (config.py's CONCURRENCY_MAX); this becomes a fifth enforcement point of it.
 SLOTS=1
 if [ "$MODE" != "uninstall" ]; then
-  eval "$(python3 "$ORBIT_HOME/engine/config.py" shellenv "$TARGET")" || { echo "config load failed"; exit 2; }
+  # Capture stdout and check config.py's OWN exit status BEFORE eval'ing it:
+  # `eval "$(cmd)"` on its own swallows `cmd`'s failure - eval's exit status
+  # reflects the evaluated text, not the command substitution, so `eval ""`
+  # (what a failed, silent config.py leaves behind) succeeds trivially and
+  # the `|| exit 2` guard never fires even though config never loaded.
+  SHELLENV_OUT="$(python3 "$ORBIT_HOME/engine/config.py" shellenv "$TARGET")" \
+    || { echo "config load failed"; exit 2; }
+  eval "$SHELLENV_OUT"
   SLOTS="${ORBIT_CONCURRENCY:-1}"
   case "$SLOTS" in ''|*[!0-9]*) SLOTS=1 ;; esac
   [ "$SLOTS" -ge 1 ] || SLOTS=1
@@ -245,7 +252,16 @@ case "$(uname -s)" in
     fi
     n=0
     while [ "$n" -lt "$SLOTS" ]; do
-      write_guarded "$UNIT_DIR/$(unit_for "$n")" gen_systemd "$n"
+      # `|| true`: under `set -e` a bare failing statement aborts the script
+      # immediately, unlike the macOS branch above and the --generate-only
+      # path (both call write_guarded from an `if`/`&&` condition, which
+      # `set -e` never treats as a script-ending failure). Without this, the
+      # FIRST slot that collides with a different target's unit would abort
+      # before daemon-reload, the stale-slot reconcile-down loop below, or
+      # even the LATER slots in this same loop ever ran - write_guarded
+      # already recorded FAILED=1 for the final `exit "$FAILED"` to report;
+      # this only keeps the script continuing to reconcile what it safely can.
+      write_guarded "$UNIT_DIR/$(unit_for "$n")" gen_systemd "$n" || true
       n=$((n + 1))
     done
     for n in $(existing_slots "$UNIT_DIR"); do

@@ -357,3 +357,80 @@ def test_doctor_service_advisory_never_fails_doctor(tmp_path):
     r = _run_doctor(t, path_prefix=bindir)
     assert r.returncode == 0, r.stdout
     assert "ALL CHECKS PASSED" in r.stdout
+
+
+# === install_service.sh - Linux install path continues past a collision ====
+# `--generate-only` never exercised this: it calls write_guarded from an `&&`
+# chain, which `set -e` doesn't trap. The REAL Linux install loop used to call
+# write_guarded as a bare statement, so `set -e` aborted the whole script the
+# moment ONE slot collided with a different target's on-disk unit - never
+# reaching daemon-reload, the stale-slot reconcile-down loop, or later slots
+# in the very same loop. Exercised here with a faked `uname`/`systemctl` on
+# PATH so it runs on any host, same spirit as doctor's fake launchctl/systemctl.
+
+def _fake_uname_and_systemctl(tmp_path, calls_log):
+    bindir = tmp_path / "linux-bin"
+    bindir.mkdir()
+    (bindir / "uname").write_text("#!/bin/sh\necho Linux\n")
+    (bindir / "systemctl").write_text(f'#!/bin/sh\necho "$@" >> {calls_log}\nexit 0\n')
+    for f in (bindir / "uname", bindir / "systemctl"):
+        f.chmod(f.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return bindir
+
+
+def test_linux_install_continues_past_a_collision_and_reports_failure(tmp_path):
+    fake_home = tmp_path / "fakehome"
+    sysd_dir = fake_home / ".config" / "systemd" / "user"
+    sysd_dir.mkdir(parents=True)
+
+    # A unit belonging to a DIFFERENT target, whose filename collides with
+    # what THIS target's slot 1 wants to write (the exact "<slug>-slotN"
+    # collision install_service.sh's header describes).
+    other_target = tmp_path / "app-slot1"
+    other_target.mkdir()
+    (sysd_dir / "orbit-app-slot1.service").write_text(
+        f"[Service]\nEnvironment=ORBIT_TARGET={other_target}\n")
+
+    calls_log = tmp_path / "systemctl-calls.log"
+    bindir = _fake_uname_and_systemctl(tmp_path, calls_log)
+
+    t = _target(tmp_path, concurrency=2, name="app")
+    env = dict(os.environ, HOME=str(fake_home),
+              PATH=str(bindir) + os.pathsep + os.environ.get("PATH", ""))
+    r = subprocess.run(["bash", str(INSTALL_SERVICE), str(t), str(REPO_ROOT)],
+                       capture_output=True, text=True, env=env)
+
+    assert r.returncode == 1, f"stdout={r.stdout!r} stderr={r.stderr!r}"
+    assert "refusing" in r.stderr and "DIFFERENT target" in r.stderr
+    # slot 0's unique filename was still installed despite slot 1's collision
+    assert (sysd_dir / "orbit-app.service").exists()
+    # the other target's file was left completely alone
+    assert f"ORBIT_TARGET={other_target}" in (sysd_dir / "orbit-app-slot1.service").read_text()
+    # the script kept going past the collision: daemon-reload ran, and the
+    # final success line for the slots that DID install still printed
+    assert "daemon-reload" in calls_log.read_text()
+    assert "systemd --user units enabled" in r.stdout
+
+
+def test_shellenv_failure_aborts_the_install_before_any_unit_is_touched(tmp_path):
+    """Regression: `eval "$(cmd)"` on its own swallows `cmd`'s own exit
+    status - eval succeeds trivially on the empty string a failed, silent
+    config.py leaves behind, so the `|| exit 2` guard never fired even
+    though config never loaded. A broken config.yaml must abort install
+    before anything is written."""
+    fake_home = tmp_path / "fakehome"
+    (fake_home / ".config" / "systemd" / "user").mkdir(parents=True)
+    calls_log = tmp_path / "systemctl-calls.log"
+    bindir = _fake_uname_and_systemctl(tmp_path, calls_log)
+
+    t = _target(tmp_path, concurrency=2, name="app")
+    (t / ".autopilot" / "config.yaml").write_text("not: valid: yaml: [")
+
+    env = dict(os.environ, HOME=str(fake_home),
+              PATH=str(bindir) + os.pathsep + os.environ.get("PATH", ""))
+    r = subprocess.run(["bash", str(INSTALL_SERVICE), str(t), str(REPO_ROOT)],
+                       capture_output=True, text=True, env=env)
+
+    assert r.returncode == 2, f"stdout={r.stdout!r} stderr={r.stderr!r}"
+    assert "config load failed" in r.stdout + r.stderr
+    assert not list((fake_home / ".config" / "systemd" / "user").glob("*.service"))

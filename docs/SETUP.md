@@ -379,6 +379,7 @@ Write it by hand, or from the dashboard's Settings > Secrets panel (values maske
 ### 7.4 Concurrency
 `concurrency: N` in `.autopilot/config.yaml` runs N independent slots, each its own `engine/run.sh` process with its own worktree and its own exclusive ledger claim.
 `orbit install` writes one launchd/systemd unit per slot (`ORBIT_SLOT`/`ORBIT_SLOTS` baked into its environment), reconciling on every re-run as `concurrency` changes - installing units for new slots, removing them for slots that no longer fit.
+Before writing or removing any unit file, `orbit install` verifies the file's baked-in `ORBIT_TARGET` matches this target, and refuses to touch a unit that belongs to a different one - two targets whose derived slugs collide on the same filename can never clobber each other's service.
 See the README's "Concurrency and the launcher" section for the full picture, including the launcher's per-tab Start/Stop as the other way to run extra slots.
 
 ### 7.5 Publishing approved work

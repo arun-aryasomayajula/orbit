@@ -106,8 +106,13 @@ def test_render_storage_escapes_html_inside_every_construct():
 @pytest.mark.parametrize("href", [
     "javascript:alert(1)", "JavaScript:alert(1)", "  javascript:alert(1)",
     "data:text/html;base64,PHNjcmlwdD4=", "vbscript:x", "file:///etc/passwd",
+    "//evil.example/x", "//evil.example",
 ])
 def test_unsafe_hrefs_never_become_links(href):
+    """A protocol-relative href (`//host/...`, no scheme but two leading
+    slashes) resolves in a browser against the CURRENT page's scheme,
+    landing on `host` exactly like an absolute https://host/... link would -
+    it is not a same-wiki relative link and must be rejected the same way."""
     out = publish.render_storage(f"[click]({href})")
     assert "<a " not in out and "href" not in out
     assert "click" in out

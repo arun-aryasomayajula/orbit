@@ -26,7 +26,7 @@ Three references shaped it:
 7. **Parallelism**: multiple products in parallel via a Chrome-style tab UI in the launcher, and concurrent tasks within one workspace.
 8. **Tabs are dashboard-only in v1**. Interactive chat stays in the terminal. An embedded web chat is a v2 candidate.
 9. **The dashboard is the PM's control surface** (added 2026-08-21): everything a PM needs to operate Orbit is configurable in the UI — workspace creation from the launcher, MCP servers and tokens, backlog/task entry, PRD gates, metric watches, publish settings. The CLI remains the power path; no feature may be UI-only for the operator, and no PM flow may require the terminal after initial install.
-10. **Token delivery** (added 2026-08-21, supersedes the M1 "Keychain is M2" placeholder): secrets live in `<target>/.autopilot/.secrets.env` (0600, gitignored alongside `.jira_token`), written by the dashboard's settings UI or by hand. `run.sh` sources it at each iteration start, so interactive runs and launchd/systemd services get the same environment. Doctor validates presence of every `token_env` named in `mcp:`. Keychain integration stays optional-later.
+10. **Token delivery** (added 2026-08-21, supersedes the M1 "Keychain is M2" placeholder): secrets live in `<target>/.autopilot/.secrets.env` (0600, gitignored alongside `.jira_token`), written by the dashboard's settings UI or by hand. `run.sh` parses it line-by-line at each iteration start (never sources/executes it - a security property, not an implementation detail), so interactive runs and launchd/systemd services get the same environment. Doctor validates presence of every `token_env` named in `mcp:`. Keychain integration stays optional-later.
 
 ## Design
 
@@ -202,7 +202,7 @@ Pilot: Arun plus one PM on one real product.
 Ideas considered and consciously set aside, not v1 gaps waiting to be filled.
 Each carries the reasoning for revisiting it, or not.
 
-- **Keychain secret delivery.** Decision 10 chose `.autopilot/.secrets.env` over Keychain for M1-M5: a plain file that `run.sh` sources every iteration, so interactive runs and launchd/systemd services see the same environment without extra plumbing. Keychain integration stays optional-later, only worth building if file-based secrets prove to be the actual friction point for a PM.
+- **Keychain secret delivery.** Decision 10 chose `.autopilot/.secrets.env` over Keychain for M1-M5: a plain file that `run.sh` parses (never sources) every iteration, so interactive runs and launchd/systemd services see the same environment without extra plumbing. Keychain integration stays optional-later, only worth building if file-based secrets prove to be the actual friction point for a PM.
 - **Embedded web chat per tab** (decision 8, v2 candidate). Tabs are dashboard-only in v1; interactive chat stays in the terminal.
 - **Figma write-side design generation** (section 7, v1.5 candidate). Read-side (frames as cited research/design-review sources) shipped in M5; write-side is the least-proven MCP surface, and a bad auto-generated design would cost PM trust in everything else.
 - **PRD stages as loop queue items.** Section 4 already ruled this out as a permanent design choice, not a deferral: PRD runs have their own state machine and gates, so the repo-task queue is the wrong dispatcher for them (amended 2026-08-21 during M2). Listed here only because it keeps resurfacing operationally; revisit only if the PRD state machine's own needs change, not because the loop queue is expected to grow this capability.

@@ -110,3 +110,15 @@ def test_dedupe_never_blocks_when_state_dir_is_unwritable(tmp_path, monkeypatch)
     calls = _wired(mod, monkeypatch)
     mod.send("title", "body")          # can't persist state — must still send
     assert len(calls) == 1
+
+
+def test_dedupe_never_raises_on_a_lone_surrogate_in_the_message(tmp_path, monkeypatch):
+    """A lone surrogate (garbled input from wherever the caller sourced title/
+    message) raises UnicodeEncodeError from a strict .encode() - this must
+    not escape _is_duplicate and break the "never raises" contract the whole
+    module promises."""
+    monkeypatch.setenv("AP_STATE", str(tmp_path))
+    mod = _notify(tmp_path, monkeypatch)
+    calls = _wired(mod, monkeypatch)
+    mod.send("title", "bad \udcff surrogate")
+    assert len(calls) == 1

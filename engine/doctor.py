@@ -38,6 +38,20 @@ def _secrets_env(target):
     panel, run.sh's loop and prd_flow's stage children all agree on the format."""
     return secrets_env.read(target)
 
+
+def _var_set(name, secrets, check_environ=True):
+    """True if `name` is set to a NON-BLANK value in the environment (when
+    `check_environ`) or in `secrets` (the parsed .secrets.env mapping).
+    Mirrors publish.py's own _auth(), which requires
+    `(env.get(v) or "").strip()` truthy - a `key present but blank` line in
+    .secrets.env, or an exported-but-empty shell variable, passes a bare
+    membership test but still fails publish.py at run time. Advisory doctor
+    output must agree with the thing it is advising about, or it tells an
+    operator everything is fine right up until the first publish attempt."""
+    if check_environ and (os.environ.get(name) or "").strip():
+        return True
+    return bool((secrets.get(name) or "").strip())
+
 print(f"\nORBIT DOCTOR — {TARGET}\n")
 
 # 1. config
@@ -90,8 +104,8 @@ if pub_cfg:
     has_confluence = isinstance(pub_cfg.get("confluence"), dict)
     has_jira = isinstance(pub_cfg.get("jira"), dict)
     if has_confluence or has_jira:
-        email_set = "ATLASSIAN_EMAIL" in os.environ or "ATLASSIAN_EMAIL" in secrets
-        token_set = "ATLASSIAN_API_TOKEN" in os.environ or "ATLASSIAN_API_TOKEN" in secrets
+        email_set = _var_set("ATLASSIAN_EMAIL", secrets)
+        token_set = _var_set("ATLASSIAN_API_TOKEN", secrets)
         if not (email_set and token_set):
             missing = []
             if not email_set: missing.append("ATLASSIAN_EMAIL")
@@ -119,8 +133,8 @@ if os.path.exists(secrets_path):
     if mode & 0o077:
         print(f"  · .secrets.env exists with mode {oct(mode)} — group/other bits are readable; should be 0600 or stricter for security")
     if not pub_cfg:
-        email_set = "ATLASSIAN_EMAIL" in secrets
-        token_set = "ATLASSIAN_API_TOKEN" in secrets
+        email_set = _var_set("ATLASSIAN_EMAIL", secrets, check_environ=False)
+        token_set = _var_set("ATLASSIAN_API_TOKEN", secrets, check_environ=False)
         if email_set or token_set:
             print(f"  · Atlassian secrets are set but publish: unconfigured — if you plan to publish to Confluence/Jira, add a publish: block (see config/schema.yaml)")
 

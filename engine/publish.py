@@ -169,10 +169,16 @@ def _attr(s):
 def _safe_href(href):
     """True if `href` may become a real <a href>. Absolute links must use an
     allowlisted scheme; a relative link (no scheme at all before the first
-    /, ? or #) is fine - it stays inside the wiki."""
+    /, ? or #) is fine - it stays inside the wiki. A protocol-relative link
+    (`//host/path`, no scheme but two leading slashes) is NOT that: a browser
+    resolves it against the current page's scheme, landing on `host` exactly
+    like an absolute `https://host/path` link would - so it is rejected here
+    too, same as any other absolute link to an unlisted origin."""
     low = href.lower()
     if low.startswith(_SAFE_SCHEMES):
         return True
+    if low.startswith("//"):
+        return False
     head = low.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
     return ":" not in head
 
@@ -701,10 +707,10 @@ def publish_prd(target, run):
                           {"page_id": page_id, "url": url, "at": _now()})
     except (locks.LockTimeout, locks.ReentrantLock) as e:
         raise LockError(
-            f"the page IS published - id {page_id}, {url} - but the marker "
+            f"the page IS published - id {page_id}, {_safe_url(url)} - but the marker "
             f"could not be updated ({e}). Add it by hand under "
             f'"published": {{"confluence": {{"page_id": "{page_id}", '
-            f'"url": "{url}"}}}} in '
+            f'"url": "{_safe_url(url)}"}}}} in '
             f'{os.path.join(target, "research", run, prd_flow.MARKER_NAME)}, or a '
             "re-run will create a SECOND page.")
     return url
