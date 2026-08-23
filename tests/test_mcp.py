@@ -158,6 +158,24 @@ def test_validate_rejects_empty_confluence_parent_id_string(tmp_path):
     assert "publish.confluence.parent_id" in r.stdout
 
 
+def test_validate_rejects_base_url_without_scheme(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG +
+                   'publish:\n  confluence:\n    base_url: "wiki.example.com"\n'
+                   '    space: "PROD"\n')
+    r = _validate(t)
+    assert r.returncode == 1
+    assert "publish.confluence.base_url" in r.stdout and "http://" in r.stdout
+
+
+def test_validate_rejects_jira_base_url_without_scheme(tmp_path):
+    t = _mk_target(tmp_path, BASE_CFG +
+                   'publish:\n  jira:\n    base_url: "jira.example.com"\n'
+                   '    project: "ORB"\n    issue_type: "Task"\n')
+    r = _validate(t)
+    assert r.returncode == 1
+    assert "publish.jira.base_url" in r.stdout and "http://" in r.stdout
+
+
 def test_cli_settings_with_mcp_writes_merged_file(tmp_path):
     t = _mk_target(tmp_path, BASE_CFG +
                    'mcp:\n  metaql:\n    transport: http\n    url: "https://m/mcp"\n    tools: [metaql_execute_query]\n')

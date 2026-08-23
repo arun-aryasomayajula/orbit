@@ -298,6 +298,9 @@ def validate(target):
                             val = block.get(field)
                             if not isinstance(val, str) or not val.strip():
                                 errs.append(f"publish.{ch}.{field} must be a non-empty string, got {val!r}")
+                        base_url = block.get("base_url")
+                        if isinstance(base_url, str) and base_url.strip() and not (base_url.startswith("http://") or base_url.startswith("https://")):
+                            errs.append(f"publish.confluence.base_url must start with http:// or https://, got {base_url!r}")
                         if "parent_id" in block:
                             pid = block["parent_id"]
                             if pid is not None and not isinstance(pid, (str, int)):
@@ -309,6 +312,9 @@ def validate(target):
                             val = block.get(field)
                             if not isinstance(val, str) or not val.strip():
                                 errs.append(f"publish.{ch}.{field} must be a non-empty string, got {val!r}")
+                        base_url = block.get("base_url")
+                        if isinstance(base_url, str) and base_url.strip() and not (base_url.startswith("http://") or base_url.startswith("https://")):
+                            errs.append(f"publish.jira.base_url must start with http:// or https://, got {base_url!r}")
     if errs:
         print("\n".join("  ✗ " + e for e in errs)); sys.exit(1)
     print("  ✓ config valid")
