@@ -23,10 +23,13 @@ Publishing is GATED and IDEMPOTENT, never a duplicate-maker:
     every re-run would spam the issue).
 
 Marker writes: this module owns the marker's `published` sub-block and
-nothing else. It takes a lock next to the marker, re-reads it, sets that one
-key, and writes it back through prd_flow's own atomic writer - stamps,
-status and approvals are never touched, and prd_flow.verify() is unaffected
-(it hashes artifacts, not the marker).
+nothing else. It takes prd_flow.marker_lock() - the SAME lock prd_flow's own
+read-modify-writes take, not a private one next to it - re-reads the marker,
+sets that one key, and writes it back through prd_flow's atomic writer.
+Stamps, status and approvals are never touched, and prd_flow.verify() is
+unaffected (it hashes artifacts, not the marker). The finding's idempotence
+record is written the same way: locked, re-read inside the lock, replaced
+atomically, so a concurrent editor's changes are never truncated away.
 
 Config: the profile's `publish:` block.
   publish:
@@ -36,14 +39,19 @@ Config: the profile's `publish:` block.
 CLI:
   publish.py prd <target> <run>              -> prints the page url
   publish.py finding <target> <insight-stem> -> prints the issue key
-Exit codes: 0 ok, 2 missing/malformed config, 3 missing secrets,
-4 unapproved or ungated artifact, 5 HTTP failure (status code only).
+Exit codes: 0 ok, 2 bad/missing config or a malformed run/stem argument,
+3 missing secrets, 4 unapproved or ungated artifact, 5 HTTP failure (status
+code only), 6 the local record could not be written - the page or issue
+EXISTS remotely and the message says where, so an operator can record it by
+hand rather than re-running into a duplicate.
 """
 import base64
+import http.client
 import json
 import os
 import re
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -65,9 +73,30 @@ TOKEN_VAR = "ATLASSIAN_API_TOKEN"
 # and the TBD/TODO markers - none of which an HTML comment can trip - so a
 # published doc still passes the gate that let it publish (pinned in tests).
 JIRA_RECORD = "<!-- published: jira {key} -->"
-JIRA_RECORD_RE = re.compile(r"<!--\s*published:\s*jira\s+([A-Za-z][A-Za-z0-9_]*-\d+)\s*-->")
+# Anchored to a whole line: the record is something THIS module wrote on a
+# line of its own. Matching it mid-prose would let a doc that merely quotes
+# the syntax (a runbook, this module's own docs) claim to be published and
+# silently skip filing.
+JIRA_RECORD_RE = re.compile(
+    r"^[ \t]*<!--[ \t]*published:[ \t]*jira[ \t]+([A-Za-z][A-Za-z0-9_]*-\d+)[ \t]*-->[ \t]*$",
+    re.M)
 BASIS_EXCERPT_LINES = 12
 BASIS_EXCERPT_CHARS = 1200
+# Publishing reaches the network with a bearer credential attached, so plain
+# http is refused outright: it would put the base64 of email:token on the
+# wire in clear. Loopback is the one exception - a stub server in a test has
+# no network to be sniffed on, and demanding a TLS cert there buys nothing.
+# config.py validates this too (Task 5); this is the last line of defence,
+# the one that runs even when a config was hand-edited past the validator.
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+# An insight stem becomes a FILENAME under insights/. Same shape the dashboard
+# serves artifacts under (command_center._ARTIFACT_NAME_RE): leading
+# alphanumeric, then alphanumerics, dots, dashes, underscores. No separator,
+# no leading dot, so "..", "../x" and "/etc/passwd" are all refused before any
+# path is built from it. Kept as a local copy rather than an import -
+# command_center is a server module with import-time side effects, and this is
+# a one-line shape, not a dependency worth taking.
+STEM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 class PublishError(RuntimeError):
@@ -99,19 +128,53 @@ class HttpError(PublishError):
         self.status = status
 
 
+class LockError(PublishError):
+    """The remote write SUCCEEDED and the local record of it did not, because
+    another writer held the lock.
+
+    Its own exit code (6), never GateError's 4: 4 says "nothing was
+    published, fix the artifact and re-run", and a re-run here creates a
+    SECOND page or issue. Everything an operator needs to record the result
+    by hand is in the message."""
+    code = 6
+
+
 # --------------------------------------------------------------------------
 # markdown -> Confluence storage format
 # --------------------------------------------------------------------------
 
 _OL_ITEM = re.compile(r"\d{1,9}[.)] ")
+# C0 controls (plus DEL) are dropped, not escaped. Tab and newline stay -
+# they are the only two a code block legitimately carries. The rest are
+# invisible in a diff and in a review, which is exactly what makes them worth
+# removing: a NUL or an ESC smuggled through a PRD is either a parser exploit
+# downstream or a rendering surprise, never content anybody meant to publish.
+_CONTROLS = {c: None for c in list(range(32)) + [127] if c not in (9, 10)}
+# Schemes a link may carry into a wiki page. Everything else - javascript:,
+# data:, vbscript:, file: - renders as literal text instead: this module
+# escapes markup rather than sanitising it, and a link is the one place where
+# "escape the text" alone would still hand an attacker a live scheme.
+_SAFE_SCHEMES = ("http://", "https://", "mailto:")
 
 
 def _esc(s):
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return (s.translate(_CONTROLS)
+             .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
 def _attr(s):
     return _esc(s).replace('"', "&quot;")
+
+
+def _safe_href(href):
+    """True if `href` may become a real <a href>. Absolute links must use an
+    allowlisted scheme; a relative link (no scheme at all before the first
+    /, ? or #) is fine - it stays inside the wiki."""
+    low = href.lower()
+    if low.startswith(_SAFE_SCHEMES):
+        return True
+    head = low.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    return ":" not in head
 
 
 class _Finder:
@@ -161,9 +224,13 @@ def _inline(text):
             j = f.find("]", i + 1)
             if j != -1 and text[j + 1:j + 2] == "(":
                 k = f.find(")", j + 2)
-                if k != -1:
+                # An unsafe scheme is not an error and not a stripped link: it
+                # falls through to the literal-text path below, so the reader
+                # sees exactly what the markdown said and nothing is clickable.
+                href = text[j + 2:k].translate(_CONTROLS).strip() if k != -1 else ""
+                if k != -1 and _safe_href(href):
                     out.append('<a href="%s">%s</a>'
-                               % (_attr(text[j + 2:k].strip()), _inline(text[i + 1:j])))
+                               % (_attr(href), _inline(text[i + 1:j])))
                     i = k + 1
                     continue
         elif c == "*" and text[i + 1:i + 2] == "*":
@@ -290,9 +357,12 @@ def _load_publish_cfg(target):
         raise ConfigError(f"no config at {cfg_path}")
     import yaml
     try:
-        raw = yaml.safe_load(open(cfg_path)) or {}
-    except yaml.YAMLError as e:
+        with open(cfg_path, encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+    except (yaml.YAMLError, UnicodeDecodeError) as e:
         raise ConfigError(f"config at {cfg_path} does not parse: {e}")
+    except OSError as e:
+        raise ConfigError(f"config at {cfg_path} is unreadable: {e.strerror}")
     if not isinstance(raw, dict):
         raise ConfigError(f"config at {cfg_path} is not a mapping")
     pub = raw.get("publish")
@@ -315,7 +385,26 @@ def _channel(pub, name, required):
         out[key] = val.strip()
     if "base_url" in out:
         out["base_url"] = out["base_url"].rstrip("/")
+        _require_secure(name, out["base_url"])
     return block, out
+
+
+def _require_secure(name, url):
+    """https, or http to a loopback host. Anything else is refused before a
+    single request is built - see LOOPBACK_HOSTS on why the exception is
+    exactly that narrow."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        raise ConfigError(f"publish.{name}.base_url is not a usable URL")
+    if parts.scheme == "https" or (parts.scheme == "http" and host in LOOPBACK_HOSTS):
+        return
+    raise ConfigError(
+        f"publish.{name}.base_url must be https:// - publishing sends an "
+        f"Authorization header, and plain http puts the credential on the "
+        f"wire in clear (http is allowed only for "
+        f"{'/'.join(sorted(LOOPBACK_HOSTS))}); got {_safe_url(url)}")
 
 
 def _repo_root(target):
@@ -327,10 +416,11 @@ def _repo_root(target):
     if os.path.exists(cfg_path):
         import yaml
         try:
-            raw = yaml.safe_load(open(cfg_path)) or {}
+            with open(cfg_path, encoding="utf-8") as f:
+                raw = yaml.safe_load(f) or {}
             if isinstance(raw, dict) and isinstance(raw.get("repo"), str):
                 repo = raw["repo"]
-        except yaml.YAMLError:
+        except (yaml.YAMLError, UnicodeDecodeError, OSError):
             pass
     return os.path.abspath(os.path.join(target, repo))
 
@@ -376,13 +466,16 @@ def _request(method, url, auth, payload=None):
     header, so nothing from the wire is ever printed."""
     email, token = auth
     data = json.dumps(payload).encode() if payload is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    basic = base64.b64encode(f"{email}:{token}".encode()).decode()
-    req.add_header("Authorization", "Basic " + basic)
-    req.add_header("Accept", "application/json")
-    if data is not None:
-        req.add_header("Content-Type", "application/json")
+    # Building the Request is inside the try on purpose: urllib parses the URL
+    # in the constructor and raises there for a scheme it does not know, so a
+    # bad base_url would otherwise escape as a raw ValueError.
     try:
+        req = urllib.request.Request(url, data=data, method=method)
+        basic = base64.b64encode(f"{email}:{token}".encode()).decode()
+        req.add_header("Authorization", "Basic " + basic)
+        req.add_header("Accept", "application/json")
+        if data is not None:
+            req.add_header("Content-Type", "application/json")
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             body = resp.read()
     except urllib.error.HTTPError as e:
@@ -392,8 +485,25 @@ def _request(method, url, auth, payload=None):
             pass
         raise HttpError(f"{method} {_safe_url(url)} failed: HTTP {e.code}", status=e.code)
     except urllib.error.URLError as e:
-        raise HttpError(f"{method} {_safe_url(url)} failed: {type(e.reason).__name__}")
+        # e.reason is the underlying socket/ssl error ("[Errno 61] Connection
+        # refused"), which names no URL and carries no credential - the whole
+        # reason it is safe to print where a response body is not.
+        raise HttpError(f"{method} {_safe_url(url)} failed: "
+                        f"{e.reason or type(e).__name__}")
     except OSError as e:
+        raise HttpError(f"{method} {_safe_url(url)} failed: {type(e).__name__}")
+    except (ValueError, http.client.InvalidURL) as e:
+        # Raised BEFORE any socket opens: urllib's "unknown url type" is a
+        # ValueError, while http.client's InvalidURL (a space or a control
+        # character in the host, a bad port) descends from HTTPException, not
+        # from ValueError - catching only one of the two leaves a traceback.
+        # Their text quotes the URL, so it is dropped: an operator gets the
+        # sanitised URL and the failure kind.
+        raise HttpError(f"{method} {_safe_url(url)} failed: "
+                        f"malformed request URL ({type(e).__name__})")
+    except http.client.HTTPException as e:
+        # A protocol-level failure urllib did not wrap (a truncated status
+        # line, a server hanging up mid-response). Type name only.
         raise HttpError(f"{method} {_safe_url(url)} failed: {type(e).__name__}")
     if not body:
         return {}
@@ -464,12 +574,12 @@ def _record_published(target, run, channel, record):
     """Set the marker's `published.<channel>` and nothing else.
 
     prd_flow owns this file; the M5 ledger ruling lets publish.py write this
-    one sub-block through its own locked read-modify-write. The lock (a real
-    flock, engine/locks.py) makes the read-modify-write safe against a
-    concurrent prd_flow write; the re-read inside it is why a stamp or a
-    status change that landed while we were on the network survives."""
-    lock = os.path.join(target, "research", run, ".publish.lock")
-    with locks.hold(lock, timeout=LOCK_TIMEOUT):
+    one sub-block. It does so under prd_flow.marker_lock() - the same flock
+    prd_flow's own read-modify-writes take, so a stage stamping from the
+    dashboard and a publish landing a page id cannot overwrite each other -
+    and re-reads the marker INSIDE the lock, which is why anything that
+    landed while we were on the network survives."""
+    with locks.hold(prd_flow.marker_lock(target, run), timeout=LOCK_TIMEOUT):
         marker = prd_flow.load_marker(target, run)
         existing = marker.get("published")
         published = dict(existing) if isinstance(existing, dict) else {}
@@ -477,6 +587,56 @@ def _record_published(target, run, channel, record):
         marker["published"] = published
         prd_flow.write_marker(target, run, marker)
     return marker
+
+
+def _atomic_write_text(path, text):
+    """Replace `path`'s contents in one step (mkstemp + os.replace, the same
+    mechanics as prd_flow._atomic_write_json). A plain write truncates first,
+    so a crash mid-write leaves a half-written insight doc where a whole one
+    used to be."""
+    d = os.path.dirname(os.path.abspath(path)) or "."
+    try:
+        mode = os.stat(path).st_mode & 0o777
+    except OSError:
+        mode = 0o644
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".publish-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        # mkstemp creates 0600. Carry the doc's own mode across, or publishing
+        # a finding would quietly make a repo file owner-only readable.
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _doc_lock(doc):
+    """Lock guarding one insight doc's read-modify-write. A dotfile beside the
+    doc: insights/ is globbed for `*.md` by insight_lint and the dashboard, so
+    a `.<name>.lock` neighbour is invisible to both."""
+    return str(doc.with_name("." + doc.name + ".lock"))
+
+
+def _append_record(doc, key):
+    """Append `<!-- published: jira KEY -->` under the doc's own lock.
+
+    Locked and re-read inside the lock because the doc is a file a human or
+    an agent may be editing right now: a bare read-modify-write built on text
+    fetched before the network call would silently discard whatever landed in
+    between. If someone else recorded a key while we were filing, theirs
+    stands (two records would be worse than one) and this returns False - the
+    caller has an issue nothing points to and must say so, not exit 0."""
+    with locks.hold(_doc_lock(doc), timeout=LOCK_TIMEOUT):
+        text = doc.read_text(encoding="utf-8")
+        if JIRA_RECORD_RE.search(text):
+            return False
+        _atomic_write_text(doc, text.rstrip("\n") + "\n\n" + JIRA_RECORD.format(key=key) + "\n")
+    return True
 
 
 def publish_prd(target, run):
@@ -487,6 +647,13 @@ def publish_prd(target, run):
     Re-running updates the page recorded in `published.confluence` instead of
     creating a second one; a recorded page that no longer exists (someone
     deleted it in Confluence) is re-created rather than left unpublishable."""
+    if not prd_flow.RUN_RE.match(run or ""):
+        # Before any path is built from it: `run` becomes a DIRECTORY name
+        # under research/, and prd_flow owns that shape (RUN_RE) precisely so
+        # every caller refuses "../.." in the same way.
+        raise ConfigError(
+            f"invalid run id {run!r} - lowercase letters, digits and hyphens "
+            "only, must start alphanumeric")
     pub = _load_publish_cfg(target)
     block, cfg = _channel(pub, "confluence", ("base_url", "space"))
     try:
@@ -519,8 +686,17 @@ def publish_prd(target, run):
             page_id, url = _create_page(cfg, block, title, storage, auth)
     else:
         page_id, url = _create_page(cfg, block, title, storage, auth)
-    _record_published(target, run, "confluence",
-                      {"page_id": page_id, "url": url, "at": _now()})
+    try:
+        _record_published(target, run, "confluence",
+                          {"page_id": page_id, "url": url, "at": _now()})
+    except (locks.LockTimeout, locks.ReentrantLock) as e:
+        raise LockError(
+            f"the page IS published - id {page_id}, {url} - but the marker "
+            f"could not be updated ({e}). Add it by hand under "
+            f'"published": {{"confluence": {{"page_id": "{page_id}", '
+            f'"url": "{url}"}}}} in '
+            f'{os.path.join(target, "research", run, prd_flow.MARKER_NAME)}, or a '
+            "re-run will create a SECOND page.")
     return url
 
 
@@ -529,13 +705,23 @@ def publish_prd(target, run):
 # --------------------------------------------------------------------------
 
 def _section(text, heading):
-    """The body of a `## <heading>` section, up to the next `## `."""
-    marker = f"\n## {heading}"
-    body = ("\n" + text).split(marker, 1)
-    if len(body) < 2:
-        return ""
-    rest = body[1].split("\n", 1)[1] if "\n" in body[1] else ""
-    return rest.split("\n## ", 1)[0].strip()
+    """The body of the `## <heading>` section, up to the next `## `.
+
+    Matches the WHOLE heading line, not a prefix: `## Answers to reviewers`
+    is a different section from `## Answer`, and a prefix match would quietly
+    file the wrong half of the doc as the finding."""
+    want = f"## {heading}"
+    lines = text.split("\n")
+    for idx, line in enumerate(lines):
+        if line.strip() != want:
+            continue
+        body = []
+        for nxt in lines[idx + 1:]:
+            if nxt.startswith("## "):
+                break
+            body.append(nxt)
+        return "\n".join(body).strip()
+    return ""
 
 
 def _doc_title(text):
@@ -577,6 +763,11 @@ def publish_finding(target, stem):
     recorded key (ledger ruling): the doc carries
     `<!-- published: jira KEY -->` after the first file, and commenting on
     every re-run would spam the issue."""
+    if not STEM_RE.match(stem or ""):
+        # Before the path is built - see STEM_RE.
+        raise ConfigError(
+            f"invalid insight stem {stem!r} - letters, digits, dots, dashes "
+            "and underscores only, must start alphanumeric, no path separators")
     pub = _load_publish_cfg(target)
     _block, cfg = _channel(pub, "jira", ("base_url", "project", "issue_type"))
     rel_path = os.path.join("insights", f"{stem}.md")
@@ -606,8 +797,25 @@ def publish_finding(target, stem):
     key = resp.get("key")
     if not key:
         raise HttpError("jira create returned no issue key")
-    record = JIRA_RECORD.format(key=key)
-    doc.write_text(text.rstrip("\n") + "\n\n" + record + "\n", encoding="utf-8")
+    try:
+        if not _append_record(doc, key):
+            raise LockError(
+                f"issue {key} IS filed at {cfg['base_url']}/browse/{key}, but "
+                f"another writer recorded a different key in {doc} first - "
+                f"{key} is now an issue nothing points to. Close it, or "
+                "reconcile the two by hand.")
+    except (locks.LockTimeout, locks.ReentrantLock) as e:
+        raise LockError(
+            f"issue {key} IS filed at {cfg['base_url']}/browse/{key}, but the "
+            f"record could not be written to {doc} ({e}). Append "
+            f"'{JIRA_RECORD.format(key=key)}' to that file by hand, or a "
+            "re-run will file a SECOND issue.")
+    except OSError as e:
+        raise LockError(
+            f"issue {key} IS filed at {cfg['base_url']}/browse/{key}, but "
+            f"{doc} could not be written ({e.strerror}). Append "
+            f"'{JIRA_RECORD.format(key=key)}' to it by hand, or a re-run will "
+            "file a SECOND issue.")
     return key, True
 
 
@@ -642,9 +850,13 @@ def main(argv):
     except PublishError as e:
         print(f"publish: {e}", file=sys.stderr)
         return e.code
-    except locks.LockTimeout as e:
+    except (locks.LockTimeout, locks.ReentrantLock) as e:
+        # Safety net for a lock taken outside the two paths that wrap their
+        # own (both raise LockError with the created id). Nothing was
+        # published on this path, but 6 - "the local side is contended" -
+        # still beats a traceback.
         print(f"publish: {e}", file=sys.stderr)
-        return 4
+        return LockError.code
     return 0
 
 

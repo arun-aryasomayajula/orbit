@@ -6,8 +6,11 @@ marker string, so the "no bodies, no tokens in output" contract is pinned by
 capturing stdout/stderr rather than by reading the source.
 """
 import base64
+import contextlib
 import hashlib
 import json
+import socket
+import subprocess
 import sys
 import threading
 import time
@@ -20,6 +23,7 @@ import yaml
 ORBIT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ORBIT / "engine"))
 import insight_lint  # noqa: E402
+import locks  # noqa: E402
 import prd_flow  # noqa: E402
 import publish  # noqa: E402
 
@@ -89,12 +93,42 @@ def test_render_storage(name, md, expected):
 
 def test_render_storage_escapes_html_inside_every_construct():
     """The one rule that matters for a page that ships to a wiki: nothing the
-    markdown carries can become live markup."""
+    markdown carries can become live markup - and an unsafe href is not a
+    link at all, it is text."""
     out = publish.render_storage(
         "# <b>t</b>\n\n- <i>li</i>\n\n> <em>q</em>\n\n[<u>l</u>](javascript:x)\n")
     assert "<b>" not in out and "<i>" not in out and "<em>q" not in out
     assert "&lt;b&gt;" in out and "&lt;i&gt;li&lt;/i&gt;" in out
-    assert '<a href="javascript:x">&lt;u&gt;l&lt;/u&gt;</a>' in out
+    assert "<a " not in out
+    assert "<p>[&lt;u&gt;l&lt;/u&gt;](javascript:x)</p>" in out
+
+
+@pytest.mark.parametrize("href", [
+    "javascript:alert(1)", "JavaScript:alert(1)", "  javascript:alert(1)",
+    "data:text/html;base64,PHNjcmlwdD4=", "vbscript:x", "file:///etc/passwd",
+])
+def test_unsafe_hrefs_never_become_links(href):
+    out = publish.render_storage(f"[click]({href})")
+    assert "<a " not in out and "href" not in out
+    assert "click" in out
+
+
+@pytest.mark.parametrize("href", [
+    "https://x.example/y", "http://x.example/y", "mailto:pm@example.com",
+    "/wiki/spaces/PS", "relative/page.md", "#anchor",
+])
+def test_safe_hrefs_stay_links(href):
+    out = publish.render_storage(f"[click]({href})")
+    assert out == f'<p><a href="{href}">click</a></p>'
+
+
+def test_c0_controls_are_dropped_but_tabs_and_newlines_survive():
+    """Invisible in a diff and in a review, which is exactly why they do not
+    travel to a wiki page. Tab and newline are the two a code block needs."""
+    out = publish.render_storage("a\x00b\x1bc\x07d")
+    assert out == "<p>abcd</p>"
+    assert publish.render_storage("```\nx\ty\nz\n```") == "<pre>x\ty\nz</pre>"
+    assert "\x00" not in publish.render_storage("# t\x00\n\n- l\x00\n\n> q\x00")
 
 
 def test_render_storage_is_linear_on_degenerate_input():
@@ -151,10 +185,23 @@ class _Handler(BaseHTTPRequestHandler):
                    {"message": f"{SECRET_BODY} basic {EMAIL}:{TOKEN}"})
         return True
 
+    def _maybe_bad_json(self):
+        """A 200 that is not JSON at all - a proxy's interstitial, a login
+        page. The parse must fail as an HttpError, not a traceback."""
+        if not self.server.bad_json:
+            return False
+        raw = b"<html>gateway login required</html>"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+        return True
+
     def do_POST(self):
         raw = self._body()
         self._record("POST", raw)
-        if self._maybe_fail():
+        if self._maybe_fail() or self._maybe_bad_json():
             return
         if self.path == "/rest/api/content":
             self.server.page_seq += 1
@@ -200,6 +247,7 @@ def stub():
     srv.requests, srv.pages, srv.issues = [], {}, {}
     srv.page_seq = srv.issue_seq = 0
     srv.fail_status = None
+    srv.bad_json = False
     srv.base_url = f"http://127.0.0.1:{srv.server_address[1]}"
     # poll fast: serve_forever's 0.5s default is pure teardown latency, paid
     # once per test in this module.
@@ -268,6 +316,37 @@ def _done_run(ws, run="r1", title="Checkout PRD", md=PRD_MD, status="done"):
         marker["approvals"]["prd"] = {"at": "2026-08-22T00:00:00Z"}
     prd_flow.write_marker(str(ws), run, marker)
     return marker
+
+
+@contextlib.contextmanager
+def _held_by_a_live_process(lock_path, tmp_path):
+    """Hold `lock_path` from a real, living process for the duration.
+
+    A separate process, not a thread and not a fake: locks.hold breaks a lock
+    whose recorded pid is dead, so contention is only real when the holder is
+    alive. This is what a dashboard-launched stage stamping the marker looks
+    like from publish.py's side."""
+    ready = tmp_path / f"held-{abs(hash(str(lock_path)))}"
+    code = (
+        "import pathlib, sys, time\n"
+        f"sys.path.insert(0, {str(ORBIT / 'engine')!r})\n"
+        "import locks\n"
+        f"with locks.hold({str(lock_path)!r}, timeout=30):\n"
+        f"    pathlib.Path({str(ready)!r}).write_text('held')\n"
+        "    time.sleep(120)\n"
+    )
+    proc = subprocess.Popen([sys.executable, "-c", code])
+    try:
+        for _ in range(500):
+            if ready.exists():
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail("the lock holder subprocess never acquired the lock")
+        yield
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
 
 
 def _assert_no_secrets(captured):
@@ -446,6 +525,157 @@ def test_url_in_errors_never_carries_pasted_credentials():
 
 
 # --------------------------------------------------------------------------
+# transport and config hardening
+# --------------------------------------------------------------------------
+
+def _set_base_url(ws, channel, url):
+    cfg = yaml.safe_load((ws / ".autopilot" / "config.yaml").read_text())
+    cfg["publish"][channel]["base_url"] = url
+    (ws / ".autopilot" / "config.yaml").write_text(yaml.safe_dump(cfg))
+
+
+@pytest.mark.parametrize("url", [
+    "http://wiki.example.com",          # plain http to a real host
+    "wiki.example.com",                 # no scheme at all
+    "ftp://wiki.example.com",
+    "http://127.0.0.1.evil.example",    # loopback-looking, not loopback
+])
+def test_insecure_base_url_is_refused_before_any_request(tmp_path, stub, capsys, url):
+    ws = _ws(tmp_path, stub)
+    _set_base_url(ws, "confluence", url)
+    _done_run(ws)
+    assert publish.main(["prd", str(ws), "r1"]) == 2
+    assert "must be https://" in capsys.readouterr().err
+    assert not stub.requests
+
+
+@pytest.mark.parametrize("url", ["https://wiki.example.com", "http://localhost:8080",
+                                 "http://127.0.0.1:9", "http://[::1]:9"])
+def test_https_and_loopback_pass_the_scheme_check(url):
+    publish._require_secure("confluence", url)  # no raise
+
+
+def test_malformed_url_is_an_http_error_not_a_traceback():
+    """http.client raises ValueError (InvalidURL) for a space or a control
+    character, and urllib for a scheme it does not know - both before a socket
+    opens. Probed directly, since the config gate now rejects most of them
+    first."""
+    for url in ("https://wiki example.com/rest/api/content",
+                "wiki.example.com/rest/api/content",
+                "https://wiki.example.com/rest\nx"):
+        with pytest.raises(publish.HttpError) as e:
+            publish._request("GET", url, (EMAIL, TOKEN))
+        assert "malformed request URL" in str(e.value)
+        assert TOKEN not in str(e.value)
+
+
+def test_space_in_base_url_exits_5_cleanly(tmp_path, stub, capsys):
+    ws = _ws(tmp_path, stub)
+    _set_base_url(ws, "confluence", "https://wiki example.com")
+    _done_run(ws)
+    assert publish.main(["prd", str(ws), "r1"]) == 5
+    cap = capsys.readouterr()
+    assert "malformed request URL" in cap.err
+    assert "Traceback" not in cap.err
+    _assert_no_secrets(cap)
+
+
+def test_unreachable_host_exits_5_with_the_socket_reason(tmp_path, stub, capsys):
+    """The URLError branch: the reason names no URL and carries no credential,
+    which is why it is safe to print where a response body is not."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        dead_port = s.getsockname()[1]
+    ws = _ws(tmp_path, stub)
+    _set_base_url(ws, "confluence", f"http://127.0.0.1:{dead_port}")
+    _done_run(ws)
+    assert publish.main(["prd", str(ws), "r1"]) == 5
+    cap = capsys.readouterr()
+    assert "failed:" in cap.err and "Traceback" not in cap.err
+    _assert_no_secrets(cap)
+
+
+def test_non_json_response_exits_5_without_echoing_the_body(tmp_path, stub, capsys):
+    ws = _ws(tmp_path, stub)
+    _done_run(ws)
+    stub.bad_json = True
+    assert publish.main(["prd", str(ws), "r1"]) == 5
+    cap = capsys.readouterr()
+    assert "non-JSON" in cap.err
+    assert "gateway login required" not in cap.err
+    _assert_no_secrets(cap)
+
+
+@pytest.mark.parametrize("run", ["../../etc", "R1", "a b", "", ".hidden", "a/b"])
+def test_bad_run_id_is_refused_before_any_path_is_built(tmp_path, stub, capsys, run):
+    ws = _ws(tmp_path, stub)
+    assert publish.main(["prd", str(ws), run]) == 2
+    assert "invalid run id" in capsys.readouterr().err
+    assert not stub.requests
+
+
+@pytest.mark.parametrize("stem", ["../../etc/passwd", "a/b", "", ".ssh", "a b"])
+def test_bad_insight_stem_is_refused_before_any_path_is_built(tmp_path, stub, capsys, stem):
+    ws = _ws(tmp_path, stub)
+    assert publish.main(["finding", str(ws), stem]) == 2
+    assert "invalid insight stem" in capsys.readouterr().err
+    assert not stub.requests
+
+
+# --------------------------------------------------------------------------
+# the record could not be written, but the remote write happened (exit 6)
+# --------------------------------------------------------------------------
+
+def test_marker_lock_contention_exits_6_naming_the_published_page(
+        tmp_path, stub, capsys, monkeypatch):
+    """Exit 4 would say "nothing published, fix and re-run" - and a re-run
+    here files a SECOND page. 6 says the page exists and where."""
+    monkeypatch.setattr(publish, "LOCK_TIMEOUT", 0.3)
+    ws = _ws(tmp_path, stub)
+    _done_run(ws)
+    with _held_by_a_live_process(prd_flow.marker_lock(str(ws), "r1"), tmp_path):
+        assert publish.main(["prd", str(ws), "r1"]) == 6
+    cap = capsys.readouterr()
+    assert "the page IS published" in cap.err
+    assert f"{stub.base_url}/spaces/PS/pages/1" in cap.err
+    assert "SECOND page" in cap.err
+    _assert_no_secrets(cap)
+    # the page really was created, and the marker really was left alone
+    assert len([r for r in stub.requests if r["method"] == "POST"]) == 1
+    assert "published" not in prd_flow.load_marker(str(ws), "r1")
+
+
+def test_doc_lock_contention_exits_6_naming_the_filed_issue(
+        tmp_path, stub, capsys, monkeypatch):
+    monkeypatch.setattr(publish, "LOCK_TIMEOUT", 0.3)
+    ws = _ws(tmp_path, stub)
+    doc = _insight(ws)
+    with _held_by_a_live_process(publish._doc_lock(doc), tmp_path):
+        assert publish.main(["finding", str(ws), "checkout-otp"]) == 6
+    cap = capsys.readouterr()
+    assert "ORB-1 IS filed" in cap.err and "SECOND issue" in cap.err
+    assert "published: jira" not in doc.read_text()
+    _assert_no_secrets(cap)
+
+
+def test_prd_flow_and_publish_share_one_marker_lock(tmp_path, stub, monkeypatch):
+    """One lock, not two names guarding the same file: publish.py takes
+    prd_flow's, so a stamp landing mid-publish cannot be lost. Held from
+    outside, BOTH modules must queue on it."""
+    monkeypatch.setattr(publish, "LOCK_TIMEOUT", 0.3)
+    monkeypatch.setattr(prd_flow, "MARKER_LOCK_TIMEOUT", 0.3)
+    ws = _ws(tmp_path, stub)
+    _done_run(ws)
+    lock = prd_flow.marker_lock(str(ws), "r1")
+    assert lock == str(ws / "research" / "r1" / ".marker.lock")
+    with _held_by_a_live_process(lock, tmp_path):
+        with pytest.raises(locks.LockTimeout):
+            prd_flow.record_stage(str(ws), "r1", "intake")
+        with pytest.raises(locks.LockTimeout):
+            publish._record_published(str(ws), "r1", "confluence", {"page_id": "9"})
+
+
+# --------------------------------------------------------------------------
 # Jira
 # --------------------------------------------------------------------------
 
@@ -540,6 +770,97 @@ def test_finding_success_prints_only_the_key(tmp_path, stub, capsys):
     cap = capsys.readouterr()
     assert cap.out.strip() == "ORB-1"
     _assert_no_secrets(cap)
+
+
+def test_record_write_does_not_lose_a_concurrent_edit(tmp_path, stub, monkeypatch):
+    """The doc is a file a human or an agent may be editing right now. The
+    record write re-reads INSIDE the lock, so an edit that lands while we are
+    on the network survives; a write built on the pre-request text would
+    silently throw it away."""
+    ws = _ws(tmp_path, stub)
+    doc = _insight(ws)
+    real_request = publish._request
+
+    def edit_then_request(*a, **kw):
+        doc.write_text(doc.read_text() + "\n- S3: added while filing\n")
+        return real_request(*a, **kw)
+
+    monkeypatch.setattr(publish, "_request", edit_then_request)
+    key, created = publish.publish_finding(str(ws), "checkout-otp")
+
+    text = doc.read_text()
+    assert created and "S3: added while filing" in text
+    assert text.rstrip().endswith(f"<!-- published: jira {key} -->")
+    assert insight_lint.lint_file(doc) == []
+
+
+def test_a_key_recorded_by_someone_else_first_is_reported_not_swallowed(
+        tmp_path, stub, capsys, monkeypatch):
+    """Our issue exists and the doc points at someone else's. Exit 0 would
+    hide an orphan; the message says which key nothing points to."""
+    ws = _ws(tmp_path, stub)
+    doc = _insight(ws)
+    real_request = publish._request
+
+    def race_then_request(*a, **kw):
+        doc.write_text(doc.read_text().rstrip() + "\n\n<!-- published: jira ORB-99 -->\n")
+        return real_request(*a, **kw)
+
+    monkeypatch.setattr(publish, "_request", race_then_request)
+    assert publish.main(["finding", str(ws), "checkout-otp"]) == 6
+    err = capsys.readouterr().err
+    assert "ORB-1 IS filed" in err and "nothing points to" in err
+    assert "ORB-99" in doc.read_text() and "ORB-1 -->" not in doc.read_text()
+
+
+def test_record_write_keeps_the_docs_permissions(tmp_path, stub):
+    """mkstemp makes 0600 files; a published finding must not turn into one."""
+    ws = _ws(tmp_path, stub)
+    doc = _insight(ws)
+    doc.chmod(0o644)
+    publish.publish_finding(str(ws), "checkout-otp")
+    assert doc.stat().st_mode & 0o777 == 0o644
+
+
+def test_record_write_is_atomic(tmp_path, stub, monkeypatch):
+    """mkstemp + os.replace: a crash mid-write must not leave a truncated
+    insight doc where a whole one used to be."""
+    ws = _ws(tmp_path, stub)
+    doc = _insight(ws)
+    original = doc.read_text()
+
+    def boom(*a, **kw):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(publish.os, "replace", boom)
+    with pytest.raises(OSError):
+        publish._append_record(doc, "ORB-9")
+    assert doc.read_text() == original
+    assert not list((ws / "insights").glob("*.tmp"))
+
+
+def test_a_doc_that_merely_quotes_the_record_is_not_published(tmp_path, stub):
+    """The regex is anchored to a whole line. A runbook explaining the syntax
+    mid-sentence must still file, or documenting the feature disables it."""
+    ws = _ws(tmp_path, stub)
+    text = GOOD_INSIGHT.replace(
+        "Something happened.", "x").rstrip() + (
+        "\n\nA published doc carries <!-- published: jira ORB-7 --> at its end.\n")
+    _insight(ws, text=text)
+    key, created = publish.publish_finding(str(ws), "checkout-otp")
+    assert (key, created) == ("ORB-1", True)
+
+
+def test_section_matches_the_whole_heading_line(tmp_path, stub):
+    """`## Answers to reviewers` is not `## Answer`; a prefix match would file
+    the wrong half of the doc as the finding."""
+    text = ("# T\n\n## Answers to reviewers\n\nnot this (S1)\n\n"
+            "## Answer\n\nthis one (S1)\n\n## Basis\n\n- S1: a source\n")
+    ws = _ws(tmp_path, stub)
+    _insight(ws, text=text)
+    publish.publish_finding(str(ws), "checkout-otp")
+    desc = stub.requests[0]["json"]["fields"]["description"]
+    assert "this one (S1)" in desc and "not this" not in desc
 
 
 def test_no_command_prints_usage_and_exits_2(capsys):

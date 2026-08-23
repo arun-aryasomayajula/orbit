@@ -9,7 +9,9 @@ Design reference: dwh-suite's prd_run.py.
 
 Marker: research/<run>/prd-run.json - {run_id, title, brief, created,
 status, stages: {<stage>: {sha, prev_sha, stamped_at, evals: {ok, errors}}},
-approvals: {scope, prd}}. Writes are atomic (mkstemp + os.replace).
+approvals: {scope, prd}}. Writes are atomic (mkstemp + os.replace) and
+serialized by research/<run>/.marker.lock - see marker_lock(), which
+engine/publish.py takes too.
 
 Stage order: intake -> [gate: approve-scope] -> research -> synthesis ->
 draft -> review -> [gate: approve-prd] -> done. Status is either a stage
@@ -46,6 +48,7 @@ import tempfile
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import locks
 import mcp
 import prd_evals
 import secrets_env
@@ -83,6 +86,11 @@ NEXT_STATUS = {
     "review": "awaiting-signoff",
 }
 MARKER_NAME = "prd-run.json"
+MARKER_LOCK_NAME = ".marker.lock"
+# Marker critical sections are pure local file work (read, mutate, atomic
+# write) - never a network call, never a claude invocation. 30s is a timeout
+# only a wedged machine reaches.
+MARKER_LOCK_TIMEOUT = 30
 # A run id becomes a DIRECTORY name under research/ and a token in a slash
 # command, so the controller - not just the dashboard that happens to call it -
 # owns the shape. Anything with a slash, a dot, a quote or a space is refused
@@ -101,6 +109,23 @@ def _run_dir(target, run):
 
 def _marker_path(target, run):
     return os.path.join(_run_dir(target, run), MARKER_NAME)
+
+
+def marker_lock(target, run):
+    """The ONE lock guarding a run's marker, held by every read-modify-write
+    of it - this module's (record_stage, approve_*, revise, new) and
+    engine/publish.py's write of the `published` sub-block alike.
+
+    Two modules mutate this file: publish.py can be on the network for
+    seconds between reading the marker and recording a page id, and a
+    dashboard-launched stage can stamp in that window. Without a lock they
+    share, the loser's write is silently lost - a stamp erased by a publish,
+    or a publish erased by a stamp, in a file whose whole job is being the
+    audit trail. Named for what it guards, not for who takes it.
+
+    NEVER held across a claude invocation (see locks.py) - run_stage takes it
+    only inside record_stage, after the subprocess has already exited."""
+    return os.path.join(_run_dir(target, run), MARKER_LOCK_NAME)
 
 
 def _artifact_path(target, run, stage):
@@ -164,7 +189,8 @@ def new(target, run_id, title, brief="", pm=""):
         "stages": {},
         "approvals": {"scope": None, "prd": None},
     }
-    _atomic_write_json(_marker_path(target, run_id), marker)
+    with locks.hold(marker_lock(target, run_id), timeout=MARKER_LOCK_TIMEOUT):
+        _atomic_write_json(_marker_path(target, run_id), marker)
     return marker
 
 
@@ -181,10 +207,14 @@ def write_marker(target, run, marker):
     """The marker's atomic write, under a public name.
 
     engine/publish.py owns the marker's `published` sub-block (M5 ledger
-    ruling) and does its own locked read-modify-write of that one key. It
-    needs THIS writer - a second hand-rolled atomic write would be a second
-    definition of how this file is written - and reaching into a private for
-    it would hide that dependency from anyone changing the write mechanics."""
+    ruling) and does its own read-modify-write of that one key under
+    marker_lock(). It needs THIS writer - a second hand-rolled atomic write
+    would be a second definition of how this file is written - and reaching
+    into a private for it would hide that dependency from anyone changing the
+    write mechanics.
+
+    Takes no lock of its own: every caller is already inside marker_lock(),
+    and flock is not reentrant (locks.py would raise ReentrantLock)."""
     _write_marker(target, run, marker)
 
 
@@ -251,37 +281,38 @@ def record_stage(target, run, stage):
     fail, the stamp is still recorded (evals.ok: false) but status holds."""
     if stage not in STAGES:
         raise GateError(f"unknown stage '{stage}' (one of: {', '.join(STAGES)})")
-    marker = load_marker(target, run)
-    if marker["status"] != stage:
-        raise GateError(
-            f"cannot record '{stage}': current status is '{marker['status']}'")
-    path = _artifact_path(target, run, stage)
-    if not os.path.exists(path):
-        raise GateError(f"cannot record '{stage}': artifact not found at {path}")
-    with open(path, "rb") as f:
-        raw = f.read()
-    sha = hashlib.sha256(raw).hexdigest()
-    idx = STAGES.index(stage)
-    prev_sha = None
-    if idx > 0:
-        prev_stamp = marker["stages"].get(STAGES[idx - 1])
-        prev_sha = prev_stamp["sha"] if prev_stamp else None
-    if stage == "intake":
-        # Lift intake's pii_touch onto the marker so the scope gate (and the
-        # dashboard card) can see it without re-reading the artifact. Recorded
-        # on every intake stamp, so a revise that clears the flag clears it here.
-        marker["pii_touch"] = _intake_pii_touch(raw)
-    verdict = _eval_verdict(target, run, stage, raw)
-    ok = verdict["ok"]
-    marker["stages"][stage] = {
-        "sha": sha,
-        "prev_sha": prev_sha,
-        "stamped_at": _now(),
-        "evals": verdict,
-    }
-    if ok:
-        marker["status"] = NEXT_STATUS[stage]
-    _write_marker(target, run, marker)
+    with locks.hold(marker_lock(target, run), timeout=MARKER_LOCK_TIMEOUT):
+        marker = load_marker(target, run)
+        if marker["status"] != stage:
+            raise GateError(
+                f"cannot record '{stage}': current status is '{marker['status']}'")
+        path = _artifact_path(target, run, stage)
+        if not os.path.exists(path):
+            raise GateError(f"cannot record '{stage}': artifact not found at {path}")
+        with open(path, "rb") as f:
+            raw = f.read()
+        sha = hashlib.sha256(raw).hexdigest()
+        idx = STAGES.index(stage)
+        prev_sha = None
+        if idx > 0:
+            prev_stamp = marker["stages"].get(STAGES[idx - 1])
+            prev_sha = prev_stamp["sha"] if prev_stamp else None
+        if stage == "intake":
+            # Lift intake's pii_touch onto the marker so the scope gate (and the
+            # dashboard card) can see it without re-reading the artifact. Recorded
+            # on every intake stamp, so a revise that clears the flag clears it here.
+            marker["pii_touch"] = _intake_pii_touch(raw)
+        verdict = _eval_verdict(target, run, stage, raw)
+        ok = verdict["ok"]
+        marker["stages"][stage] = {
+            "sha": sha,
+            "prev_sha": prev_sha,
+            "stamped_at": _now(),
+            "evals": verdict,
+        }
+        if ok:
+            marker["status"] = NEXT_STATUS[stage]
+        _write_marker(target, run, marker)
     return marker
 
 
@@ -308,28 +339,30 @@ def approve_scope(target, run, ack_pii=False):
     needs `ack_pii` on top of the status check: the grounding contract defers
     PII compliance to a human, and a one-click approve is not that human
     saying yes to PII. The dashboard asks a second, explicit question."""
-    marker = load_marker(target, run)
-    if marker["status"] != "awaiting-scope-approval":
-        raise GateError(
-            f"cannot approve scope: status is '{marker['status']}', "
-            "expected 'awaiting-scope-approval'")
-    if marker.get("pii_touch") and not ack_pii:
-        raise GateError("pii_touch run: scope approval requires explicit PII acknowledgement")
-    marker["approvals"]["scope"] = {"at": _now(), "ack_pii": bool(marker.get("pii_touch"))}
-    marker["status"] = "research"
-    _write_marker(target, run, marker)
+    with locks.hold(marker_lock(target, run), timeout=MARKER_LOCK_TIMEOUT):
+        marker = load_marker(target, run)
+        if marker["status"] != "awaiting-scope-approval":
+            raise GateError(
+                f"cannot approve scope: status is '{marker['status']}', "
+                "expected 'awaiting-scope-approval'")
+        if marker.get("pii_touch") and not ack_pii:
+            raise GateError("pii_touch run: scope approval requires explicit PII acknowledgement")
+        marker["approvals"]["scope"] = {"at": _now(), "ack_pii": bool(marker.get("pii_touch"))}
+        marker["status"] = "research"
+        _write_marker(target, run, marker)
     return marker
 
 
 def approve_prd(target, run):
-    marker = load_marker(target, run)
-    if marker["status"] != "awaiting-signoff":
-        raise GateError(
-            f"cannot approve prd: status is '{marker['status']}', "
-            "expected 'awaiting-signoff'")
-    marker["approvals"]["prd"] = {"at": _now()}
-    marker["status"] = "done"
-    _write_marker(target, run, marker)
+    with locks.hold(marker_lock(target, run), timeout=MARKER_LOCK_TIMEOUT):
+        marker = load_marker(target, run)
+        if marker["status"] != "awaiting-signoff":
+            raise GateError(
+                f"cannot approve prd: status is '{marker['status']}', "
+                "expected 'awaiting-signoff'")
+        marker["approvals"]["prd"] = {"at": _now()}
+        marker["status"] = "done"
+        _write_marker(target, run, marker)
     return marker
 
 
@@ -338,15 +371,16 @@ def revise(target, run, stage):
     that gate stages at or after it, and rewind status to `stage`."""
     if stage not in STAGES:
         raise GateError(f"unknown stage '{stage}' (one of: {', '.join(STAGES)})")
-    marker = load_marker(target, run)
-    idx = STAGES.index(stage)
-    for s in STAGES[idx:]:
-        marker["stages"].pop(s, None)
-    if idx == 0:  # revising intake invalidates the scope approval it gates
-        marker["approvals"]["scope"] = None
-    marker["approvals"]["prd"] = None  # any revision before 'done' reopens signoff
-    marker["status"] = stage
-    _write_marker(target, run, marker)
+    with locks.hold(marker_lock(target, run), timeout=MARKER_LOCK_TIMEOUT):
+        marker = load_marker(target, run)
+        idx = STAGES.index(stage)
+        for s in STAGES[idx:]:
+            marker["stages"].pop(s, None)
+        if idx == 0:  # revising intake invalidates the scope approval it gates
+            marker["approvals"]["scope"] = None
+        marker["approvals"]["prd"] = None  # any revision before 'done' reopens signoff
+        marker["status"] = stage
+        _write_marker(target, run, marker)
     return marker
 
 
@@ -499,6 +533,12 @@ def main(argv):
         print(json.dumps(CMDS[cmd](rest), indent=2))
     except GateError as e:
         print(f"gate error: {e}", file=sys.stderr)
+        return 3
+    except (locks.LockTimeout, locks.ReentrantLock) as e:
+        # Another writer holds the marker lock (a publish, another stage, the
+        # dashboard). Transient and retryable - say so instead of dying with a
+        # traceback the PM cannot act on.
+        print(f"marker busy: {e}", file=sys.stderr)
         return 3
     except IndexError:
         print(f"missing argument for '{cmd}' - see prd_flow.py with no args", file=sys.stderr)
