@@ -14,6 +14,7 @@ import os
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -613,8 +614,8 @@ def test_insight_docs_state_absent_without_insights_dir_present_with_stems(cc):
     (root / "funnel-drop.md").write_text("# Funnel drop\n")
 
     docs = cc.insight_docs_state()
-    assert docs == [{"name": "funnel-drop", "jira_key": None},
-                    {"name": "wow-signup", "jira_key": None}]
+    assert docs == [{"name": "funnel-drop", "jira_key": None, "publish_error": None},
+                    {"name": "wow-signup", "jira_key": None, "publish_error": None}]
     s = cc.build_state()
     assert s["insight_docs"] == docs
 
@@ -1166,11 +1167,18 @@ def test_publish_action_unconfigured_gives_clear_message_and_no_popen(cc, monkey
     assert calls == []
 
 
+class _FakePopen:
+    """Stand-in for the detached Popen handle do_prd_action/do_artifact_
+    action now read `.pid` off of, to write the publish-pending record
+    (see _write_publish_pending)."""
+    pid = 424242
+
+
 def test_publish_action_spawns_detached_popen_with_logging(cc, monkeypatch):
     _done_run(cc)
     _write_publish_config(cc, confluence=CONFLUENCE_CFG)
     calls = []
-    monkeypatch.setattr(cc.subprocess, "Popen", lambda cmd, **kw: calls.append((cmd, kw)))
+    monkeypatch.setattr(cc.subprocess, "Popen", lambda cmd, **kw: (calls.append((cmd, kw)), _FakePopen())[1])
     msg = cc.do_prd_action("r1", "publish")
     assert "launched" in msg.lower()
     assert len(calls) == 1
@@ -1267,7 +1275,7 @@ def test_artifact_action_file_jira_spawns_detached_popen_with_logging(cc, monkey
     (ir / "wow-signup.md").write_text("# WoW signup\n## Answer\nit went up\n## Basis\n- S1: data\n")
     _write_publish_config(cc, jira=JIRA_CFG)
     calls = []
-    monkeypatch.setattr(cc.subprocess, "Popen", lambda cmd, **kw: calls.append((cmd, kw)))
+    monkeypatch.setattr(cc.subprocess, "Popen", lambda cmd, **kw: (calls.append((cmd, kw)), _FakePopen())[1])
     msg = cc.do_artifact_action("insight", "wow-signup", "file-jira")
     assert "filing" in msg.lower()
     assert len(calls) == 1
@@ -1301,3 +1309,162 @@ def test_insight_docs_state_surfaces_jira_key_when_record_line_exists(cc):
     docs = {d["name"]: d["jira_key"] for d in cc.insight_docs_state()}
     assert docs["wow-signup"] == "PROD-42"
     assert docs["unfiled"] is None
+
+
+# ── publish failure surfacing (Task/Important 1) ────────────────────────────
+# do_prd_action's `publish` and do_artifact_action's `file-jira` launch
+# publish.py detached and return immediately - a bad config/secret/lint/HTTP/
+# lock failure used to be invisible unless someone opened logs/publish-*.log
+# by hand. _write_publish_pending/_publish_reconcile close that: a small
+# pending-record json next to the log lets prd_pipeline_state/insight_docs_
+# state reconcile pid-alive / succeeded / failed on every poll.
+
+def _dead_pid():
+    """A pid guaranteed dead (spawned and reaped by THIS process, so
+    locks.pid_alive sees ProcessLookupError) - never a guessed large number,
+    which could theoretically collide with something still alive."""
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    return p.pid
+
+
+def _write_pending(cc, log_stem, pid, launched_at):
+    log = Path(cc.AP_STATE) / "logs" / f"{log_stem}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    if not log.exists():
+        log.touch()
+    cc._publish_pending_path(log).write_text(
+        json.dumps({"pid": pid, "log": log_stem, "launched_at": launched_at}))
+    return log
+
+
+def test_publish_error_absent_when_no_pending_record(cc):
+    _done_run(cc)
+    run = cc.prd_pipeline_state()[0]
+    assert run["publish_error"] is None
+
+
+def test_publish_error_absent_while_the_launched_pid_is_still_alive(cc):
+    """Still publishing - nothing to show yet, not an error."""
+    _done_run(cc)
+    _write_pending(cc, "publish-prd-r1", os.getpid(), time.time())
+    run = cc.prd_pipeline_state()[0]
+    assert run["publish_error"] is None
+
+
+def test_publish_error_absent_and_pending_file_cleared_on_success(cc):
+    """pid gone + a success record newer than the launch time = this
+    attempt (or one that superseded it) succeeded - the pending file is
+    reconciled away so it is never re-checked again."""
+    _done_run(cc)
+    dead = _dead_pid()
+    log = _write_pending(cc, "publish-prd-r1", dead, time.time() - 100)
+    marker = cc.prd_flow.load_marker(str(cc.REPO), "r1")
+    marker["published"] = {"confluence": {"page_id": "1", "url": "https://x/1",
+                                          "at": "2026-08-22T00:00:00Z"}}
+    cc.prd_flow._write_marker(str(cc.REPO), "r1", marker)
+
+    run = cc.prd_pipeline_state()[0]
+    assert run["publish_error"] is None
+    assert not cc._publish_pending_path(log).exists()
+
+
+def test_publish_error_present_when_pid_gone_and_no_success_record(cc):
+    """pid gone, no success record at all - a real failure, and the log's
+    own `publish[<code>]: <msg>` line drives the short reason."""
+    _done_run(cc)
+    dead = _dead_pid()
+    log = _write_pending(cc, "publish-prd-r1", dead, time.time())
+    log.write_text("some log noise\npublish[5]: POST https://x/y failed: HTTP 503\n")
+
+    run = cc.prd_pipeline_state()[0]
+    assert run["publish_error"] == {"reason": "HTTP 503", "log": "publish-prd-r1"}
+    # left in place - not silently forgotten after being shown once
+    assert cc._publish_pending_path(log).exists()
+
+
+@pytest.mark.parametrize("code,msg,reason", [
+    (2, "no `publish:` block", "config"),
+    (3, "missing ATLASSIAN_EMAIL", "secrets"),
+    (4, "insight_lint failed", "unapproved/lint"),
+    (5, "POST x failed: HTTP 500", "HTTP 500"),
+    (6, "could not acquire the lock", "lock contention"),
+])
+def test_publish_error_reason_maps_every_exit_code(cc, code, msg, reason):
+    _done_run(cc)
+    dead = _dead_pid()
+    log = _write_pending(cc, "publish-prd-r1", dead, time.time())
+    log.write_text(f"publish[{code}]: {msg}\n")
+    run = cc.prd_pipeline_state()[0]
+    assert run["publish_error"]["reason"] == reason
+
+
+def test_publish_error_surfaces_on_insight_docs_state_too(cc):
+    ir = Path(cc.REPO) / "insights"
+    ir.mkdir()
+    (ir / "wow-signup.md").write_text("# WoW signup\n## Answer\nit went up\n## Basis\n- S1: data\n")
+    dead = _dead_pid()
+    log = _write_pending(cc, "publish-finding-wow-signup", dead, time.time())
+    log.write_text("publish[3]: missing ATLASSIAN_API_TOKEN\n")
+
+    docs = {d["name"]: d for d in cc.insight_docs_state()}
+    assert docs["wow-signup"]["publish_error"] == {"reason": "secrets", "log": "publish-finding-wow-signup"}
+
+
+def test_publish_error_cleared_on_insight_docs_state_when_filed(cc):
+    ir = Path(cc.REPO) / "insights"
+    ir.mkdir()
+    doc = ir / "wow-signup.md"
+    dead = _dead_pid()
+    log = _write_pending(cc, "publish-finding-wow-signup", dead, time.time() - 100)
+    doc.write_text("# WoW signup\n## Answer\nit went up\n## Basis\n- S1: data\n\n"
+                   "<!-- published: jira PROD-42 -->\n")
+
+    docs = {d["name"]: d for d in cc.insight_docs_state()}
+    assert docs["wow-signup"]["publish_error"] is None
+    assert not cc._publish_pending_path(log).exists()
+
+
+def test_shell_renders_publish_error_on_prd_card_and_insight_row(cc):
+    """Source-text pin (no JS runtime in this suite, same template as
+    test_prd_publish_link_gated_on_http_scheme): publishErrorLine must exist,
+    escape its reason text, and actually be called from both prdCard (the
+    PRD band) and insightArtifactRow (the artifact browser) - the two places
+    build_state's publish_error can appear."""
+    shell = (Path(cc.ENGINE) / "cc_shell.html").read_text()
+    assert "function publishErrorLine" in shell
+    body = shell.split("function publishErrorLine", 1)[1].split("\nfunction ", 1)[0]
+    assert "esc(err.reason" in body
+    prd_card = shell.split("function prdCard", 1)[1].split("\nfunction ", 1)[0]
+    assert "publishErrorLine(r.publish_error)" in prd_card
+    insight_row = shell.split("function insightArtifactRow", 1)[1].split("\nfunction ", 1)[0]
+    assert "publishErrorLine(d.publish_error)" in insight_row
+
+
+def test_cmdlog_route_serves_publish_prd_and_finding_logs(cc):
+    """The route's confinement (do_GET's `_cmdlog_name_ok`) must extend to
+    the publish-{prd,finding} log stems, shape-checked the same way as the
+    run id / insight stem they're built from - never widened to an arbitrary
+    filesystem path."""
+    log = Path(cc.AP_STATE) / "logs" / "publish-prd-r1.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("hello from publish-prd-r1\n")
+    assert "hello from publish-prd-r1" in cc.read_cmdlog("publish-prd-r1")
+
+    log2 = Path(cc.AP_STATE) / "logs" / "publish-finding-wow-signup.log"
+    log2.write_text("hello from publish-finding-wow-signup\n")
+    assert "hello from publish-finding-wow-signup" in cc.read_cmdlog("publish-finding-wow-signup")
+
+
+@pytest.mark.parametrize("name", [
+    "publish-prd-../../etc/passwd", "publish-prd-R1", "publish-prd-",
+    "publish-finding-../secret", "publish-finding-", "publish-finding-a/b",
+    "publish-other-x", "../../etc/passwd", "publish-prd-r1.log",
+])
+def test_cmdlog_route_rejects_malformed_publish_log_names(cc, name):
+    # A secret file OUTSIDE logs/ that a traversal attempt would otherwise
+    # reach, to prove a bad name never gets anywhere near it.
+    secret = Path(cc.AP_STATE).parent / "secret.txt"
+    secret.write_text("do not serve me")
+    assert not cc._cmdlog_name_ok(name)
+    assert cc.read_cmdlog(name) == ""

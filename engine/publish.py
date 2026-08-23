@@ -853,14 +853,19 @@ def main(argv):
     try:
         print(CMDS[argv[0]](argv[1:]))
     except PublishError as e:
-        print(f"publish: {e}", file=sys.stderr)
+        # The `[<code>]` tag is a stable, parseable contract, not decoration:
+        # command_center.py's dashboard reconciles a detached publish run's
+        # outcome by reading this exact shape back out of the log (see its
+        # _publish_log_reason) rather than pattern-matching free-text
+        # messages that are free to change independently of this file.
+        print(f"publish[{e.code}]: {e}", file=sys.stderr)
         return e.code
     except (locks.LockTimeout, locks.ReentrantLock) as e:
         # Safety net for a lock taken outside the two paths that wrap their
         # own (both raise LockError with the created id). Nothing was
         # published on this path, but 6 - "the local side is contended" -
         # still beats a traceback.
-        print(f"publish: {e}", file=sys.stderr)
+        print(f"publish[{LockError.code}]: {e}", file=sys.stderr)
         return LockError.code
     return 0
 

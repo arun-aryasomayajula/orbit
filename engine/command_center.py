@@ -2888,6 +2888,28 @@ atexit.register(_teach_atexit_cleanup)
 # silently mix an old run's output into the next one's tail.
 _CMDLOG_ALLOW = {"intake", "knowledge"}
 _KNOWLEDGE_SUBS = {"build", "refresh"}
+# publish-{prd,finding}-* logs (do_prd_action's `publish` branch, do_artifact_
+# action's `file-jira` branch) are the same fixed-name-under-logs/ shape as
+# intake/knowledge, just parameterized by a run id / insight stem instead of
+# hardcoded - so _CMDLOG_ALLOW's plain set membership can't name them ahead of
+# time. _cmdlog_name_ok extends the SAME confinement discipline (never a bare
+# filesystem path from the client) with a shape check instead: the run id
+# after "publish-prd-" must match _PRD_RUN_RE, the stem after "publish-
+# finding-" must match _ARTIFACT_NAME_RE - both already forbid "/" and "..",
+# so there is no traversal to guard against beyond that, same as every other
+# confined reader in this module.
+_PUBLISH_PRD_LOG_PREFIX = "publish-prd-"
+_PUBLISH_FINDING_LOG_PREFIX = "publish-finding-"
+
+
+def _cmdlog_name_ok(name: str) -> bool:
+    if name in _CMDLOG_ALLOW:
+        return True
+    if name.startswith(_PUBLISH_PRD_LOG_PREFIX):
+        return bool(_PRD_RUN_RE.match(name[len(_PUBLISH_PRD_LOG_PREFIX):]))
+    if name.startswith(_PUBLISH_FINDING_LOG_PREFIX):
+        return bool(_ARTIFACT_NAME_RE.match(name[len(_PUBLISH_FINDING_LOG_PREFIX):]))
+    return False
 
 
 def do_intake_run() -> str:
@@ -2919,12 +2941,12 @@ def do_knowledge_run(sub: str) -> str:
 
 def read_cmdlog(name: str, max_lines: int = 400) -> str:
     """Tail of $AP_STATE/logs/<name>.log for the Run view's live poll. `name`
-    must be pre-validated by the caller (do_GET checks membership in
-    _CMDLOG_ALLOW BEFORE calling this, same confinement discipline as
-    read_qa_shot/read_qa_report) — double-checked here too. Never raises and
-    never 500s: a log that hasn't been written yet (action never run) yields
-    an empty string, not an error — the Run view treats that as 'idle'."""
-    if name not in _CMDLOG_ALLOW:
+    must be pre-validated by the caller (do_GET checks _cmdlog_name_ok BEFORE
+    calling this, same confinement discipline as read_qa_shot/read_qa_report)
+    - double-checked here too. Never raises and never 500s: a log that hasn't
+    been written yet (action never run) yields an empty string, not an error
+    - the Run view treats that as 'idle'."""
+    if not _cmdlog_name_ok(name):
         return ""
     p = LOGDIR / f"{name}.log"
     if not p.is_file():
@@ -3197,6 +3219,104 @@ def _publish_channels() -> dict:
             "jira": _ok("jira", ("base_url", "project", "issue_type"))}
 
 
+# ── publish failure surfacing ──────────────────────────────────────────────
+# do_prd_action's `publish` branch and do_artifact_action's `file-jira` branch
+# each launch publish.py detached and return immediately (same discipline as
+# do_intake_run/do_knowledge_run) - the log tells an operator willing to go
+# looking what happened, but nothing before this pointed the board AT a
+# failure, so a bad config/secret/lint/HTTP/lock result was invisible unless
+# someone thought to open logs/publish-*.log by hand.
+#
+# The mechanism: the launcher writes a small pending-record json next to the
+# log (pid + the log's own name-without-suffix, i.e. exactly what /api/cmdlog
+# takes as `name`, + when it was launched). prd_pipeline_state/
+# insight_docs_state reconcile it on every poll:
+#   - pid still alive               -> still publishing, nothing to show yet
+#   - pid gone, a success record exists AT OR AFTER the launch time
+#     (the marker's published.confluence block / the doc's mtime, whichever
+#     applies) -> this attempt (or one that superseded it) succeeded; the
+#     pending file is deleted and nothing is shown
+#   - pid gone, no qualifying success record -> failed; the pending file is
+#     LEFT (so a stale reconcile computation is retried next poll rather than
+#     the failure only ever being reported once and then forgotten) and a
+#     short reason is derived from publish.py's own `publish[<code>]: <msg>`
+#     stderr line (see publish.py main()) - never the raw log body.
+_PUBLISH_CODE_REASON = {2: "config", 3: "secrets", 4: "unapproved/lint",
+                        5: "HTTP failure", 6: "lock contention"}
+_PUBLISH_ERR_RE = re.compile(r"^publish\[(\d+)\]:\s*(.*)$", re.M)
+
+
+def _publish_pending_path(log: Path) -> Path:
+    return log.with_name(log.stem + ".pending.json")
+
+
+def _write_publish_pending(log: Path, pid: int) -> None:
+    """Record a just-launched publish.py invocation for later reconciliation
+    (see the module note above). Best-effort: a write failure here only
+    costs this one run's error surfacing on the board, never the publish
+    itself - it is already launched by the time this runs."""
+    try:
+        _publish_pending_path(log).write_text(
+            json.dumps({"pid": pid, "log": log.stem, "launched_at": time.time()}))
+    except OSError:
+        pass
+
+
+def _publish_log_reason(log: Path) -> str:
+    """Best-effort short reason for a failed publish.py run, parsed from the
+    LAST `publish[<code>]: <message>` line in its log (publish-{prd,finding}
+    logs are append-mode, reused across re-runs, like intake/knowledge - so
+    more than one run's output can be in there). Only this short,
+    already-derived classification ever reaches build_state's JSON; the raw
+    log text is never included (view it via /api/cmdlog if you need it)."""
+    try:
+        text = log.read_text(errors="ignore")
+    except OSError:
+        return "publish failed"
+    matches = _PUBLISH_ERR_RE.findall(text)
+    if not matches:
+        return "publish failed"
+    code_s, msg = matches[-1]
+    try:
+        code = int(code_s)
+    except ValueError:
+        return "publish failed"
+    if code == 5:
+        m = re.search(r"HTTP (\d+)", msg)
+        if m:
+            return f"HTTP {m.group(1)}"
+    return _PUBLISH_CODE_REASON.get(code, "publish failed")
+
+
+def _publish_reconcile(pending_path: Path, success_mtime: float | None) -> dict | None:
+    """One `publish_error` entry (or None - nothing to show) for the pending
+    publish launch recorded at `pending_path`. `success_mtime` is the mtime
+    of whatever file records success for this artifact (the PRD marker / the
+    insight doc) if a success record exists there at all, else None - see
+    the module note above for the full reconciliation table."""
+    try:
+        pending = json.loads(pending_path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(pending, dict):
+        return None
+    pid = pending.get("pid")
+    log_stem = pending.get("log")
+    launched_at = pending.get("launched_at")
+    if pid is not None and locks.pid_alive(pid):
+        return None  # still publishing
+    if (success_mtime is not None and isinstance(launched_at, (int, float))
+            and success_mtime >= launched_at):
+        try:
+            pending_path.unlink()
+        except OSError:
+            pass
+        return None
+    if not isinstance(log_stem, str) or not log_stem:
+        return {"reason": "publish failed", "log": None}
+    return {"reason": _publish_log_reason(LOGDIR / f"{log_stem}.log"), "log": log_stem}
+
+
 def _prd_research_root() -> Path:
     return REPO / "research"
 
@@ -3243,10 +3363,24 @@ def prd_pipeline_state() -> list | None:
         next_actions = _prd_next_actions(status)
         if "publish" in next_actions and not channels["confluence"]:
             next_actions = [a for a in next_actions if a != "publish"]
+        # Publish failure surfacing (see the module note above
+        # _publish_reconcile): a pending record only exists once a publish
+        # was launched for this run, so this is absent-unless-something-to-
+        # show for the overwhelming common case (never published, or the
+        # last publish succeeded and its pending file was already reconciled
+        # away).
+        publish_error = None
+        pending_path = _publish_pending_path(LOGDIR / f"publish-prd-{d.name}.log")
+        if pending_path.exists():
+            try:
+                success_mtime = (d / prd_flow.MARKER_NAME).stat().st_mtime if published else None
+            except OSError:
+                success_mtime = None
+            publish_error = _publish_reconcile(pending_path, success_mtime)
         runs.append({"run_id": marker.get("run_id", d.name), "title": marker.get("title", ""),
                     "status": status, "stages": stages, "tamper": tamper,
                     "pii_touch": bool(marker.get("pii_touch")),
-                    "published": published,
+                    "published": published, "publish_error": publish_error,
                     "next_actions": next_actions})
     return runs
 
@@ -3322,9 +3456,10 @@ def do_prd_action(run: str, action: str, title: str = "", brief: str = "",
         log = AP_STATE / "logs" / f"publish-prd-{run}.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         with log.open("ab") as lf:
-            subprocess.Popen([sys.executable, script, "prd", str(REPO), run],
-                             stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
-                             start_new_session=True)
+            proc = subprocess.Popen([sys.executable, script, "prd", str(REPO), run],
+                                    stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
+                                    start_new_session=True)
+        _write_publish_pending(log, proc.pid)
         return (f"Publish launched for '{run}' - the card shows the page once "
                 f"the marker records it (log: logs/{log.name})")
     return f"unknown prd action '{action}'"
@@ -3522,7 +3657,22 @@ def insight_docs_state() -> list | None:
         stems = sorted(p.stem for p in root.glob("*.md") if _ARTIFACT_NAME_RE.match(p.stem))
     except OSError:
         return []
-    return [{"name": s, "jira_key": _insight_jira_key(root / f"{s}.md")} for s in stems]
+    out = []
+    for s in stems:
+        doc = root / f"{s}.md"
+        jira_key = _insight_jira_key(doc)
+        # Publish failure surfacing - same reconciliation as prd_pipeline_
+        # state's publish_error, keyed to this doc's own pending record.
+        publish_error = None
+        pending_path = _publish_pending_path(LOGDIR / f"publish-finding-{s}.log")
+        if pending_path.exists():
+            try:
+                success_mtime = doc.stat().st_mtime if jira_key else None
+            except OSError:
+                success_mtime = None
+            publish_error = _publish_reconcile(pending_path, success_mtime)
+        out.append({"name": s, "jira_key": jira_key, "publish_error": publish_error})
+    return out
 
 
 # kind -> (root dir, relative-path template) for read_product_artifact. The
@@ -3568,9 +3718,10 @@ def do_artifact_action(kind: str, name: str, action: str) -> str:
     log = AP_STATE / "logs" / f"publish-finding-{name}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("ab") as lf:
-        subprocess.Popen([sys.executable, script, "finding", str(REPO), name],
-                         stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
-                         start_new_session=True)
+        proc = subprocess.Popen([sys.executable, script, "finding", str(REPO), name],
+                                stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
+                                start_new_session=True)
+    _write_publish_pending(log, proc.pid)
     return (f"Filing '{name}' to Jira - the browser shows the key once it's "
             f"recorded (log: logs/{log.name})")
 
@@ -4596,7 +4747,7 @@ class Handler(BaseHTTPRequestHandler):
             # Confined tail for the Run view's live poll — name must be in the
             # fixed allowlist (never a filesystem path from the client).
             name = (qs.get("name", [""])[0]).strip()
-            if name not in _CMDLOG_ALLOW:
+            if not _cmdlog_name_ok(name):
                 self._send(b"invalid name", "text/plain", 400); return
             self._send(read_cmdlog(name).encode(), "text/plain; charset=utf-8")
         elif path == "/api/knowledge-doc":

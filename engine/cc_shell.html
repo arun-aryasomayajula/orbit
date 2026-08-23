@@ -1426,6 +1426,16 @@ function prdPublishBtn(r){
    anchor the moment the card renders. Never trust the marker to already be
    clean; check it again here, at the one place it becomes an href. */
 function isSafeLinkUrl(u){return typeof u==='string'&&/^https?:\/\//i.test(u);}
+/* Publish failure surfacing (build_state's publish_error - see command_center
+   .py's _publish_reconcile): absent unless a launched publish actually
+   failed, so this renders nothing for the overwhelming common case. The log
+   link reuses the Run view's own /api/cmdlog route - `err.log` is already
+   the bare stem _cmdlog_name_ok expects as `name`, never a filesystem path. */
+function publishErrorLine(err){
+  if(!err)return'';
+  const log=err.log?`<a href="#" onclick="openText('publish log - ${escJsAttr(err.log)}','/api/cmdlog?name=${encodeURIComponent(err.log)}',false);return false">view log</a>`:'';
+  return `<div class=meta style="color:var(--red)">⚠ publish failed: ${esc(err.reason||'error')}${log?' - '+log:''}</div>`;
+}
 function prdPublishArea(r){
   const legal=(r.next_actions||[]).includes('publish');
   const pub=r.published;
@@ -1440,11 +1450,12 @@ function prdPublishArea(r){
 }
 function prdCard(r){
   const tamper=(r.tamper&&r.tamper.length)?`<div class=meta style="color:var(--red)">⚠ tamper: ${esc(r.tamper.join('; '))}</div>`:'';
+  const pubErr=publishErrorLine(r.publish_error);
   const btns=(r.next_actions||[]).filter(a=>a!=='publish').map(a=>prdActionBtn(r,a)).join('');
   const pubArea=prdPublishArea(r);
   return `<div class=card><div class="card-h"><span class=tid>${esc(r.run_id)}</span> ${prdStatusBadge(r.status)}${r.pii_touch?' '+badge('PII','warn'):''}</div>
     <div class=title>${esc(r.title)}</div>
-    <div class=meta>${prdStageDots(r.stages)}</div>${tamper}
+    <div class=meta>${prdStageDots(r.stages)}</div>${tamper}${pubErr}
     <div class=btns>${btns}${pubArea}${prdArtifactLinks(r)}</div></div>`;
 }
 function newPrd(){
@@ -1505,12 +1516,13 @@ function insightArtifactRow(d){
     const msg=`File insight '${d.name}' as a Jira issue?`;
     action=`<button class="btn btn-mini" onclick="if(confirm('${escJsAttr(msg)}'))post('/artifact-action',{kind:'insight',name:'${escJsAttr(d.name)}',action:'file-jira'})">File→Jira</button>`;
   }
-  return `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0">
+  return `<div style="padding:4px 0">
+    <div style="display:flex;justify-content:space-between;align-items:center">
     <span>${esc(d.name)}</span>
     <span style="display:flex;gap:6px;align-items:center">
       <button class="btn btn-mini" onclick="openText('${escJsAttr(d.name)}','/product-artifact?kind=insight&name=${encodeURIComponent(d.name)}',false)">View</button>
       ${action}
-    </span></div>`;
+    </span></div>${publishErrorLine(d.publish_error)}</div>`;
 }
 function artifactGroup(title,rowsHtml){
   return rowsHtml?`<div class=meta style="margin-top:10px"><b>${esc(title)}</b></div>${rowsHtml}`:'';
