@@ -81,11 +81,28 @@ if jcfg:
 elif "jira" in sources:
     check("jira in sources has a jira: config block", False, "add a jira: block (see config/schema.yaml)")
 
-# 2d. mcp servers (optional): advisory only — a missing token_env doesn't
+# 2d. publish (optional): advisory only — missing ATLASSIAN_* secrets is the
+# top setup failure, but it doesn't fail doctor itself since a workspace may be
+# mid-setup or only publishes occasionally.
+pub_cfg = cfg.get("publish") if isinstance(cfg.get("publish"), dict) else {}
+secrets = _secrets_env(TARGET)
+if pub_cfg:
+    has_confluence = isinstance(pub_cfg.get("confluence"), dict)
+    has_jira = isinstance(pub_cfg.get("jira"), dict)
+    if has_confluence or has_jira:
+        email_set = "ATLASSIAN_EMAIL" in os.environ or "ATLASSIAN_EMAIL" in secrets
+        token_set = "ATLASSIAN_API_TOKEN" in os.environ or "ATLASSIAN_API_TOKEN" in secrets
+        if not (email_set and token_set):
+            missing = []
+            if not email_set: missing.append("ATLASSIAN_EMAIL")
+            if not token_set: missing.append("ATLASSIAN_API_TOKEN")
+            print(f"  · publish: {' and '.join(missing)} missing — set them in "
+                  f"{os.path.join(AP, '.secrets.env')} (0600) or the environment")
+
+# 2e. mcp servers (optional): advisory only — a missing token_env doesn't
 # fail doctor, since the server may simply not be reached by any queued
 # task yet, but it's the top setup failure a PM will hit once one is.
 mcp_cfg = cfg.get("mcp") if isinstance(cfg.get("mcp"), dict) else {}
-secrets = _secrets_env(TARGET)
 for name, s in mcp_cfg.items():
     te = isinstance(s, dict) and s.get("token_env")
     if te and te not in os.environ and te not in secrets:
@@ -93,13 +110,19 @@ for name, s in mcp_cfg.items():
               f"will reach {name} unauthenticated; a service-mode loop needs it in the "
               f"service environment too")
 
-# Check .secrets.env permissions (if it exists)
+# Check .secrets.env permissions (if it exists) and informational note for
+# Atlassian secrets without publish config
 secrets_path = os.path.join(AP, ".secrets.env")
 if os.path.exists(secrets_path):
     st = os.stat(secrets_path)
     mode = st.st_mode & 0o777
     if mode & 0o077:
         print(f"  · .secrets.env exists with mode {oct(mode)} — group/other bits are readable; should be 0600 or stricter for security")
+    if not pub_cfg:
+        email_set = "ATLASSIAN_EMAIL" in secrets
+        token_set = "ATLASSIAN_API_TOKEN" in secrets
+        if email_set or token_set:
+            print(f"  · Atlassian secrets are set but publish: unconfigured — if you plan to publish to Confluence/Jira, add a publish: block (see config/schema.yaml)")
 
 # 3. router — target's .autopilot/router.yaml overrides the engine default at router/router.yaml
 router_path = find("router.yaml") or (

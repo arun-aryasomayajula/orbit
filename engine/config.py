@@ -283,6 +283,32 @@ def validate(target):
                                               or isinstance(prd["timeout_seconds"], bool)
                                               or prd["timeout_seconds"] <= 0):
                 errs.append(f"prd.timeout_seconds must be a positive integer, got {prd.get('timeout_seconds')!r}")
+    if "publish" in raw and raw["publish"] is not None:
+        pub = raw["publish"]
+        if not isinstance(pub, dict):
+            errs.append(f"publish must be a mapping, got {pub!r}")
+        else:
+            for ch in ("confluence", "jira"):
+                if ch in pub and pub[ch] is not None:
+                    block = pub[ch]
+                    if not isinstance(block, dict):
+                        errs.append(f"publish.{ch} must be a mapping, got {block!r}"); continue
+                    if ch == "confluence":
+                        for field in ("base_url", "space"):
+                            val = block.get(field)
+                            if not isinstance(val, str) or not val.strip():
+                                errs.append(f"publish.{ch}.{field} must be a non-empty string, got {val!r}")
+                        if "parent_id" in block:
+                            pid = block["parent_id"]
+                            if pid is not None and not isinstance(pid, (str, int)):
+                                errs.append(f"publish.confluence.parent_id must be a string, int, or null, got {pid!r}")
+                            elif isinstance(pid, str) and not pid.strip():
+                                errs.append(f"publish.confluence.parent_id must be a non-empty string if set, got {pid!r}")
+                    elif ch == "jira":
+                        for field in ("base_url", "project", "issue_type"):
+                            val = block.get(field)
+                            if not isinstance(val, str) or not val.strip():
+                                errs.append(f"publish.{ch}.{field} must be a non-empty string, got {val!r}")
     if errs:
         print("\n".join("  ✗ " + e for e in errs)); sys.exit(1)
     print("  ✓ config valid")

@@ -227,6 +227,21 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
 #   model: "claude-opus-4-8"      # per-stage model (this is already the default)
 #   timeout_seconds: 3600         # cap on each stage's headless call (also the default)
 
+# --- publish (optional, product workspaces) -----------------------------------
+# REST-based publishing (not MCP) to Atlassian Confluence and Jira: approved PRDs
+# publish to a Confluence page, grounded insights file as Jira issues. Credentials
+# live in .autopilot/.secrets.env as ATLASSIAN_EMAIL and ATLASSIAN_API_TOKEN
+# (0600, never committed). The tokens never appear in logs or URLs.
+# publish:
+#   confluence:
+#     base_url: "https://<org>.atlassian.net"   # Confluence REST endpoint
+#     space: "PROD"                              # space key where pages land
+#     parent_id: null                            # optional: page id to nest under
+#   jira:
+#     base_url: "https://<org>.atlassian.net"   # Jira REST endpoint
+#     project: "ORB"                             # project key
+#     issue_type: "Task"                         # issue type name
+
 # --- pull requests (optional, wrapper-only) ------------------------------------
 # "github" → after pushing a ship, the WRAPPER (never the agent) runs `gh pr create`
 # against base_branch with the review packet as the PR body, and records the URL in
