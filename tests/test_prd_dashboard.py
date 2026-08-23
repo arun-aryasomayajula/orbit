@@ -752,7 +752,7 @@ _ONE_CYCLE_LOG = [
 
 
 def test_turnaround_is_reported_with_a_single_live_worker(cc):
-    """Control for the suppression test below: one worker means the
+    """Control for the interleaved-pairing test below: one worker means the
     start/terminal pairing in the shared log is unambiguous, so the number is
     real and must still be published."""
     _write_worker_pid(cc, "0", os.getpid(), "t-a")
@@ -763,23 +763,45 @@ def test_turnaround_is_reported_with_a_single_live_worker(cc):
     assert rt["cycle_samples"] == 1
 
 
-def test_turnaround_is_suppressed_while_several_workers_are_live(cc):
-    """F9: turnaround is measured by pairing a "cycle start" line with the next
-    terminal line in ONE shared orbit.log. With slots interleaving, slot 1's
-    terminal line closes slot 0's start and the "duration" is the gap between
-    two unrelated events. Publish nothing rather than a number nobody can see
-    is wrong (the UI renders null as "—"). Slot-tagged pairing is M5."""
+def test_turnaround_pairs_correctly_when_several_workers_interleave(cc):
+    """M5: turnaround pairing is keyed by each line's "[slot N]" tag (from M4),
+    not by position in the shared orbit.log. Interleaved so a position-based
+    pairing would get it wrong: slot 1 starts and finishes entirely inside
+    slot 0's still-open cycle, so a same-order algorithm would either close
+    slot 0's start against slot 1's terminal line, or lose slot 0's pairing
+    outright. Keyed pairing gets both right and no longer needs to go dark at
+    concurrency > 1 (replaces F9's suppress-when->1 test)."""
     _write_worker_pid(cc, "0", os.getpid(), "t-a")
     _write_worker_pid(cc, "1", os.getpid(), "t-b")
-    _write_aplog(cc, _ONE_CYCLE_LOG + [
+    _write_aplog(cc, [
+        "[2026-08-22 10:00:00] [slot 0] cycle start (task t-a, 2 pickable)\n",
         "[2026-08-22 10:01:00] [slot 1] cycle start (task t-b, 1 pickable)\n",
-        "[2026-08-22 10:09:00] [slot 1] cycle committed 1 change(s) (def)\n",
+        "[2026-08-22 10:03:00] [slot 1] cycle committed 1 change(s) (def)\n",
+        "[2026-08-22 10:05:00] [slot 0] pushed origin/autopilot/task-t-a (abc) — review\n",
     ])
     rt = cc.probe_runtime()
-    assert rt["last_cycle_dur"] is None
-    assert rt["avg_cycle_sec"] is None
-    assert rt["cycle_samples"] == 0
-    assert rt["heartbeat"] is not None      # everything else still reported
+    assert rt["cycle_samples"] == 2                # slot 1 (120s) then slot 0 (300s)
+    assert rt["last_cycle_dur"] == 300              # the LAST terminal line seen: slot 0's
+    assert rt["avg_cycle_sec"] == 210               # (120 + 300) / 2
+    assert rt["heartbeat"] is not None
+
+
+def test_turnaround_pairs_untagged_legacy_lines_together(cc):
+    """Logs written before slot tagging existed (or a single-slot deployment's
+    untagged history) carry no "[slot N]" tag at all. Those lines share one
+    bucket and keep pairing against each other exactly as they did before
+    M5, unaffected by any slot-tagged lines elsewhere in the same log."""
+    _write_worker_pid(cc, "0", os.getpid(), "t-a")
+    _write_aplog(cc, [
+        "[2026-08-22 09:00:00] cycle start (task t-old, 1 pickable)\n",
+        "[2026-08-22 09:03:00] pushed origin/autopilot/task-t-old (abc) — review\n",
+        "[2026-08-22 10:00:00] [slot 0] cycle start (task t-a, 2 pickable)\n",
+        "[2026-08-22 10:04:00] [slot 0] pushed origin/autopilot/task-t-a (abc) — review\n",
+    ])
+    rt = cc.probe_runtime()
+    assert rt["cycle_samples"] == 2                 # legacy pair (180s), slot 0 pair (240s)
+    assert rt["last_cycle_dur"] == 240
+    assert rt["avg_cycle_sec"] == 210                # (180 + 240) / 2
 
 
 def test_probe_runtime_reuses_build_states_worker_read(cc, monkeypatch):
@@ -1185,6 +1207,44 @@ def test_published_url_surfaced_from_seeded_marker(cc):
                                 "at": "2026-08-22T00:00:00Z"}
     s = cc.build_state()
     assert s["prd"][0]["published"]["url"] == "https://confluence.example.com/x"
+
+
+def test_published_url_with_unsafe_scheme_passes_through_state_unfiltered(cc):
+    """The server never sanitises `published.confluence.url` - it is a
+    trusted-writer field (only publish.py's own _record_published sets it,
+    behind the marker lock) and command_center reads it back verbatim. The
+    ACTUAL defense against a tampered/hand-edited marker carrying something
+    like `javascript:...` lives client-side, in cc_shell.html's
+    isSafeLinkUrl gate (pinned by test_prd_publish_link_gated_on_http_scheme
+    below) - this test only pins that the raw value still reaches the state
+    payload unmodified, which is exactly why that client-side gate is load-
+    bearing rather than defense-in-depth on top of a server-side filter."""
+    _done_run(cc)
+    marker = cc.prd_flow.load_marker(str(cc.REPO), "r1")
+    marker["published"] = {"confluence": {"page_id": "123",
+                                          "url": "javascript:alert(1)",
+                                          "at": "2026-08-22T00:00:00Z"}}
+    cc.prd_flow._write_marker(str(cc.REPO), "r1", marker)
+    run = cc.prd_pipeline_state()[0]
+    assert run["published"]["url"] == "javascript:alert(1)"
+
+
+def test_prd_publish_link_gated_on_http_scheme(cc):
+    """cc_shell.html's prdPublishArea must never hand `published.confluence.url`
+    straight to an <a href> - escAttr stops attribute breakout (a stray '"')
+    but does nothing about the SCHEME, so a marker carrying
+    `url: "javascript:..."` would otherwise become a live anchor the moment
+    the card renders (see the test above: the server hands that value
+    through unfiltered). No JS runtime in this suite, so this is a source-
+    text pin: the scheme check exists, and the render path actually calls it
+    before building the anchor, with an escaped-plain-text fallback when it
+    fails."""
+    shell = (Path(cc.ENGINE) / "cc_shell.html").read_text()
+    assert "function isSafeLinkUrl" in shell
+    assert r"^https?:\/\/" in shell   # the actual check, not just the function's existence
+    area = shell.split("function prdPublishArea", 1)[1].split("\nfunction ", 1)[0]
+    assert "isSafeLinkUrl(url)" in area
+    assert "<a href=" in area and "esc(url)" in area   # anchor branch AND the plain-text fallback
 
 
 # ── /artifact-action: file-jira ─────────────────────────────────────────────

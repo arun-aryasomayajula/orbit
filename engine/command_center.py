@@ -213,6 +213,13 @@ HUMAN_ONLY = {"security", "infrastructure", "release_management", "git_practices
 _LOGTS = re.compile(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\]")
 _TERMINAL = re.compile(r"pushed origin/|cycle produced no changes|cycle rc=|REFUSING|"
                        r"single-cycle|cycle committed|cycle left uncommitted|no-op|daily budget|daily task cap")
+# run.sh's log() writes "[<ts>] [slot N] <message>" (from M4) - the tag sits
+# immediately after the timestamp bracket _LOGTS just matched. Legacy lines
+# (logs written before slot tagging existed, or a single-slot deployment's
+# untagged history) carry no tag at all; those are grouped under _NO_SLOT so
+# they keep pairing against each other exactly as before.
+_SLOT_TAG = re.compile(r"^\s*\[slot (\S+)\]")
+_NO_SLOT = "\x00legacy"
 
 
 # ── data loaders ─────────────────────────────────────────────────────────────
@@ -387,9 +394,21 @@ def probe_runtime(workers: list | None = None) -> dict:
             start = None
 
     # Heartbeat + completed-cycle durations from autopilot.log (turnaround time).
+    # Turnaround is measured by PAIRING each "cycle start" line with the next
+    # terminal line - keyed by the line's "[slot N]" tag, since several slots
+    # interleave their lines into this one shared orbit.log. Pairing by
+    # position alone (M4's original approach) would let slot 1's terminal line
+    # close slot 0's start, reporting the gap between two unrelated events; M4
+    # dealt with that by suppressing the metric outright whenever more than
+    # one worker was live. Keying by slot tag instead pairs each slot's own
+    # start with its own terminal line regardless of interleaving, so the
+    # metric no longer needs to go dark at concurrency > 1. Untagged legacy
+    # lines (logs from before slot tagging existed) have no tag to key on, so
+    # they all share the _NO_SLOT bucket and keep pairing against each other
+    # exactly as they did before this change.
     heartbeat = None
     last_dur = None
-    last_start = None
+    last_start_by_slot: dict[str, float] = {}
     durs = []
     if APLOG.exists():
         for ln in APLOG.read_text(errors="ignore").splitlines()[-1200:]:
@@ -400,25 +419,15 @@ def probe_runtime(workers: list | None = None) -> dict:
             if ep is None:
                 continue
             heartbeat = ep
+            sm = _SLOT_TAG.match(ln[m.end():])
+            slot_key = sm.group(1) if sm else _NO_SLOT
             if "cycle start" in ln:
-                last_start = ep
-            elif _TERMINAL.search(ln) and last_start:
-                last_dur = max(0, int(ep - last_start))
+                last_start_by_slot[slot_key] = ep
+            elif _TERMINAL.search(ln) and slot_key in last_start_by_slot:
+                last_dur = max(0, int(ep - last_start_by_slot.pop(slot_key)))
                 durs.append(last_dur)
-                last_start = None
     recent = durs[-12:]
     avg_cycle = round(sum(recent) / len(recent)) if recent else None
-    # Turnaround is measured by PAIRING a "cycle start" line with the next
-    # terminal line in one shared orbit.log. With several slots interleaving
-    # their lines into that log, the pairing is arbitrary: slot 1's terminal
-    # line closes slot 0's start, and the "duration" is the gap between two
-    # unrelated events. Rather than publish a number that is wrong in a way
-    # nobody can see, suppress it while more than one worker is live (the UI
-    # renders null as "—"). Slot-tagged pairing - the honest fix, since every
-    # line already carries "[slot N]" - is M5.
-    if len(live_tids) > 1:
-        last_dur = avg_cycle = None
-        durs = []
 
     today = datetime.now().strftime("%Y-%m-%d")
     try:
@@ -3465,16 +3474,19 @@ def _confined(root: Path, rel: str) -> Path | None:
     return resolved
 
 
-_JIRA_KEY_TAIL_BYTES = 4096   # publish.py's _append_record always adds the record as the LAST line
+_JIRA_KEY_TAIL_BYTES = 4096   # publish.py's _append_record always adds the record as the LAST line - see its docstring
 
 
 def _insight_jira_key(doc: Path) -> str | None:
     """The Jira key recorded in a published insight doc (publish.py's
     `<!-- published: jira KEY -->` line), or None if it was never filed.
-    Reads only the tail of the file - the record is always appended as the
-    doc's last line, so the last few KB are enough regardless of how long the
-    finding itself runs, and a large doc never costs a full read just to
-    paint a browser row."""
+    Reads only the tail of the file first - the record is always appended as
+    the doc's last line, so the last few KB are enough regardless of how long
+    the finding itself runs, and a large doc never costs a full read just to
+    paint a browser row. Falls back to a full-file scan on a tail miss
+    (cheap: this only fires for the rare doc where the record isn't in the
+    last _JIRA_KEY_TAIL_BYTES) rather than silently reporting "not filed" the
+    day that contract drifts."""
     try:
         size = doc.stat().st_size
         with doc.open("rb") as f:
@@ -3483,6 +3495,15 @@ def _insight_jira_key(doc: Path) -> str | None:
     except OSError:
         return None
     m = publish.JIRA_RECORD_RE.search(tail)
+    if m:
+        return m.group(1)
+    if size <= _JIRA_KEY_TAIL_BYTES:
+        return None   # the tail read already covered the whole file
+    try:
+        full = doc.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    m = publish.JIRA_RECORD_RE.search(full)
     return m.group(1) if m else None
 
 
