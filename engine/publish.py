@@ -630,7 +630,12 @@ def _append_record(doc, key):
     fetched before the network call would silently discard whatever landed in
     between. If someone else recorded a key while we were filing, theirs
     stands (two records would be worse than one) and this returns False - the
-    caller has an issue nothing points to and must say so, not exit 0."""
+    caller has an issue nothing points to and must say so, not exit 0.
+
+    The record always lands as the doc's LAST line - command_center's
+    _insight_jira_key relies on that to read only the tail of the file
+    (cheap) instead of the whole thing, with a full-file fallback for the day
+    this contract drifts."""
     with locks.hold(_doc_lock(doc), timeout=LOCK_TIMEOUT):
         text = doc.read_text(encoding="utf-8")
         if JIRA_RECORD_RE.search(text):

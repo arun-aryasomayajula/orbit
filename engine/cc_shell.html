@@ -1406,12 +1406,22 @@ function prdPublishBtn(r){
   const cls=already?'btn btn-mini':'btn btn-go btn-mini';
   return `<button class="${cls}" onclick="if(confirm('${escJsAttr(msg)}'))post('/prd-action',{run:'${escJsAttr(r.run_id)}',action:'publish'})">${label}</button>`;
 }
+/* http(s)-only, mirroring publish.py's _safe_href defense-in-depth: escAttr
+   stops attribute breakout (a stray '"') but does nothing about the SCHEME -
+   a marker carrying `url: "javascript:...".` would otherwise become a live
+   anchor the moment the card renders. Never trust the marker to already be
+   clean; check it again here, at the one place it becomes an href. */
+function isSafeLinkUrl(u){return typeof u==='string'&&/^https?:\/\//i.test(u);}
 function prdPublishArea(r){
   const legal=(r.next_actions||[]).includes('publish');
   const pub=r.published;
-  if(!legal&&!(pub&&pub.url))return'';
-  const link=(pub&&pub.url)?` <a href="${escAttr(pub.url)}" target="_blank" rel="noopener">${esc(pub.url)}</a>`:'';
-  const bd=(pub&&pub.url)?badge('published','ok'):'';
+  const url=(pub&&pub.url)?String(pub.url):'';
+  if(!legal&&!url)return'';
+  const link=url?(isSafeLinkUrl(url)
+    ?` <a href="${escAttr(url)}" target="_blank" rel="noopener">${esc(url)}</a>`
+    :` ${esc(url)}`)
+    :'';
+  const bd=url?badge('published','ok'):'';
   return `${bd}${link} ${legal?prdPublishBtn(r):''}`;
 }
 function prdCard(r){
