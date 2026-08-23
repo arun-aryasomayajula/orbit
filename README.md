@@ -299,6 +299,12 @@ Design: section 4 of `docs/superpowers/specs/2026-08-20-orbit-product-teams-desi
 Beyond the PRD pipeline, product workspaces cover the rest of the PM loop: `/orbit-analyze-funnel` and `/orbit-hypothesis` turn a question into a cited insight doc, `/orbit-survey-design` and `/orbit-survey-analyze` take a survey from questionnaire to a grounded report (verbatim quotes required, same `insight_lint` gate), standing `watches:` re-file a question on a cadence via the `metric_watch` adapter, and `engine/browse.py` gives cycles a minimal read-only fetch/screenshot driver with saved, re-runnable scrapers.
 Design: `docs/superpowers/plans/2026-08-21-orbit-product-m3.md`.
 
+Design review and publishing close the loop between a workspace's grounded output and the outside world.
+`/orbit-design-review <screen-or-flow>` audits one named screen against hierarchy, spacing, consistency, interaction-state, and accessibility rubrics - every accessibility finding is CRITICAL, unconditionally - sourced from Figma frames when the workspace's `mcp:` block declares a `figma` server, and otherwise abstaining into a `## Coverage gaps` section rather than guessing at a screen it never saw.
+Once a PRD reaches `status: done` (human sign-off) or a finding passes `insight_lint` on its own, `engine/publish.py` files it out of the workspace: the PRD to a Confluence page, the finding to a Jira issue, both gated on that approval and idempotent on every re-run - a re-published PRD updates the same page, a re-filed finding no-ops and prints the key already on record.
+The dashboard carries the same publish actions as buttons on an approved PRD's card and an approved finding's artifact view.
+Design: `docs/superpowers/plans/2026-08-22-orbit-product-m5.md`.
+
 ## Requirements
 
 - **[Claude Code](https://claude.com/claude-code)** (`claude`) on PATH — Orbit drives
