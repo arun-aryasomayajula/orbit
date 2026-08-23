@@ -177,6 +177,17 @@ def _write_marker(target, run, marker):
     _atomic_write_json(_marker_path(target, run), marker)
 
 
+def write_marker(target, run, marker):
+    """The marker's atomic write, under a public name.
+
+    engine/publish.py owns the marker's `published` sub-block (M5 ledger
+    ruling) and does its own locked read-modify-write of that one key. It
+    needs THIS writer - a second hand-rolled atomic write would be a second
+    definition of how this file is written - and reaching into a private for
+    it would hide that dependency from anyone changing the write mechanics."""
+    _write_marker(target, run, marker)
+
+
 def _load_stage_json(target, run, stage):
     with open(_artifact_path(target, run, stage)) as f:
         return json.load(f)
