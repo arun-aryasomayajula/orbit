@@ -69,7 +69,7 @@ goldens:
     hypothesis: always           # no dedicated card yet - verify-before-done applies
     survey_design: always        # no dedicated card yet - verify-before-done applies
     survey_analysis: always      # no dedicated card yet - verify-before-done applies
-    design_review: always       # no dedicated card yet - verify-before-done applies
+    design_review: always        # no dedicated card yet - verify-before-done applies
     # dependencies / developer_experience / observability / infrastructure → `always` card only
 
 # category → routing. `policy`: allow = auto-pickable; human = only if forced:true

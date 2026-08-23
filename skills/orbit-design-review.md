@@ -22,10 +22,14 @@ the following method into the maker brief.
    - Else, if the task names a live URL, fetch it with
      `python3 $ORBIT_HOME/engine/browse.py fetch <url>` through Bash - the
      only sanctioned network access in this skill.
-   - Else, **abstain**: write the doc anyway with a `## Coverage gaps`
-     section stating plainly that no Figma server is configured and no URL
-     was given, so no rubric could be scored. Never guess at a screen you
-     cannot see.
+   - Else, **abstain**: write the doc anyway, exactly like
+     `orbit-survey-analyze` does when no raw responses exist. Basis still
+     needs at least one typed source line - cite the Phase-0 reads
+     themselves (e.g. `- S1: doc CLAUDE.md` / `- S2: doc knowledge/<note>.md`)
+     so the doc never has an empty Basis. Explain the abstention in prose
+     inside `## Answer`, and add a `## Coverage gaps` section stating
+     plainly that no Figma server is configured and no URL was given, so no
+     rubric could be scored. Never guess at a screen you cannot see.
 3. **Audit against every rubric** - each is a distinct section in the doc,
    never folded together:
    - **Hierarchy**: one clear focal point, natural eye flow, above-the-fold
@@ -47,8 +51,10 @@ the following method into the maker brief.
 5. **Write** `insights/<task-id>-design-<slug>.md`: `# title`, `## Answer`
    with severity-bucketed findings (CRITICAL first), `## Basis` with typed
    sources - a Figma frame as `{kind: figma, ref: <frame url>, date, summary}`,
-   a scraped page as `{kind: scrape, ref: <url>, date, summary}`. Every
-   inline claim cites `(S<n>)`.
+   a scraped page as `{kind: scrape, ref: <url>, date, summary}`, or, on the
+   true-abstain path, the Phase-0 doc reads as `{kind: doc, ref: <path>, date,
+   summary}`. `## Basis` is NEVER empty - even a full abstention cites the
+   context docs actually read. Every inline claim cites `(S<n>)`.
 6. **Basis lines MUST start `- S<n>: `** at column 0 (no leading spaces, no
    bullet nesting) - the lint gate matches this exact shape. Literally:
 
@@ -57,14 +63,28 @@ the following method into the maker brief.
    - S1: figma frame https://figma.com/file/.../node-id=1:2, 2026-08-22
    - S2: scrape https://staging.example.com/pilot-screen, 2026-08-22
    ```
+
+   or, on the true-abstain path (no figma server, no URL):
+
+   ```
+   ## Basis
+   - S1: doc CLAUDE.md, 2026-08-22
+   - S2: doc knowledge/design-notes.md, 2026-08-22
+   ```
 7. **Definition of done**: `python3 $ORBIT_HOME/engine/insight_lint.py .`
-   exits 0 on the worktree, and the doc names all four interaction states
-   (loading, error, empty, success) even where one was not observed.
+   exits 0 on the worktree - which requires `## Basis` to carry at least one
+   typed source line even when abstaining - and, whenever a visual source was
+   actually reachable, the doc names all four interaction states (loading,
+   error, empty, success) even where one was not observed.
 
 Design references: the PREMIUM PM-agent methodology (severity-bucketed,
 evidence-cited findings) and dwh-suite's grounding contract (abstain over
-guess, gaps recorded not papered over). The rubric categories - hierarchy,
-spacing, consistency, interaction states, accessibility - and the
-accessibility-is-always-critical rule are credited to gstack's
-`/design-review` skill (`~/.claude/skills/gstack/design-review/SKILL.md`),
-scoped down here to a single named screen/flow with no fix loop.
+guess, gaps recorded not papered over; `orbit-survey-analyze`'s pattern of
+still citing sources on a no-data abstention). The rubric areas - hierarchy,
+spacing, consistency, interaction states, accessibility - are credited to
+gstack's `/design-review` skill
+(`~/.claude/skills/gstack/design-review/SKILL.md`), scoped down here to a
+single named screen/flow with no fix loop. Escalating every accessibility
+finding to CRITICAL severity is Orbit's own rule, not gstack's (gstack grades
+accessibility on the same A-F scale as its other categories) - it comes from
+the user's design principles (accessibility is not optional).
