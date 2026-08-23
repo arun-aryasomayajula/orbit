@@ -27,6 +27,7 @@ import contextlib
 import hmac
 import json
 import os
+import platform
 import re
 import secrets
 import shutil
@@ -330,9 +331,20 @@ def workers_state() -> list | None:
 def loop_loaded() -> bool:
     try:
         out = subprocess.run(["launchctl", "list"], capture_output=True, text=True).stdout
-        return LAUNCHD_LABEL in out
     except Exception:
         return False
+    # Exact match against each line's OWN label field (the last whitespace-
+    # separated column of `launchctl list`'s "PID\tStatus\tLabel" output), not
+    # a substring test of the whole blob: LAUNCHD_LABEL (slot 0's legacy
+    # label, e.g. com.orbit.orbit-app) is a PREFIX of every other slot's own
+    # label (com.orbit.orbit-app-slot1, ...) now that units are per-slot
+    # (Task 7) - `LAUNCHD_LABEL in out` would count a slot-1-only load as
+    # "the loop is loaded" even when slot 0 itself never came up.
+    for line in out.splitlines():
+        cols = line.split()
+        if cols and cols[-1] == LAUNCHD_LABEL:
+            return True
+    return False
 
 
 _CYCLE_LOG_STAMP = re.compile(r"(\d{8}T\d{6})\.log$")
@@ -4170,6 +4182,126 @@ def do_restart(label: str, delay: float = 0) -> str:
     return f"✓ Restarted {label}."
 
 
+# ── restart ALL of this target's installed units, not just slot 0 ─────────
+# LAUNCHD_LABEL (and its use above) names ONE unit: slot 0's LEGACY label
+# (com.orbit.<slug>), which predates per-slot units (Task 7). do_restart_
+# loop_all fixes the bug where clicking "Restart loop" only ever bounced
+# that one slot even when `concurrency` had installed several - it enumerates
+# every on-disk unit file for THIS target's slug, verifies each one's own
+# baked-in ORBIT_TARGET (never trusting a filename match alone - the same
+# slug-collision hazard install_service.sh/doctor.py's _unit_owner_on_disk
+# guard against), and restarts each one individually.
+def _service_slug() -> str:
+    """This target's service slug - byte-identical to install_service.sh's
+    SLUG, launcher.py's _slug, and doctor.py's _service_slug: 'orbit-' + the
+    repo's basename with every non-alphanumeric character replaced by a
+    dash, trailing dashes stripped."""
+    name = re.sub(r"[^a-zA-Z0-9]", "-", REPO.name)
+    return "orbit-" + name.rstrip("-")
+
+
+def _unit_owner_on_disk(name: str, is_darwin: bool) -> str | None:
+    """The ORBIT_TARGET baked into the on-disk unit file for a launchctl
+    label (macOS - ~/Library/LaunchAgents/<name>.plist) or a systemd unit
+    name (Linux - ~/.config/systemd/user/<name>). None if the file is
+    missing or unreadable - callers then fall back to the filename match
+    alone.
+
+    Deliberately mirrors doctor.py's `_unit_owner_on_disk` line for line
+    (which itself mirrors install_service.sh's bash `unit_owner()`) rather
+    than importing it: doctor.py is a top-level script keyed off sys.argv,
+    not an importable module, so a real import would re-run its whole body.
+    Keep the two in sync by hand if this check ever changes."""
+    try:
+        if is_darwin:
+            path = os.path.expanduser(f"~/Library/LaunchAgents/{name}.plist")
+            if not os.path.exists(path):
+                return None
+            import plistlib
+            with open(path, "rb") as f:
+                data = plistlib.load(f)
+            return (data.get("EnvironmentVariables") or {}).get("ORBIT_TARGET")
+        else:
+            path = os.path.expanduser(f"~/.config/systemd/user/{name}")
+            if not os.path.exists(path):
+                return None
+            for line in open(path):
+                if line.startswith("Environment=ORBIT_TARGET="):
+                    return line.rstrip("\n").split("=", 2)[2]
+            return None
+    except (OSError, ValueError):
+        return None
+
+
+def _installed_target_units(is_darwin: bool | None = None) -> list[str]:
+    """Every on-disk unit label (Darwin: the launchd label, e.g.
+    'com.orbit.orbit-app' / 'com.orbit.orbit-app-slot1') or unit filename
+    (Linux: 'orbit-app.service' / 'orbit-app-slot1.service') that belongs to
+    THIS target - slot 0's legacy name plus any `-slotN` sibling, filtered to
+    the ones whose file's own ORBIT_TARGET actually matches this repo. A
+    same-named file belonging to a DIFFERENT target (the slug-collision case
+    install_service.sh/doctor.py guard against) is excluded outright, never
+    counted as one of this target's own slots - a file with no readable
+    ORBIT_TARGET at all is kept (best-effort: a daemon-reported unit's file
+    may have moved since; see doctor.py's own `_installed_slot_labels` for
+    the same fallback)."""
+    if is_darwin is None:
+        is_darwin = platform.system() == "Darwin"
+    slug = _service_slug()
+    target = os.path.abspath(str(REPO))
+    if is_darwin:
+        d = Path(os.path.expanduser("~/Library/LaunchAgents"))
+        if not d.is_dir():
+            return []
+        files = sorted(d.glob(f"com.orbit.{slug}.plist")) + sorted(d.glob(f"com.orbit.{slug}-slot*.plist"))
+        names = [p.stem for p in files]
+    else:
+        d = Path(os.path.expanduser("~/.config/systemd/user"))
+        if not d.is_dir():
+            return []
+        files = sorted(d.glob(f"{slug}.service")) + sorted(d.glob(f"{slug}-slot*.service"))
+        names = [p.name for p in files]
+    owned = []
+    for name in names:
+        owner = _unit_owner_on_disk(name, is_darwin)
+        if owner is not None and owner != target:
+            continue  # foreign-owned collision - never restarted as ours
+        owned.append(name)
+    return owned
+
+
+def do_restart_loop_all(is_darwin: bool | None = None) -> str:
+    """Restart EVERY installed unit belonging to this target - the fix for
+    'Restart loop' only ever bouncing slot 0 (do_restart(LAUNCHD_LABEL) named
+    exactly one legacy label, which says nothing about slot 1..N-1's own
+    separate units once `concurrency` > 1 installed several - see the
+    module note above _service_slug). Darwin-only for the actual restart
+    action, same as do_restart always was; enumeration itself is
+    cross-platform (see _installed_target_units) so the ownership check and
+    its tests aren't tied to one OS. `is_darwin` defaults to the real
+    platform - overridable for tests."""
+    if is_darwin is None:
+        is_darwin = platform.system() == "Darwin"
+    units = _installed_target_units(is_darwin)
+    if not units:
+        return "No installed service units found for this target - nothing to restart."
+    if not is_darwin:
+        return (f"Found {len(units)} installed unit(s) for this target, but "
+                "restart-from-the-dashboard is launchd (macOS) only for now - "
+                f"restart them by hand: systemctl --user restart {' '.join(units)}")
+    ok, failed = [], []
+    for label in units:
+        target = f"gui/{os.getuid()}/{label}"
+        r = subprocess.run(["launchctl", "kickstart", "-k", target], capture_output=True, text=True)
+        if r.returncode == 0:
+            ok.append(label)
+        else:
+            failed.append(f"{label}: {(r.stderr or r.stdout).strip()[:200]}")
+    if failed:
+        return f"Restarted {len(ok)}/{len(units)} unit(s); failed: {'; '.join(failed)}"
+    return f"✓ Restarted {len(ok)} unit(s): {', '.join(ok)}."
+
+
 # ── state assembly (JSON for the SPA) ─────────────────────────────────────────
 def agent_metrics() -> dict:
     """Productivity stats — local & fast (ledger states + the wrapper's saved
@@ -5004,7 +5136,7 @@ class Handler(BaseHTTPRequestHandler):
                     payload = {}
                 msg = do_save_secrets(payload)
             elif path == "/restart-loop":
-                msg = do_restart(LAUNCHD_LABEL)
+                msg = do_restart_loop_all()
             elif path == "/restart-dashboard":
                 msg = do_restart(_dashboard_label(), delay=1)
             else:
