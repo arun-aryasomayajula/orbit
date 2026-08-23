@@ -20,14 +20,16 @@ concurrency: 1               # how many task cycles run in parallel. Each "slot"
                              # guarantees no two slots ever work the same task. Must be 1..32.
                              # 1 = one worker, which is byte-for-byte today's behaviour.
                              #
-                             # WHAT ACTUALLY STARTS THE SLOTS, today: the installed background
-                             # service (`orbit install`, launchd/systemd) runs SLOT 0 ONLY - it is a
-                             # single unit with no ORBIT_SLOT set, so raising this number does not
-                             # make it start more. The extra slots come from the launcher's per-tab
-                             # Start control (`orbit web`, see README "Concurrency and the
-                             # launcher"), which spawns one process per slot, or from running
-                             # `ORBIT_SLOT=<n> engine/run.sh <target>` by hand. Multi-slot service
-                             # units are planned (M5).
+                             # WHAT ACTUALLY STARTS THE SLOTS: `orbit install` writes ONE
+                             # launchd/systemd unit PER slot (0..concurrency-1), each with
+                             # ORBIT_SLOT/ORBIT_SLOTS baked into its environment - raising this
+                             # number and re-running `orbit install` adds the new units; lowering
+                             # it removes the units for the slots that no longer fit. Slot 0 keeps
+                             # the legacy unit name so an existing single-slot install upgrades in
+                             # place. Slots also start from the launcher's per-tab Start control
+                             # (`orbit web`, see README "Concurrency and the launcher"), which
+                             # spawns one process per slot, or from running
+                             # `ORBIT_SLOT=<n> engine/run.sh <target>` by hand.
                              #
                              # Raising it still changes behaviour with one slot running: auto-feed
                              # tops the queue up to `concurrency` pickable tasks. Slot 0 is this

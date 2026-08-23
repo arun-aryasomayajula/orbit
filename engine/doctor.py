@@ -6,7 +6,7 @@ referenced tracks exist · referenced skills resolve · dry-run routing per queu
 Usage: doctor.py <target-repo>  [--all]
 Env:   ORBIT_HOME (engine dir; defaults to this file's repo root)
 """
-import sys, os, json, shutil, subprocess
+import sys, os, json, shutil, subprocess, re, platform
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import secrets_env
@@ -123,6 +123,67 @@ if os.path.exists(secrets_path):
         token_set = "ATLASSIAN_API_TOKEN" in secrets
         if email_set or token_set:
             print(f"  · Atlassian secrets are set but publish: unconfigured — if you plan to publish to Confluence/Jira, add a publish: block (see config/schema.yaml)")
+
+# 2f. installed service slot count vs concurrency (advisory, best-effort;
+# never fatal - launchctl/systemctl may be slow, absent, or the daemon may
+# not be reachable in this shell). Silent when NO unit for this target is
+# installed at all: most workspaces run interactively or via the launcher
+# and were never `orbit install`ed, so "0 installed" is not a problem to
+# report - it is the common case.
+def _service_slug(path):
+    """The service slug for a target repo. Must stay byte-identical to
+    install_service.sh and engine.launcher._slug: 'orbit-' + the basename
+    with every non-alphanumeric character replaced by a dash, trailing
+    dashes stripped."""
+    name = re.sub(r"[^a-zA-Z0-9]", "-", os.path.basename(path.rstrip(os.sep)))
+    return "orbit-" + name.rstrip("-")
+
+def _installed_slot_labels(slug):
+    """Best-effort: the set of installed unit labels/names for THIS target's
+    slug (slot 0's legacy name plus any `-slotN`), via `launchctl list`
+    (macOS) or `systemctl --user list-units` (Linux). Returns None on any
+    failure - including an unrecognized platform - which callers treat the
+    same as "can't tell", never as "zero installed"."""
+    try:
+        if platform.system() == "Darwin":
+            r = subprocess.run(["launchctl", "list"], capture_output=True, text=True, timeout=10)
+            if r.returncode != 0:
+                return None
+            labels = set()
+            for line in r.stdout.splitlines():
+                cols = line.split()
+                if not cols:
+                    continue
+                label = cols[-1]
+                if label == f"com.orbit.{slug}" or label.startswith(f"com.orbit.{slug}-slot"):
+                    labels.add(label)
+            return labels
+        elif platform.system() == "Linux":
+            r = subprocess.run(["systemctl", "--user", "list-units", "--all", "--plain", "--no-legend"],
+                                capture_output=True, text=True, timeout=10)
+            if r.returncode != 0:
+                return None
+            labels = set()
+            for line in r.stdout.splitlines():
+                cols = line.split()
+                if not cols:
+                    continue
+                unit = cols[0]
+                if unit == f"{slug}.service" or (unit.startswith(f"{slug}-slot") and unit.endswith(".service")):
+                    labels.add(unit)
+            return labels
+        return None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+
+_installed = _installed_slot_labels(_service_slug(TARGET))
+if _installed:
+    _want = cfg.get("concurrency", 1)
+    if not isinstance(_want, int) or isinstance(_want, bool) or _want <= 0:
+        _want = 1
+    if len(_installed) != _want:
+        print(f"  · service: {len(_installed)} installed unit(s) for this target, concurrency wants {_want} "
+              f"- re-run `orbit install {TARGET}` to reconcile")
 
 # 3. router — target's .autopilot/router.yaml overrides the engine default at router/router.yaml
 router_path = find("router.yaml") or (

@@ -95,11 +95,11 @@ max_tasks_per_day: 8
 cycle_timeout_seconds: 3600
 
 # How many task cycles run in parallel (one "slot" = one worker with its own
-# worktree). Default 1, max 32. Raising it does NOT by itself start more
-# workers: the installed service (`orbit install`) runs slot 0 only today.
-# The extra slots come from the launcher's per-tab Start control
-# (`orbit web`) or from `ORBIT_SLOT=<n> engine/run.sh <target>` by hand.
-# Multi-slot service units are planned (M5).
+# worktree). Default 1, max 32. Raising it then re-running `orbit install`
+# adds one launchd/systemd unit per new slot (ORBIT_SLOT/ORBIT_SLOTS baked
+# in); lowering it removes the units that no longer fit. Slots also start
+# from the launcher's per-tab Start control (`orbit web`) or from
+# `ORBIT_SLOT=<n> engine/run.sh <target>` by hand.
 # concurrency: 1
 
 spec: null
@@ -176,11 +176,11 @@ max_tasks_per_day: 12
 cycle_timeout_seconds: 3600
 
 # How many task cycles run in parallel (one "slot" = one worker with its own
-# worktree). Default 1, max 32. Raising it does NOT by itself start more
-# workers: the installed service (`orbit install`) runs slot 0 only today.
-# The extra slots come from the launcher's per-tab Start control
-# (`orbit web`) or from `ORBIT_SLOT=<n> engine/run.sh <target>` by hand.
-# Multi-slot service units are planned (M5).
+# worktree). Default 1, max 32. Raising it then re-running `orbit install`
+# adds one launchd/systemd unit per new slot (ORBIT_SLOT/ORBIT_SLOTS baked
+# in); lowering it removes the units that no longer fit. Slots also start
+# from the launcher's per-tab Start control (`orbit web`) or from
+# `ORBIT_SLOT=<n> engine/run.sh <target>` by hand.
 # concurrency: 1
 
 spec: null                   # optional: path to a standing spec the loop rereads (e.g. docs/VISION.md)
