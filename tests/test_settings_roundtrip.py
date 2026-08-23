@@ -77,7 +77,7 @@ def test_product_categories_and_sources_round_trip_unchanged(cc):
 
 
 def test_constants_name_every_product_category_and_source(cc):
-    for cat in ("insight", "funnel", "hypothesis", "survey_design", "survey_analysis"):
+    for cat in ("insight", "funnel", "hypothesis", "survey_design", "survey_analysis", "design_review"):
         assert cat in cc.CATEGORIES_ALL
     assert "metric_watch" in cc.SOURCES_ALL
 

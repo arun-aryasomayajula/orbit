@@ -111,7 +111,7 @@ gates:
     cwd: "."
     needs: []
 
-workable_categories: [insight, funnel, hypothesis, survey_design, survey_analysis, documentation]
+workable_categories: [insight, funnel, hypothesis, survey_design, survey_analysis, design_review, documentation]
 sources: [backlog, metric_watch]
 
 # Standing metric watches (optional): each names a question that gets re-asked

@@ -204,7 +204,7 @@ CYCLE_TIMEOUT = int(os.environ.get("ORBIT_CYCLE_TIMEOUT") or os.environ.get("AP_
 PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}
 PRIORITY_LADDER = ["low", "medium", "high"]
 SAFE = {"testing", "documentation", "dependencies", "code_quality", "developer_experience",
-        "insight", "funnel", "hypothesis", "survey_design", "survey_analysis"}
+        "insight", "funnel", "hypothesis", "survey_design", "survey_analysis", "design_review"}
 # What the loop CAN work when promoted (autopilot:allow). Must match
 # backlog_to_tasks.EMITTABLE_CATEGORIES. HUMAN_ONLY is never loop-pickable.
 EMITTABLE = SAFE | {"bug", "feature", "refactor"}
@@ -3519,7 +3519,7 @@ def do_delete_branches_bulk(kind: str) -> str:
 CATEGORIES_ALL = ["bug", "feature", "refactor", "code_quality", "testing", "documentation",
                   "dependencies", "developer_experience", "security", "infrastructure",
                   "release_management", "git_practices",
-                  "insight", "funnel", "hypothesis", "survey_design", "survey_analysis"]
+                  "insight", "funnel", "hypothesis", "survey_design", "survey_analysis", "design_review"]
 SOURCES_ALL = ["backlog", "backlog-research", "maturity-score", "logwatch", "ui-test",
                "code-review", "security-review", "network-review", "metric_watch"]
 HOSTS_ALL = ["bitbucket", "github", "gitlab"]

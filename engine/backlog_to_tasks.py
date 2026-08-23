@@ -59,6 +59,7 @@ SAFE_CATEGORIES = {
     "hypothesis",        # single-hypothesis triangulation: read-only data pulls into a gated doc
     "survey_design",     # survey questionnaire authoring: writes surveys/<name>/, touches no code
     "survey_analysis",   # survey analysis: read-only data pulls into a gated report.md
+    "design_review",     # named screen/flow design audit: read-only visual review into a gated doc
 }
 # Categories the loop MAY work when explicitly promoted (autopilot:allow). Safe
 # chores PLUS review-gated product work (bug/feature/refactor) — the operator opts
