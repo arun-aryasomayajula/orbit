@@ -210,6 +210,12 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(200, {"id": pid, "_links": {
                 "base": self.server.base_url, "webui": f"/spaces/PS/pages/{pid}"}})
         if self.path == "/rest/api/2/issue":
+            # post_delay: widens the concurrent-duplicate test's race window -
+            # a second, racing process gets a real chance to reach its own
+            # lock acquisition attempt WHILE this response is still pending,
+            # rather than the whole exchange completing before it even starts.
+            if self.server.post_delay:
+                time.sleep(self.server.post_delay)
             self.server.issue_seq += 1
             key = f"ORB-{self.server.issue_seq}"
             self.server.issues[key] = json.loads(raw)
@@ -248,6 +254,7 @@ def stub():
     srv.page_seq = srv.issue_seq = 0
     srv.fail_status = None
     srv.bad_json = False
+    srv.post_delay = 0
     srv.base_url = f"http://127.0.0.1:{srv.server_address[1]}"
     # poll fast: serve_forever's 0.5s default is pure teardown latency, paid
     # once per test in this module.
@@ -645,17 +652,108 @@ def test_marker_lock_contention_exits_6_naming_the_published_page(
     assert "published" not in prd_flow.load_marker(str(ws), "r1")
 
 
-def test_doc_lock_contention_exits_6_naming_the_filed_issue(
+def test_doc_lock_contention_before_any_post_exits_6_without_filing(
         tmp_path, stub, capsys, monkeypatch):
+    """publish_finding now holds `_doc_lock(doc)` across its WHOLE body (the
+    fix for the concurrent-duplicate-Jira-issue bug), so a contended lock
+    blocks BEFORE the POST ever happens - unlike the old failure mode (lock
+    only around the final record write), a genuinely lost race here means
+    NOTHING was filed. Exit 6 still applies (a re-run right now would race
+    the other writer), but the recovery message is "wait and retry", not
+    "reconcile a stray issue by hand"."""
     monkeypatch.setattr(publish, "LOCK_TIMEOUT", 0.3)
     ws = _ws(tmp_path, stub)
     doc = _insight(ws)
     with _held_by_a_live_process(publish._doc_lock(doc), tmp_path):
         assert publish.main(["finding", str(ws), "checkout-otp"]) == 6
     cap = capsys.readouterr()
-    assert "ORB-1 IS filed" in cap.err and "SECOND issue" in cap.err
+    assert "could not acquire" in cap.err.lower()
+    assert not stub.requests, "no issue should ever have been filed while the lock was contended"
     assert "published: jira" not in doc.read_text()
     _assert_no_secrets(cap)
+
+
+def test_concurrent_publish_finding_creates_exactly_one_issue(tmp_path, stub):
+    """The Important-2 regression test: two publish.py `finding` invocations
+    racing the SAME doc, with the stub deliberately delaying its response to
+    the Jira POST so the second process has a real window to race in while
+    the first is still inside its critical section. Before the fix, holding
+    _doc_lock only around the final record write let both processes read
+    "not yet published" before either had recorded anything, so both filed
+    their own issue - one orphaned. After the fix, the lock is held across
+    the whole read-check-POST-record sequence, so exactly one issue is ever
+    created and the second process takes the no-op path."""
+    ws = _ws(tmp_path, stub)
+    _insight(ws)
+    stub.post_delay = 0.5
+
+    results = []
+
+    def run():
+        r = subprocess.run(
+            [sys.executable, str(ORBIT / "engine" / "publish.py"), "finding", str(ws), "checkout-otp"],
+            capture_output=True, text=True)
+        results.append(r)
+
+    t1 = threading.Thread(target=run)
+    t2 = threading.Thread(target=run)
+    t1.start()
+    time.sleep(0.1)   # give t1 a real head start onto the lock
+    t2.start()
+    t1.join(timeout=20)
+    t2.join(timeout=20)
+
+    posts = [r for r in stub.requests if r["method"] == "POST" and r["path"] == "/rest/api/2/issue"]
+    assert len(posts) == 1, f"expected exactly one Jira issue created, got {len(posts)}"
+    assert [r.returncode for r in results] == [0, 0], [r.stderr for r in results]
+    assert sorted(r.stdout.strip() for r in results) == ["ORB-1", "ORB-1"]
+    assert any("already filed" in r.stderr for r in results), \
+        "the second (or blocked) process must take the recorded-key no-op path"
+    doc_text = (ws / "insights" / "checkout-otp.md").read_text()
+    assert doc_text.count("<!-- published: jira") == 1
+
+
+def test_marker_lock_contention_message_never_leaks_pasted_credentials(tmp_path, stub, monkeypatch):
+    """The "page IS published" message interpolates `url` (built from
+    cfg['base_url']) - an operator who pasted a base_url with embedded
+    userinfo must never see it echoed back in this error, same as every
+    other output path in this module routes through _safe_url(). Reached
+    directly (not through the network + a real contended lock, which
+    urllib can't even connect through with userinfo in the host) by
+    monkeypatching _create_page (the "remote write succeeded") and
+    _record_published (the "then the lock was contended") separately."""
+    ws = _ws(tmp_path, stub)
+    _set_base_url(ws, "confluence", "https://leaked-user:leaked-pass@wiki.example.com")
+    _done_run(ws)
+    leaked_url = "https://leaked-user:leaked-pass@wiki.example.com/spaces/PS/pages/1"
+    monkeypatch.setattr(publish, "_create_page", lambda cfg, block, title, storage, auth: ("1", leaked_url))
+
+    def boom(*a, **kw):
+        raise locks.LockTimeout("contended")
+
+    monkeypatch.setattr(publish, "_record_published", boom)
+    with pytest.raises(publish.LockError) as exc:
+        publish.publish_prd(str(ws), "r1")
+    msg = str(exc.value)
+    assert "the page IS published" in msg
+    assert "leaked-user" not in msg and "leaked-pass" not in msg
+
+
+def test_doc_lock_contention_message_never_leaks_pasted_credentials(tmp_path, stub, monkeypatch):
+    """Same guarantee for publish_finding's "issue IS filed" LockError
+    (the "another writer recorded a different key" branch) - reached
+    directly by monkeypatching _request (the successful POST) and
+    _append_record (the lost race) rather than a real network round trip."""
+    ws = _ws(tmp_path, stub)
+    _set_base_url(ws, "jira", "https://leaked-user:leaked-pass@jira.example.com")
+    _insight(ws)
+    monkeypatch.setattr(publish, "_request", lambda *a, **kw: {"key": "ORB-1"})
+    monkeypatch.setattr(publish, "_append_record", lambda doc, key: False)
+    with pytest.raises(publish.LockError) as exc:
+        publish.publish_finding(str(ws), "checkout-otp")
+    msg = str(exc.value)
+    assert "ORB-1 IS filed" in msg
+    assert "leaked-user" not in msg and "leaked-pass" not in msg
 
 
 def test_prd_flow_and_publish_share_one_marker_lock(tmp_path, stub, monkeypatch):

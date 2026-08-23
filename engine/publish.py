@@ -623,24 +623,29 @@ def _doc_lock(doc):
 
 
 def _append_record(doc, key):
-    """Append `<!-- published: jira KEY -->` under the doc's own lock.
+    """Append `<!-- published: jira KEY -->` to `doc`.
 
-    Locked and re-read inside the lock because the doc is a file a human or
-    an agent may be editing right now: a bare read-modify-write built on text
-    fetched before the network call would silently discard whatever landed in
-    between. If someone else recorded a key while we were filing, theirs
-    stands (two records would be worse than one) and this returns False - the
-    caller has an issue nothing points to and must say so, not exit 0.
+    Caller must already hold `_doc_lock(doc)` - publish_finding holds that
+    lock across its ENTIRE body (re-read, lint, POST, record), not just this
+    write, so this function no longer takes the lock itself: `hold()` is not
+    reentrant (locks.py's module docstring), and a second acquisition here by
+    the same process would self-deadlock.
+
+    Still re-reads `doc` immediately before writing, though: the lock rules
+    out another publish.py run racing this one, but not a human or an agent
+    hand-editing the file concurrently without going through this module at
+    all. If someone else's edit landed a record first, theirs stands (two
+    records would be worse than one) and this returns False - the caller has
+    an issue nothing points to and must say so, not exit 0.
 
     The record always lands as the doc's LAST line - command_center's
     _insight_jira_key relies on that to read only the tail of the file
     (cheap) instead of the whole thing, with a full-file fallback for the day
     this contract drifts."""
-    with locks.hold(_doc_lock(doc), timeout=LOCK_TIMEOUT):
-        text = doc.read_text(encoding="utf-8")
-        if JIRA_RECORD_RE.search(text):
-            return False
-        _atomic_write_text(doc, text.rstrip("\n") + "\n\n" + JIRA_RECORD.format(key=key) + "\n")
+    text = doc.read_text(encoding="utf-8")
+    if JIRA_RECORD_RE.search(text):
+        return False
+    _atomic_write_text(doc, text.rstrip("\n") + "\n\n" + JIRA_RECORD.format(key=key) + "\n")
     return True
 
 
@@ -767,7 +772,25 @@ def publish_finding(target, stem):
     unrelated doc failing in the same workspace. Re-running NO-OPS with the
     recorded key (ledger ruling): the doc carries
     `<!-- published: jira KEY -->` after the first file, and commenting on
-    every re-run would spam the issue."""
+    every re-run would spam the issue.
+
+    `_doc_lock(doc)` is held for the WHOLE re-read/no-op-check/lint/POST/
+    record sequence, not just the final record write. Only the read of the
+    "already filed" record used to be serialized; two concurrent runs could
+    each read the doc before either had filed anything, each conclude it was
+    unpublished, and each POST its own Jira issue - one of the two orphaned,
+    with nothing in the doc pointing to it. Holding the lock across the
+    whole body closes that window: whichever run gets there second re-reads
+    the doc AFTER the first one's record has landed and takes the no-op path
+    instead of ever building a payload. This is one in-process critical
+    section around a single HTTP call, not the fork-without-exec hazard
+    locks.py's "never hold across a claude invocation" rule warns about (see
+    its module docstring) - nothing here forks or execs.
+
+    A lock that cannot be acquired within LOCK_TIMEOUT is a genuinely lost
+    race: unlike the old failure mode, NOTHING has been POSTed yet, so there
+    is nothing to reconcile - the caller just needs to wait for the other
+    writer and retry."""
     if not STEM_RE.match(stem or ""):
         # Before the path is built - see STEM_RE.
         raise ConfigError(
@@ -779,48 +802,51 @@ def publish_finding(target, stem):
     doc = Path(_repo_root(target)) / rel_path
     if not doc.is_file():
         raise GateError(f"no insight doc at {doc}")
-    text = doc.read_text(encoding="utf-8")
-
-    already = JIRA_RECORD_RE.search(text)
-    if already:
-        return already.group(1), False
-
-    errs = insight_lint.lint_file(doc)
-    if errs:
-        raise GateError("insight_lint failed - a finding files only once it is "
-                        "grounded:\n" + "\n".join(f"  x {e}" for e in errs))
-
-    summary = _doc_title(text) or stem
-    payload = {"fields": {
-        "project": {"key": cfg["project"]},
-        "issuetype": {"name": cfg["issue_type"]},
-        "summary": summary,
-        "description": _description(text, rel_path),
-    }}
     auth = _auth(target)
-    resp = _request("POST", f"{cfg['base_url']}/rest/api/2/issue", auth, payload)
-    key = resp.get("key")
-    if not key:
-        raise HttpError("jira create returned no issue key")
+
     try:
-        if not _append_record(doc, key):
-            raise LockError(
-                f"issue {key} IS filed at {cfg['base_url']}/browse/{key}, but "
-                f"another writer recorded a different key in {doc} first - "
-                f"{key} is now an issue nothing points to. Close it, or "
-                "reconcile the two by hand.")
-    except (locks.LockTimeout, locks.ReentrantLock) as e:
+        with locks.hold(_doc_lock(doc), timeout=LOCK_TIMEOUT):
+            text = doc.read_text(encoding="utf-8")
+            already = JIRA_RECORD_RE.search(text)
+            if already:
+                return already.group(1), False
+
+            errs = insight_lint.lint_file(doc)
+            if errs:
+                raise GateError("insight_lint failed - a finding files only once it is "
+                                "grounded:\n" + "\n".join(f"  x {e}" for e in errs))
+
+            summary = _doc_title(text) or stem
+            payload = {"fields": {
+                "project": {"key": cfg["project"]},
+                "issuetype": {"name": cfg["issue_type"]},
+                "summary": summary,
+                "description": _description(text, rel_path),
+            }}
+            resp = _request("POST", f"{cfg['base_url']}/rest/api/2/issue", auth, payload)
+            key = resp.get("key")
+            if not key:
+                raise HttpError("jira create returned no issue key")
+            try:
+                if not _append_record(doc, key):
+                    raise LockError(
+                        f"issue {key} IS filed at {_safe_url(cfg['base_url'])}/browse/{key}, "
+                        f"but another writer recorded a different key in {doc} first - "
+                        f"{key} is now an issue nothing points to. Close it, or "
+                        "reconcile the two by hand.")
+            except OSError as e:
+                raise LockError(
+                    f"issue {key} IS filed at {_safe_url(cfg['base_url'])}/browse/{key}, but "
+                    f"{doc} could not be written ({e.strerror}). Append "
+                    f"'{JIRA_RECORD.format(key=key)}' to it by hand, or a re-run will "
+                    "file a SECOND issue.")
+    except locks.LockTimeout as e:
         raise LockError(
-            f"issue {key} IS filed at {cfg['base_url']}/browse/{key}, but the "
-            f"record could not be written to {doc} ({e}). Append "
-            f"'{JIRA_RECORD.format(key=key)}' to that file by hand, or a "
-            "re-run will file a SECOND issue.")
-    except OSError as e:
-        raise LockError(
-            f"issue {key} IS filed at {cfg['base_url']}/browse/{key}, but "
-            f"{doc} could not be written ({e.strerror}). Append "
-            f"'{JIRA_RECORD.format(key=key)}' to it by hand, or a re-run will "
-            "file a SECOND issue.")
+            f"could not acquire the lock on {doc} within {LOCK_TIMEOUT}s ({e}) - "
+            "another publish is already in progress for this doc. Nothing was "
+            "filed by this run; wait for the other one to finish and re-run "
+            "rather than retrying blindly, which risks a second issue if the "
+            "other run is also still mid-flight.")
     return key, True
 
 
