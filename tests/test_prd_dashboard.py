@@ -44,24 +44,24 @@ def _secrets_file(cc):
 
 
 def test_save_creates_file_mode_0600_with_exact_content(cc):
-    msg = cc.do_save_secrets({"set": {"METAQL_TOKEN": "sk-abc123"}})
+    msg = cc.do_save_secrets({"set": {"ANALYTICS_TOKEN": "sk-abc123"}})
     assert msg == "Saved 1 secret(s), removed 0"
     f = _secrets_file(cc)
     assert f.exists()
-    assert f.read_text() == "METAQL_TOKEN=sk-abc123\n"
+    assert f.read_text() == "ANALYTICS_TOKEN=sk-abc123\n"
     mode = stat.S_IMODE(f.stat().st_mode)
     assert mode == 0o600
 
 
 def test_get_masks_values(cc):
-    cc.do_save_secrets({"set": {"METAQL_TOKEN": "sk-abc123", "SHORT": "ab"}})
+    cc.do_save_secrets({"set": {"ANALYTICS_TOKEN": "sk-abc123", "SHORT": "ab"}})
     payload = cc.secrets_payload()
     dumped = json.dumps(payload)
     assert "sk-abc123" not in dumped
     by_name = {s["name"]: s["preview"] for s in payload["secrets"]}
     # Fixed mask + length only - no value characters (not even the first/last
     # two) ever leave the server, regardless of the value's length.
-    assert by_name["METAQL_TOKEN"] == "•••• (9 chars)"
+    assert by_name["ANALYTICS_TOKEN"] == "•••• (9 chars)"
     assert by_name["SHORT"] == "•••• (2 chars)"
 
 
@@ -139,10 +139,10 @@ def test_reserved_prefix_ld_preload_rejected(cc):
     assert "reserved" in msg2.lower()
 
 
-def test_metaql_token_still_accepted_alongside_reserved_name_guard(cc):
-    msg = cc.do_save_secrets({"set": {"METAQL_TOKEN": "sk-abc123"}})
+def test_analytics_token_still_accepted_alongside_reserved_name_guard(cc):
+    msg = cc.do_save_secrets({"set": {"ANALYTICS_TOKEN": "sk-abc123"}})
     assert msg == "Saved 1 secret(s), removed 0"
-    assert _secrets_file(cc).read_text() == "METAQL_TOKEN=sk-abc123\n"
+    assert _secrets_file(cc).read_text() == "ANALYTICS_TOKEN=sk-abc123\n"
 
 
 @pytest.mark.parametrize("name,value", [
@@ -191,7 +191,7 @@ def test_name_deny_list_matches_run_sh_case_guard(cc):
 def test_save_adds_the_gitignore_entry_when_it_is_missing(cc):
     gi = Path(cc.AP_HOME) / ".gitignore"
     gi.write_text("# Orbit secrets\n.jira_token\n.slack_webhook\n")   # pre-M2 shape
-    cc.do_save_secrets({"set": {"METAQL_TOKEN": "sk-abc123"}})
+    cc.do_save_secrets({"set": {"ANALYTICS_TOKEN": "sk-abc123"}})
     lines = gi.read_text().splitlines()
     assert ".secrets.env" in lines
     assert lines.count(".secrets.env") == 1
@@ -201,7 +201,7 @@ def test_save_adds_the_gitignore_entry_when_it_is_missing(cc):
 def test_save_creates_the_gitignore_when_absent_and_never_duplicates(cc):
     gi = Path(cc.AP_HOME) / ".gitignore"
     assert not gi.exists()
-    cc.do_save_secrets({"set": {"METAQL_TOKEN": "sk-abc123"}})
+    cc.do_save_secrets({"set": {"ANALYTICS_TOKEN": "sk-abc123"}})
     assert ".secrets.env" in gi.read_text().splitlines()
     cc.do_save_secrets({"set": {"OTHER_TOKEN": "sk-def456"}})
     assert gi.read_text().splitlines().count(".secrets.env") == 1
@@ -210,7 +210,7 @@ def test_save_creates_the_gitignore_when_absent_and_never_duplicates(cc):
 def test_save_tolerates_a_gitignore_with_no_trailing_newline(cc):
     gi = Path(cc.AP_HOME) / ".gitignore"
     gi.write_text(".jira_token")   # no trailing newline
-    cc.do_save_secrets({"set": {"METAQL_TOKEN": "sk-abc123"}})
+    cc.do_save_secrets({"set": {"ANALYTICS_TOKEN": "sk-abc123"}})
     lines = gi.read_text().splitlines()
     assert lines == [".jira_token", ".secrets.env"]
 
@@ -223,7 +223,7 @@ def test_save_tolerates_a_gitignore_with_no_trailing_newline(cc):
 # its exact prior bytes on failure.
 
 def test_do_save_config_accepts_valid_mcp_block(cc):
-    payload = {"mcp": {"metaql": {"transport": "http", "url": "http://localhost:9999", "tools": "*"}}}
+    payload = {"mcp": {"analytics": {"transport": "http", "url": "http://localhost:9999", "tools": "*"}}}
     msg = cc.do_save_config(json.dumps(payload))
     assert msg.startswith("✓ Saved")
     saved = cc._load_cfg()
@@ -233,10 +233,10 @@ def test_do_save_config_accepts_valid_mcp_block(cc):
 def test_do_save_config_rejects_http_mcp_server_without_url_and_rolls_back(cc):
     cfg_path = Path(cc.AP_HOME) / "config.yaml"
     before = cfg_path.read_text()
-    payload = {"mcp": {"metaql": {"transport": "http", "tools": "*"}}}
+    payload = {"mcp": {"analytics": {"transport": "http", "tools": "*"}}}
     msg = cc.do_save_config(json.dumps(payload))
     assert msg.startswith("Rejected")
-    assert "mcp.metaql.url is required for http transport" in msg
+    assert "mcp.analytics.url is required for http transport" in msg
     assert cfg_path.read_text() == before   # byte-identical rollback
 
 
@@ -1468,3 +1468,16 @@ def test_cmdlog_route_rejects_malformed_publish_log_names(cc, name):
     secret.write_text("do not serve me")
     assert not cc._cmdlog_name_ok(name)
     assert cc.read_cmdlog(name) == ""
+
+
+def test_first_dashboard_task_on_inline_empty_backlog_stays_valid_yaml(cc):
+    """init writes an empty backlog as `tasks: []` (inline). The dashboard's
+    block appender must rewrite that to block form on first append — the
+    regression corrupted backlog.yaml and stalled the loop's queue refresh."""
+    import yaml as _yaml
+    cc.BACKLOG.write_text("# header comment\ntasks: []\n")
+    msg = cc.do_task_new("first-task", "First task", "documentation",
+                         acc_raw="it parses", queue_now=False)
+    assert msg.startswith("Created"), msg
+    doc = _yaml.safe_load(cc.BACKLOG.read_text())
+    assert [t["id"] for t in doc["tasks"]] == ["first-task"]

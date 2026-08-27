@@ -77,6 +77,45 @@ def detect_base_branch():
     except Exception:
         return "main"
 
+def _ensure_loop_viable_git():
+    """The loop carves worktrees off origin/<base> and pushes ships back to
+    origin — a name-first workspace (fresh `git init`, no commits, no remote)
+    satisfies neither and every cycle dies at `worktree add` (burning the
+    daily count as it goes). Make any freshly scaffolded repo loop-viable:
+    an initial commit, the branch named as configured, and — when there is
+    no remote at all — a local bare repo as origin, so fetch/push/worktree
+    behave exactly as on a hosted repo while staying entirely on this disk.
+    Every step is guarded, so imported repos with history are untouched."""
+    import subprocess, yaml as _yaml
+
+    def git(*a, **kw):
+        return subprocess.run(["git", "-C", TARGET, *a], capture_output=True,
+                              text=True, timeout=60, **kw)
+
+    cfg = _yaml.safe_load(open(os.path.join(AP, "config.yaml"))) or {}
+    base = cfg.get("base_branch") or "main"
+    if git("rev-parse", "--verify", "HEAD").returncode != 0:      # zero commits
+        git("add", "-A")
+        r = git("-c", "user.name=orbit-init", "-c", "user.email=orbit@localhost",
+                "commit", "-m", "chore: orbit workspace scaffold")
+        if r.returncode != 0:
+            print(f"  ✗ initial commit failed: {(r.stderr or r.stdout).strip()[-300:]}")
+            return
+        git("branch", "-M", base)                                  # master -> <base>
+        print(f"  ✓ initial commit on {base} (the loop needs a base to orbit)")
+    if git("remote", "get-url", "origin").returncode != 0:         # no remote
+        bare = os.path.join(AP, "state", "origin.git")
+        if not os.path.isdir(bare):
+            subprocess.run(["git", "init", "--bare", "-q", bare],
+                           capture_output=True, text=True, timeout=60)
+        git("remote", "add", "origin", bare)
+        r = git("push", "-q", "-u", "origin", base)
+        if r.returncode == 0:
+            print(f"  ✓ local origin at .autopilot/state/origin.git ({base} pushed) — fully local, no hosting needed")
+        else:
+            print(f"  ✗ could not seed the local origin: {(r.stderr or r.stdout).strip()[-300:]}")
+
+
 def main():
     if os.path.exists(os.path.join(AP, "config.yaml")):
         print(f"  · .autopilot/config.yaml already exists — leaving it untouched")
@@ -86,6 +125,7 @@ def main():
         base = detect_base_branch()
         if PRODUCT:
             cfg = f"""# Orbit PRODUCT workspace profile. Field reference: {ORBIT_HOME}/config/schema.yaml
+mode: product
 repo: "."
 base_branch: "{base}"
 model: "claude-opus-4-8"
@@ -126,17 +166,15 @@ sources: [backlog, metric_watch]
 
 # MCP servers this workspace's cycles may reach (see schema.yaml `mcp:` docs).
 # Uncomment and fill in.
-# token: export METAQL_TOKEN in the shell that runs `orbit run`. Service mode
+# token: export ANALYTICS_TOKEN in the shell that runs `orbit run`. Service mode
 # (launchd/systemd) does NOT inherit your shell — add the variable to the
 # service environment (see `orbit install`) until Keychain delivery lands (M2).
 # mcp:
-#   metaql:
+#   analytics:                        # any analytics MCP (Looker, Superset, ...)
 #     transport: http
-#     url: "https://<your-metaql-mcp-host>/mcp"
-#     token_env: METAQL_TOKEN
-#     tools: [metaql_list_verticals, metaql_list_projects, metaql_list_use_cases,
-#             metaql_list_explores, metaql_get_explore_fields, metaql_generate_query,
-#             metaql_execute_query]
+#     url: "https://<your-analytics-mcp-host>/mcp"
+#     token_env: ANALYTICS_TOKEN
+#     tools: ["*"]                    # or an explicit allowlist of tool names
 #   figma:                            # once declared, orbit-prd-research and
 #     transport: stdio                # orbit-design-review cite the frames
 #     command: npx                    # they open as typed figma-kind research
@@ -260,7 +298,7 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
                 "# inert literal string. Interactive runs and launchd services see the\n"
                 "# same environment either way, and each cycle rereads the file.\n"
                 "#\n"
-                "# METAQL_TOKEN=<your-metaql-token-here>\n")
+                "# ANALYTICS_TOKEN=<your-analytics-mcp-token-here>\n")
         # .gitkeep in each: git tracks files, not directories, so a fresh clone
         # of a committed workspace arrives with no research/ at all - and the
         # dashboard hides the whole PRD band (and its New PRD button) when
@@ -276,7 +314,7 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
                 "# <Product name> workspace\n\n"
                 "This is an Orbit product workspace (PM analysis, insights, research).\n"
                 "State facts, not interpretations. Do not plant hypotheses here.\n\n"
-                "## Data sources\n- MetaQL MCP (see .autopilot/config.yaml `mcp:`)\n\n"
+                "## Data sources\n- Analytics MCP (see .autopilot/config.yaml `mcp:`)\n\n"
                 "## Layout\n- knowledge/: screenshots, schema notes, error mappings\n"
                 "- insights/: grounded analysis outputs (gated by insight_lint)\n"
                 "- research/: PRD runs (M2)\n- surveys/: questionnaires and responses (M3)\n")
@@ -295,6 +333,7 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
         if a.endswith(".md"):
             shutil.copy(os.path.join(ORBIT_HOME, "agents", a), os.path.join(ag_dir, a))
     print("  ✓ installed /orbit-cycle command + agents into .claude/")
+    _ensure_loop_viable_git()
     print(f"\n  next: review {AP}/config.yaml (esp. gates), then `orbit doctor` and `orbit install`")
     print(f"  once gates are confirmed: `orbit knowledge {TARGET} build` surveys the repo into .autopilot/knowledge/ (optional, briefed into every cycle)")
 

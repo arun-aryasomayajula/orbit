@@ -928,12 +928,42 @@ def do_loop_stop(path: str) -> dict:
             "ignored": [w["file"].name for w in stale]}
 
 
+def _name_slug(name: str) -> str:
+    # NOT _slug (line ~431) — that one slugs a PATH into a service label.
+    s = re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")
+    return s[:60]
+
+
+def _derive_workspace_path(name: str) -> Path | None:
+    """Name-first create: a safe local default under ~/orbit-workspaces/<slug>,
+    auto-suffixed past collisions so a retried name never bounces off the
+    not-empty refusal. Returns None when the name yields no usable slug."""
+    slug = _name_slug(name)
+    if not slug:
+        return None
+    root = Path.home() / "orbit-workspaces"
+    for i in range(1, 100):
+        cand = root / (slug if i == 1 else f"{slug}-{i}")
+        if not cand.exists():
+            return cand
+        try:
+            if cand.is_dir() and not any(cand.iterdir()):
+                return cand
+        except OSError:
+            continue
+    return None
+
+
 def do_create(path: str, name: str = "", product: bool = False) -> dict:
     """Create a brand-new workspace at `path`: mkdir -p, `git init`,
     install/init.py (--product for a PM workspace), register it, and bring up
     its dashboard child. Refuses to touch a directory that already has
     anything in it - scaffolding into someone's existing repo is what
     /_launcher/import + /_launcher/init are for.
+
+    Name-first: when `path` is empty, a safe default is derived from `name`
+    (see _derive_workspace_path) - the launcher UI only surfaces the path
+    field under an Advanced disclosure.
 
     Not transactional: a create that dies after `git init` (or partway through
     init.py) leaves a half-built directory behind, and a retry then hits the
@@ -943,7 +973,10 @@ def do_create(path: str, name: str = "", product: bool = False) -> dict:
     only just made."""
     path = (path or "").strip()
     if not path:
-        return {"ok": False, "msg": "path is required"}
+        derived = _derive_workspace_path(name)
+        if derived is None:
+            return {"ok": False, "msg": "a product name (or a path) is required"}
+        path = str(derived)
     p = Path(path).expanduser()
     if not p.is_absolute():
         return {"ok": False, "msg": "path must be absolute"}

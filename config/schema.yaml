@@ -5,6 +5,9 @@
 # Required: repo, base_branch, gates. Everything else has a default.
 
 # --- identity -----------------------------------------------------------------
+mode: product                # workspace mode marker: "product" (PM-first Mission Control) or
+                             # "engineering". Written by init.py; absent on pre-marker workspaces,
+                             # where product mode falls back to scaffold-dir/gate heuristics.
 repo: "."                    # target repo path. "." = the dir containing .autopilot/. Absolute also fine.
 base_branch: "main"          # the loop resets a worktree to origin/<base_branch> each cycle and
                              # forks per-task branches from it. NEVER pushed to directly.
@@ -188,14 +191,14 @@ commit_trailer: "Co-Authored-By: Claude <noreply@anthropic.com>"
 # loads .secrets.env once per iteration, so a token saved in the panel reaches
 # the next cycle without a restart.
 # mcp:
-#   metaql:                          # server name → mcp__metaql__* tool prefix
+#   analytics:                       # server name → mcp__analytics__* tool prefix
 #     transport: http                # http | stdio
 #     url: "https://<host>/mcp"      # http only
-#     token_env: METAQL_TOKEN        # optional; sent as `Authorization: Bearer ${METAQL_TOKEN}` —
+#     token_env: ANALYTICS_TOKEN     # optional; sent as `Authorization: Bearer ${ANALYTICS_TOKEN}` —
 #                                    # the ${VAR} is expanded by Claude Code at run time; the
 #                                    # value comes from .autopilot/.secrets.env (see above), so
 #                                    # the token never lands in config.yaml or in the repo
-#     tools: [metaql_execute_query]  # REQUIRED — "*" = allow every tool on this server;
+#     tools: [execute_query]         # REQUIRED — "*" = allow every tool on this server;
 #                                    # a list allows only those tools; absent/empty allows none
 #   figma:
 #     transport: stdio

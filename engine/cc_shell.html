@@ -11,10 +11,14 @@
 :root{
   /* Orbit palette — blue-shifted deep space: ion-engine blue, aurora green, comet amber */
   --void:#060913; --panel:#0D1424; --card:#131C32; --card2:#1A2542; --line:#1F2A44; --line2:#2B3A5C;
-  --ink:#E8EDF7; --dim:#8B96AC; --faint:#5A6478;
+  /* --faint carries real explanatory copy (subtitles, section labels, hints),
+     so it must clear WCAG AA on the panel background — #7E88A0 on #0D1424 is
+     ~5.2:1; the old #5A6478 was ~3.1:1 and failed. */
+  --ink:#E8EDF7; --dim:#8B96AC; --faint:#7E88A0;
   --amber:#FFB35C; --amber-dim:#4a3416; --green:#4ADE9C; --green-dim:#0d3526;
   --blue:#7C9CFF; --blue-dim:#182a52; --red:#FF6B7A; --red-dim:#43181d;
   --violet:#A78BFA; --violet-dim:#2d2350;
+  --muted:var(--dim); /* alias used by plain-language callouts */
   --disp:"Space Grotesk",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
   --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
   --body:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
@@ -100,6 +104,7 @@ body.rail-collapsed{--rail:66px}
 .rail-collapsed .brand h1,.rail-collapsed .brand .base,.rail-collapsed .navlbl{display:none}
 .rail-collapsed nav{padding:12px 8px}
 .rail-collapsed .nav{font-size:0;justify-content:center;padding:10px 0}
+.rail-collapsed .nav .navtxt,.rail-collapsed .nav .key{display:none}
 .rail-collapsed .nav .ico{font-size:16px}
 .rail-collapsed .nav .nb,.rail-collapsed .nav .key{display:none}
 .rail-collapsed .nav.on::before{left:-8px}
@@ -477,6 +482,77 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
 .projsw-mini:hover{color:var(--ink);border-color:var(--faint)}
 .projsw-mini:disabled{opacity:.4;cursor:not-allowed}
 .rail-collapsed .projsw{display:none}
+
+/* ── Product mode (PM-first chrome) ─────────────────────────────────────── */
+/* Mode is server-injected (__MODE__) and the rail/views are AUTHORED per mode
+   in renderNav()/each render function — body.pm only carries the few pure-CSS
+   differences (pm-only blocks, brand prefix). No post-render relabeling. */
+.pm-only{display:none !important}
+body.pm .pm-only{display:block !important}
+body.pm #dawnBrief.pm-only{display:grid !important}
+body.pm #pmPill.pm-only{display:inline-flex !important}
+body.pm #pmHeroTip.pm-only{display:block !important}
+body.pm #setupCoach.setup-coach{display:block}
+/* Every view carries one visible page heading, named identically to its rail
+   entry (set from the same NAV definition in renderNav). */
+.pagehead{margin:0 0 4px;font:600 20px/1.25 var(--disp)}
+.pagehead .aside{font:500 11.5px var(--mono);color:var(--faint);letter-spacing:0;margin-left:10px}
+.pagesub{margin:0 0 16px;font:500 12.5px/1.5 var(--body);color:var(--dim);max-width:72ch}
+/* Diagnostics disclosure (product mode): engineering views live behind this
+   explicit entry — collapsed by default, expanded state is session-local. */
+.diag-toggle{color:var(--faint)}
+.diag-group{display:none}
+.diag-group.open{display:contents}
+/* Primary actions (hero, dialogs, settings actions) get a 44px touch target;
+   dense .btn-mini rows inside cards are secondary and stay compact. */
+#heroBtns .btn,.modalbox .btn:not(.btn-mini),.set-actions .btn,.first-outcome .btn{min-height:44px}
+/* First-outcome card (Setup landing on a brand-new product workspace) */
+.first-outcome .btn{font-size:13.5px;padding:10px 18px}
+/* Work / Library readers reuse the ds-wrap list+pane layout */
+#workRead .md-body,#libRead .md-body{max-width:76ch}
+.wl-state{font:500 10.5px var(--mono);color:var(--faint)}
+.dawn{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:14px 0 6px}
+@media(max-width:980px){.dawn{grid-template-columns:1fr}}
+.dawn-col{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 15px;min-height:140px}
+.dawn-col h3{margin:0 0 4px;font:600 11px/1 var(--disp);letter-spacing:.16em;text-transform:uppercase;color:var(--faint)}
+.dawn-col.need h3{color:var(--amber)}
+.dawn-col.flight h3{color:var(--blue)}
+.dawn-col.landed h3{color:var(--green)}
+.dawn-col .dawn-sub{font:500 11px/1.45 var(--mono);color:var(--dim);margin:0 0 10px}
+.dawn-item{display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-top:1px solid var(--line)}
+.dawn-item:first-of-type{border-top:0;padding-top:0}
+.dawn-item .di-title{font:600 13px/1.35 var(--disp);color:var(--ink)}
+.dawn-item .di-meta{font:500 11px/1.4 var(--mono);color:var(--dim);margin-top:2px}
+.dawn-item .di-act{margin-left:auto;flex:none}
+.dawn-empty{font:500 12.5px/1.5 var(--disp);color:var(--faint);padding:8px 0}
+.setup-coach{margin:12px 0 4px;padding:14px 16px;border:1px solid var(--line2);border-radius:12px;
+  background:linear-gradient(105deg,rgba(124,156,255,.08),transparent 55%);display:none}
+.setup-coach h3{margin:0 0 6px;font:600 14px/1.3 var(--disp)}
+.setup-coach p{margin:0 0 10px;color:var(--dim);font:500 12.5px/1.5 var(--disp);max-width:62ch}
+.setup-steps{display:flex;flex-wrap:wrap;gap:8px;list-style:none;padding:0;margin:0}
+.setup-steps li{display:flex;align-items:center;gap:8px;padding:7px 11px;border-radius:8px;
+  background:var(--card);border:1px solid var(--line);font:500 12px var(--disp);color:var(--ink)}
+.setup-steps li.done{border-color:#1d5c40;color:var(--green)}
+.setup-steps li .n{font:600 10px var(--mono);color:var(--faint);min-width:1.2em}
+.setup-steps li.done .n{color:var(--green)}
+.pm-hero-tip{font:500 12px/1.5 var(--disp);color:var(--dim);margin:0 0 8px;max-width:60ch}
+.md-body{font:400 13.5px/1.65 var(--body);color:var(--ink);padding:4px 2px}
+.md-body h1,.md-body h2,.md-body h3{font-family:var(--disp);letter-spacing:.01em;margin:1.1em 0 .4em;line-height:1.25}
+.md-body h1{font-size:1.45em}.md-body h2{font-size:1.2em}.md-body h3{font-size:1.05em;color:var(--blue)}
+.md-body p{margin:.55em 0}.md-body ul,.md-body ol{margin:.4em 0 .6em 1.3em;padding:0}
+.md-body li{margin:.2em 0}.md-body code{font:500 12px var(--mono);background:var(--card2);padding:1px 5px;border-radius:4px}
+.md-body pre{background:var(--void);border:1px solid var(--line);border-radius:8px;padding:12px;overflow:auto;
+  font:400 11.5px/1.55 var(--mono)}.md-body pre code{background:none;padding:0}
+.md-body blockquote{margin:.7em 0;padding:6px 12px;border-left:3px solid var(--blue);color:var(--dim);background:rgba(124,156,255,.05)}
+.md-body a{color:var(--blue)}.md-body hr{border:0;border-top:1px solid var(--line);margin:1.2em 0}
+.md-body table{border-collapse:collapse;width:100%;margin:.7em 0;font-size:12.5px}
+.md-body th,.md-body td{border:1px solid var(--line);padding:6px 8px;text-align:left}
+.md-body th{background:var(--card2);font-family:var(--disp);font-size:11px;letter-spacing:.04em}
+.pm-pill{display:inline-flex;align-items:center;gap:6px;font:600 10px var(--disp);letter-spacing:.12em;
+  text-transform:uppercase;color:var(--blue);background:var(--blue-dim);border:1px solid #2b4f86;
+  border-radius:999px;padding:3px 9px;margin-bottom:8px}
+body.pm .brand .base::before{content:"product · ";color:var(--blue)}
+
 </style></head><body>
 
 <div id="stars" aria-hidden="true"></div><div id="stars2" aria-hidden="true"></div>
@@ -585,34 +661,11 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
       <div class="projsw-menu" id="projSwMenu" style="display:none"></div>
     </div>
   </div>
-  <nav aria-label="Views">
-    <div class="navlbl">Console</div>
-    <button class="nav on" data-view="overview" onclick="go('overview')"><span class="ico">◉</span>Overview<span class="key">1</span></button>
-    <button class="nav" data-view="inbox" onclick="go('inbox')"><span class="ico">📥</span>Inbox<span class="nb" id="nb-inbox">0</span></button>
-    <button class="nav" data-view="queue" onclick="go('queue')"><span class="ico">☰</span>Queue<span class="nb" id="nb-queue">0</span></button>
-    <button class="nav" data-view="deepspace" onclick="go('deepspace')"><span class="ico">🌌</span>Deep space<span class="nb" id="nb-deepspace">0</span></button>
-    <button class="nav" data-view="ships" onclick="go('ships')"><span class="ico">⬆</span>Ships<span class="nb" id="nb-ships">0</span></button>
-    <button class="nav" data-view="branches" onclick="go('branches')"><span class="ico">⎇</span>Branches<span class="nb" id="nb-branches">0</span></button>
-    <button class="nav" data-view="qa" onclick="go('qa')" style="display:none"><span class="ico">🧪</span>QA<span class="nb" id="nb-qa"></span></button>
-    <div class="navlbl">Fleet</div>
-    <button class="nav" data-view="agents" onclick="go('agents')"><span class="ico">🚧</span>Feature agents<span class="key">7</span></button>
-    <button class="nav" data-view="insights" onclick="go('insights')"><span class="ico">📈</span>Insights<span class="key">8</span></button>
-    <div class="navlbl">Onboarding</div>
-    <button class="nav" data-view="run" onclick="go('run')" title="Run intake / build the knowledge base"><span class="ico">🛫</span>Run</button>
-    <button class="nav" data-view="knowledge" onclick="go('knowledge')" title="Browse the knowledge base"><span class="ico">📚</span>Knowledge<span class="nb" id="nb-knowledge"></span></button>
-    <div class="navlbl">Admin</div>
-    <button class="nav" data-view="settings" onclick="go('settings')" title="Settings"><span class="ico">⚙</span>Settings</button>
-    <div class="navlbl">Help</div>
-    <button class="nav" onclick="openText('📖 Operator guide — what everything means','/guide',false)"><span class="ico">📖</span>Guide</button>
-  </nav>
-  <div class="railfoot">
-    <button class="btn" id="loopBtn" onclick="toggleLoop()">…</button>
-    <button class="btn btn-ghost" id="feedBtn" onclick="toggleFeed()" title="When on, the loop promotes the next safe task itself whenever the queue runs dry.">Auto-feed</button>
-    <button class="btn btn-ghost" onclick="newTaskForm()" title="create a backlog task right here — no YAML editing">＋ New task</button>
-    <button class="btn btn-ghost" onclick="newInsightForm()" title="quick-add an insights/ task — category, acceptance criteria, and queueing pre-filled">💡 New insight</button>
-    <button class="btn btn-ghost" onclick="reapStalled()" title="escalate tasks stuck mid-cycle (claimed/committed by a dead cycle) onto the gates — the loop does this each iteration, but a paused loop can't">🧹 Reap stalled</button>
-    <div class="meter" id="budgetMeter"></div>
-  </div>
+  <!-- Rail nav is authored per mode by renderNav() from the NAV_ENG/NAV_PM
+       definitions (source-owned copy — the same names feed the page headings).
+       Never patch labels after render. -->
+  <nav id="navRail" aria-label="Views"></nav>
+  <div class="railfoot" id="railFoot"></div>
 </aside>
 
 <main id="main">
@@ -621,8 +674,11 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
     <span class="stale" id="stalePill">⚠ reconnecting…</span>
   </div>
 
-  <!-- ── OVERVIEW ── -->
+  <!-- ── OVERVIEW / TODAY ── -->
   <section class="view on" id="view-overview">
+    <h2 class="pagehead" id="hd-overview"></h2>
+    <p class="pagesub" id="sub-overview"></p>
+    <div id="setupCoach" class="setup-coach" aria-live="polite"></div>
     <div id="hero">
       <div class="orbit idle" id="orbit">
         <svg viewBox="0 0 96 96" aria-hidden="true">
@@ -632,15 +688,18 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
         <div class="sat">🛰️</div>
       </div>
       <div class="hero-main">
+        <div id="pmPill" class="pm-pill pm-only">Product workspace</div>
         <p class="hero-state" id="heroState">…</p>
         <p class="hero-sub" id="heroSub"></p>
+        <p class="pm-hero-tip pm-only" id="pmHeroTip">Start here each morning — Orbit only asks when a human decision is required.</p>
       </div>
       <div class="hero-btns" id="heroBtns"></div>
     </div>
+    <div id="dawnBrief" class="dawn pm-only"></div>
     <div class="stats" id="stats"></div>
     <div class="eyebrow" id="planEyebrow" style="display:none">Flight plan — next picks <span class="aside">highest priority first</span></div>
     <div class="chips" id="nextPreview" style="display:none"></div>
-    <div class="eyebrow">Needs you <span class="aside" id="inboxAside"></span></div>
+    <div class="eyebrow"><span id="ovNeedsLbl">Needs you</span> <span class="aside" id="inboxAside"></span></div>
     <div id="inboxPreview"></div>
     <div class="tailwrap" id="tailband" style="display:none">
       <div class="bandhead"><h3>Telemetry</h3><span class="bandsum" id="tailfile"></span></div>
@@ -648,12 +707,11 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
     </div>
   </section>
 
-  <!-- ── INBOX ── -->
+  <!-- ── INBOX / DECISIONS — body is authored per mode by renderInboxAll ── -->
   <section class="view" id="view-inbox">
-    <div class="eyebrow">Escalations — the agent stopped and asked <span class="aside">answer one and it re-queues with your answer in the contract</span></div>
-    <div class="rows" id="inboxEsc"></div>
-    <div class="eyebrow">Ships awaiting your review <span class="aside">read the packet, then merge or reject</span></div>
-    <div class="rows" id="inboxShips"></div>
+    <h2 class="pagehead" id="hd-inbox"></h2>
+    <p class="pagesub" id="sub-inbox"></p>
+    <div id="inboxBody"></div>
   </section>
 
   <!-- ── QUEUE ── -->
@@ -797,10 +855,31 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
     </div>
   </section>
 
+  <!-- ── WORK (product): PRDs, insights, surveys, watches — filters + reader ── -->
+  <section class="view" id="view-work">
+    <h2 class="pagehead" id="hd-work"></h2>
+    <p class="pagesub">What are we learning or making? Filter by type; open anything to read it with its evidence and publishing state.</p>
+    <div class="chips" id="workFilters"></div>
+    <div class="ds-wrap">
+      <div class="ds-list" id="workList"></div>
+      <div class="ds-read" id="workRead"><div class=ds-read-empty>✦<br><b>Pick an item</b> to read it here.</div></div>
+    </div>
+  </section>
+
+  <!-- ── LIBRARY (product): finished and reference material, read as documents ── -->
+  <section class="view" id="view-library">
+    <h2 class="pagehead" id="hd-library"></h2>
+    <p class="pagesub">What can I read, reuse, or share? Published PRDs, insight and survey reports, and optional technical knowledge.</p>
+    <div class="ds-wrap">
+      <div class="ds-list" id="libList"></div>
+      <div class="ds-read" id="libRead"><div class=ds-read-empty>▤<br><b>Pick a document</b> to read it here.</div></div>
+    </div>
+  </section>
+
   <!-- ── SETTINGS / ADMIN ── -->
   <section class="view" id="view-settings">
-    <h2 style="margin:0 0 4px">Settings <span class=aside>config.yaml is the single source of truth — point Orbit at any repo</span></h2>
-    <p class="colsub" style="margin:0 0 16px">Edit, Save, then Restart the loop to apply. Everything here is per-target, so this same Orbit engine drives any codebase.</p>
+    <h2 class="pagehead" style="margin:0 0 4px"><span id="hd-settings">Settings</span> <span class=aside id="settingsAside">config.yaml is the source of truth</span></h2>
+    <p class="colsub" style="margin:0 0 16px" id="settingsBlurb">Edit, Save, then Restart the loop to apply. Structured forms for watches and secrets; advanced JSON stays available when you need it.</p>
     <div id="settingsBody"><div class=empty>Loading configuration…</div></div>
   </section>
 
@@ -827,19 +906,19 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
   </section>
 </main>
 
-<div class="modal" id="modal" onclick="closeModal()"><div class="modalbox" onclick="event.stopPropagation()">
+<div class="modal" id="modal" onclick="closeModal()"><div class="modalbox" role="dialog" aria-modal="true" aria-label="Weekly digest" onclick="event.stopPropagation()">
   <h3>Weekly digest</h3>
   <textarea id="digesttext" readonly></textarea>
   <div style="margin-top:10px;display:flex;gap:8px">
     <button class="btn btn-blue btn-mini" onclick="copyDigest()">Copy to clipboard</button>
     <button class="btn btn-mini" onclick="closeModal()">Close</button></div>
 </div></div>
-<div class="modal" id="modal2" onclick="closeModal2()"><div class="modalbox wide" onclick="event.stopPropagation()">
+<div class="modal" id="modal2" onclick="closeModal2()"><div class="modalbox wide" role="dialog" aria-modal="true" aria-labelledby="m2title" onclick="event.stopPropagation()">
   <h3 id="m2title"></h3>
-  <pre id="m2body" class="viewer"></pre>
+  <div id="m2body" class="viewer"></div>
   <div style="margin-top:10px"><button class="btn btn-mini" onclick="closeModal2()">Close</button></div>
 </div></div>
-<div class="modal" id="modal3" onclick="closeModal3()"><div class="modalbox" onclick="event.stopPropagation()">
+<div class="modal" id="modal3" onclick="closeModal3()"><div class="modalbox" role="dialog" aria-modal="true" aria-labelledby="m3title" onclick="event.stopPropagation()">
   <h3 id="m3title"></h3>
   <div class="m3ctx" id="m3ctx"></div>
   <textarea id="m3text" class="modalbox-ta" placeholder=""></textarea>
@@ -847,22 +926,24 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
     <button class="btn btn-go btn-mini" id="m3go" onclick="submitAction()"></button>
     <button class="btn btn-mini" onclick="closeModal3()">Cancel</button></div>
 </div></div>
-<div class="modal" id="modal4" onclick="closeModal4()"><div class="modalbox" onclick="event.stopPropagation()" style="width:min(440px,92vw)">
+<div class="modal" id="modal4" onclick="closeModal4()"><div class="modalbox" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" onclick="event.stopPropagation()" style="width:min(440px,92vw)">
   <h3>Keyboard</h3>
   <div style="font:500 12.5px/2.2 var(--mono);color:var(--dim)">
     <div><kbd>⌘K</kbd> or <kbd>/</kbd> &nbsp;find anything, jump to it</div>
-    <div><kbd>1</kbd>–<kbd>8</kbd> &nbsp;switch views</div>
+    <div><kbd>1</kbd>–<kbd id="kbdMaxDigit">8</kbd> &nbsp;switch views</div>
     <div><kbd>?</kbd> &nbsp;this help</div>
     <div><kbd>Esc</kbd> &nbsp;close any overlay</div>
   </div>
   <div style="margin-top:10px"><button class="btn btn-mini" onclick="closeModal4()">Close</button></div>
 </div></div>
-<div class="modal" id="modal5" onclick="closeModal5()"><div class="modalbox" onclick="event.stopPropagation()">
+<div class="modal" id="modal5" onclick="closeModal5()"><div class="modalbox" role="dialog" aria-modal="true" aria-labelledby="m5title" onclick="event.stopPropagation()">
   <h3 id="m5title"></h3>
   <div class="m3ctx" id="m5hint"></div>
   <div style="display:flex;flex-direction:column;gap:6px">
-    <input id="tfId" class="tfin" placeholder="id — lowercase slug, e.g. fix-login-timeout" autocomplete="off" oninput="tfIdAuto=false">
+    <!-- Title first: it's the field a human means to type. The id follows it
+         automatically and only matters to the machine. -->
     <input id="tfTitle" class="tfin" placeholder="title — what done looks like, in one line" autocomplete="off" oninput="_tfAutoSlug()">
+    <input id="tfId" class="tfin" placeholder="id — lowercase slug, auto-filled from the title" autocomplete="off" oninput="tfIdAuto=false">
     <div style="display:flex;gap:6px">
       <select id="tfCat" class="tfin" style="flex:1"></select>
       <select id="tfPri" class="tfin" style="width:130px">
@@ -877,7 +958,7 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
     <button class="btn btn-go btn-mini" onclick="submitTaskForm()">Save</button>
     <button class="btn btn-mini" onclick="closeModal5()">Cancel</button></div>
 </div></div>
-<div class="modal" id="modal6" onclick="closeModal6()"><div class="modalbox" onclick="event.stopPropagation()">
+<div class="modal" id="modal6" onclick="closeModal6()"><div class="modalbox" role="dialog" aria-modal="true" aria-label="New PRD" onclick="event.stopPropagation()">
   <h3>＋ New PRD</h3>
   <div style="display:flex;flex-direction:column;gap:6px">
     <input id="pfRun" class="tfin" placeholder="run id - lowercase letters, digits, hyphens, e.g. checkout-redesign" autocomplete="off" oninput="_pfValidateRun()">
@@ -890,17 +971,43 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
     <button class="btn btn-go btn-mini" onclick="submitPrdForm()">Create</button>
     <button class="btn btn-mini" onclick="closeModal6()">Cancel</button></div>
 </div></div>
+<!-- Orbit dialog — replaces every native browser dialog: dialog semantics,
+     focus moved in on open and restored on close, Tab trapped, Esc cancels. -->
+<div class="modal" id="ccDlg" onclick="ccDlgCancel()"><div class="modalbox" id="ccDlgBox" role="dialog" aria-modal="true" aria-labelledby="ccDlgTitle" onclick="event.stopPropagation()">
+  <h3 id="ccDlgTitle"></h3>
+  <div class="m3ctx" id="ccDlgMsg" style="white-space:pre-wrap"></div>
+  <textarea id="ccDlgInput" class="modalbox-ta" style="display:none" rows="3"></textarea>
+  <div style="margin-top:12px;display:flex;gap:8px">
+    <button class="btn btn-go" id="ccDlgOk" onclick="ccDlgConfirm()"></button>
+    <button class="btn" id="ccDlgNo" onclick="ccDlgCancel()">Cancel</button></div>
+</div></div>
 <div id="palette" onclick="closePalette()"><div class="palbox" onclick="event.stopPropagation()">
   <input id="palinput" placeholder="Find a task, ship, or escalation… (or type an action)" autocomplete="off">
   <div id="pallist"></div>
   <div class="palhint"><span><kbd>↑↓</kbd> move</span><span><kbd>↵</kbd> jump / run</span><span><kbd>Esc</kbd> close</span></div>
 </div></div>
-<div class="toast" id="toast"></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div id="a11yAnnounce" aria-live="polite" style="position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)"></div>
 
 <script>
 /* ── plumbing ───────────────────────────────────────────────────────────── */
 const TOKEN="__TOKEN__";
+// Server-injected workspace mode ("product" | "eng") — the first paint is
+// mode-correct before /api/state ever lands. S.product_mode confirms it live.
+const MODE="__MODE__";
 const POST_HDRS={'Content-Type':'application/x-www-form-urlencoded','X-CC-Token':TOKEN};
+// innerHTML setter that no-ops when nothing changed: keeps 1s-tick renders
+// from destroying focus/selection inside containers that are actually stable.
+function setHTML(el,html){if(el&&el._cchtml!==html){el._cchtml=html;el.innerHTML=html;}}
+function setText(el,txt){if(el&&el._cctxt!==txt){el._cctxt=txt;el.textContent=txt;}}
+// Modal focus discipline: opening saves the invoker, closing restores it.
+const _modalFocus={};
+function openModalEl(id){_modalFocus[id]=document.activeElement;document.getElementById(id).style.display='flex';}
+function closeModalEl(id){
+  document.getElementById(id).style.display='none';
+  const f=_modalFocus[id]; delete _modalFocus[id];
+  if(f&&f.focus&&document.contains(f))f.focus();
+}
 const esc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 // Defense-in-depth for values interpolated into a single-quoted JS string
 // literal INSIDE an onclick="..." HTML attribute (e.g. runFlow('${...}')):
@@ -934,13 +1041,197 @@ function post(path,params){const b=new URLSearchParams(params).toString();
     .then(r=>r.json()).then(j=>{toast(j.msg||'done');refresh();}).catch(e=>toast('error: '+e));}
 function toast(m){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');
   clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),6000);}
-function reapStalled(){
-  if(confirm('Reap stalled tasks?\n\nAny task stuck mid-cycle (claimed or committed by a cycle that died) longer than the cycle timeout escalates onto the gates. Fresh/running work is never touched.'))
-    post('/reap',{});}
 
-/* ── navigation ─────────────────────────────────────────────────────────── */
-const VIEWS=['overview','inbox','queue','deepspace','ships','branches','agents','insights','settings','qa','run','knowledge'];
+/* ── Orbit dialog (no native confirm/prompt anywhere) ────────────────────────
+   ccConfirm(msg, okLabel?, danger?) -> Promise<boolean>
+   ccReason(title, msg, placeholder?, okLabel?) -> Promise<string|null>
+   Dialog semantics live on #ccDlgBox (role=dialog, aria-modal). Focus moves
+   to the primary button (or textarea) on open, Tab is trapped inside, Esc or
+   backdrop-click cancels, and focus returns to the opener on close. */
+let _dlg=null;   // {resolve, input, prevFocus}
+function _dlgOpen(opts){
+  return new Promise(resolve=>{
+    _dlg={resolve,input:!!opts.input,prevFocus:document.activeElement};
+    document.getElementById('ccDlgTitle').textContent=opts.title||'Confirm';
+    document.getElementById('ccDlgMsg').textContent=opts.msg||'';
+    const ta=document.getElementById('ccDlgInput');
+    ta.style.display=opts.input?'':'none'; ta.value=''; ta.placeholder=opts.placeholder||'';
+    const ok=document.getElementById('ccDlgOk');
+    ok.textContent=opts.ok||'Confirm';
+    ok.className='btn '+(opts.danger?'btn-stop':'btn-go');
+    document.getElementById('ccDlg').style.display='flex';
+    (opts.input?ta:ok).focus();
+  });
+}
+function _dlgClose(val){
+  if(!_dlg)return;
+  document.getElementById('ccDlg').style.display='none';
+  const d=_dlg; _dlg=null;
+  if(d.prevFocus&&d.prevFocus.focus&&document.contains(d.prevFocus))d.prevFocus.focus();
+  d.resolve(val);
+}
+function ccDlgConfirm(){
+  if(!_dlg)return;
+  if(_dlg.input){
+    const v=document.getElementById('ccDlgInput').value.trim();
+    if(!v){toast('A reason is required.');document.getElementById('ccDlgInput').focus();return;}
+    _dlgClose(v);
+  }else _dlgClose(true);
+}
+function ccDlgCancel(){_dlgClose(_dlg&&_dlg.input?null:false);}
+function ccConfirm(msg,okLabel,danger){return _dlgOpen({msg,ok:okLabel||'Confirm',danger:!!danger});}
+function ccReason(title,msg,placeholder,okLabel){return _dlgOpen({title,msg,placeholder,ok:okLabel||'Submit',input:true});}
+// Tab trap + Enter-to-confirm inside the dialog.
+document.addEventListener('keydown',e=>{
+  if(!_dlg)return;
+  const box=document.getElementById('ccDlgBox');
+  if(e.key==='Tab'){
+    const f=[...box.querySelectorAll('textarea,button')].filter(x=>x.offsetParent!==null);
+    if(!f.length)return;
+    const i=f.indexOf(document.activeElement);
+    e.preventDefault();
+    f[(i+(e.shiftKey?-1:1)+f.length)%f.length].focus();
+  }else if(e.key==='Enter'&&document.activeElement&&document.activeElement.tagName!=='TEXTAREA'){
+    e.preventDefault();ccDlgConfirm();
+  }
+},true);
+// The overwhelmingly common call shape: confirm, then POST.
+function confirmPost(msg,path,params,okLabel,danger){
+  ccConfirm(msg,okLabel,danger).then(ok=>{if(ok)post(path,params);});
+}
+function reapStalled(){
+  confirmPost('Reap stalled tasks?\n\nAny task stuck mid-cycle (claimed or committed by a cycle that died) longer than the cycle timeout escalates onto the gates. Fresh/running work is never touched.','/reap',{},'Reap stalled');}
+
+/* ── navigation: per-mode views authored once (source-owned copy) ────────────
+   The same NAV definitions feed the rail labels AND the page headings, so a
+   view has one name everywhere. Product mode's engineering surfaces live
+   behind the explicit Diagnostics entry; digit keys and persisted navigation
+   are validated against the active mode's own view list. */
+function isProductMode(){ return S ? !!S.product_mode : MODE==='product'; }
+const NAV_ENG=[
+  {lbl:'Console'},
+  {view:'overview',ico:'◉',name:'Overview'},
+  {view:'inbox',ico:'◎',name:'Inbox',nb:'nb-inbox'},
+  {view:'queue',ico:'☰',name:'Queue',nb:'nb-queue'},
+  {view:'deepspace',ico:'✦',name:'Deep space',nb:'nb-deepspace'},
+  {view:'ships',ico:'⬆',name:'Ships',nb:'nb-ships'},
+  {view:'branches',ico:'⎇',name:'Branches',nb:'nb-branches'},
+  {view:'qa',ico:'◌',name:'QA',nb:'nb-qa',qa:true},
+  {lbl:'Fleet'},
+  {view:'agents',ico:'⬡',name:'Feature agents'},
+  {view:'insights',ico:'◈',name:'Insights'},
+  {lbl:'Onboarding'},
+  {view:'run',ico:'▷',name:'Run',title:'Run intake / build the knowledge base'},
+  {view:'knowledge',ico:'⬡',name:'Knowledge',nb:'nb-knowledge'},
+  {lbl:'Admin'},
+  {view:'settings',ico:'⚙',name:'Settings'},
+  {lbl:'Help'},
+  {guide:true}
+];
+const DIAG_ITEMS=[
+  {view:'queue',ico:'☰',name:'Queue',nb:'nb-queue'},
+  {view:'deepspace',ico:'✦',name:'Deep space',nb:'nb-deepspace'},
+  {view:'ships',ico:'⬆',name:'Ships',nb:'nb-ships'},
+  {view:'branches',ico:'⎇',name:'Branches',nb:'nb-branches'},
+  {view:'agents',ico:'⬡',name:'Feature agents'},
+  {view:'insights',ico:'◈',name:'Loop health'},
+  {view:'qa',ico:'◌',name:'QA',nb:'nb-qa',qa:true},
+  {view:'run',ico:'▷',name:'Run'},
+  {view:'knowledge',ico:'⬡',name:'Knowledge',nb:'nb-knowledge'}
+];
+const NAV_PM=[
+  {lbl:'Console'},
+  {view:'overview',ico:'◉',name:'Today'},
+  {view:'inbox',ico:'◎',name:'Decisions',nb:'nb-inbox'},
+  {view:'work',ico:'✦',name:'Work',nb:'nb-work'},
+  {view:'library',ico:'▤',name:'Library'},
+  {lbl:'Workspace'},
+  {view:'settings',ico:'⚙',name:'Setup'},
+  {lbl:'Help'},
+  {guide:true},
+  {diag:true}
+];
+// Digit-key order per mode. Product mode digits can NEVER reach an
+// engineering view; those need the explicit Diagnostics disclosure.
+const ENG_KEYS=['overview','inbox','queue','deepspace','ships','branches','agents','insights'];
+const PM_VIEWS=['overview','inbox','work','library','settings'];
+const DIAG_VIEWS=DIAG_ITEMS.map(x=>x.view);
+const ENG_VIEWS=['overview','inbox','queue','deepspace','ships','branches','agents','insights','settings','qa','run','knowledge'];
+function keyViews(){return isProductMode()?PM_VIEWS:ENG_KEYS;}
+function viewAllowed(v){
+  return isProductMode()?(PM_VIEWS.includes(v)||DIAG_VIEWS.includes(v)):ENG_VIEWS.includes(v);
+}
+function _navBtn(x,digit){
+  const key=digit?`<span class="key">${digit}</span>`:'';
+  const nb=x.nb?`<span class="nb" id="${x.nb}">0</span>`:'';
+  const hide=x.qa?' style="display:none"':'';
+  return `<button class="nav" data-view="${x.view}"${hide} onclick="go('${x.view}')" title="${escAttr(x.title||x.name)}"><span class="ico">${x.ico}</span><span class="navtxt">${esc(x.name)}</span>${nb||key}</button>`;
+}
+let diagOpen=false;   // session-local; a hidden view is never a landing page
+function toggleDiag(){
+  diagOpen=!diagOpen;
+  const g=document.getElementById('diagGroup');
+  if(g)g.classList.toggle('open',diagOpen);
+  const b=document.getElementById('diagToggle');
+  if(b)b.setAttribute('aria-expanded',diagOpen?'true':'false');
+}
+// Page headings come from the SAME definition as the rail (one name per view).
+const PM_SUBS={
+  overview:'What changed, and what needs you.',
+  inbox:'Everything blocked on your judgment, in one place. Orbit waits.'
+};
+function applyHeadings(){
+  const items=(isProductMode()?NAV_PM.concat(DIAG_ITEMS):NAV_ENG).filter(x=>x.view);
+  items.forEach(x=>{
+    const h=document.getElementById('hd-'+x.view); if(h)setText(h,x.name);
+  });
+  const so=document.getElementById('sub-overview'),si=document.getElementById('sub-inbox');
+  if(so)setText(so,isProductMode()?PM_SUBS.overview:'');
+  if(si)setText(si,isProductMode()?PM_SUBS.inbox:'The agent stopped and asked, or a ship waits on your review.');
+  const hs=document.getElementById('hd-settings');
+  if(hs)setText(hs,isProductMode()?'Setup':'Settings');
+  const ov=document.getElementById('ovNeedsLbl');
+  if(ov)setText(ov,isProductMode()?'Decisions waiting':'Needs you');
+}
+function renderNav(){
+  const pm=isProductMode();
+  document.body.classList.toggle('pm',pm);
+  const items=pm?NAV_PM:NAV_ENG;
+  const kv=keyViews();
+  let html=items.map(x=>{
+    if(x.lbl)return `<div class="navlbl">${esc(x.lbl)}</div>`;
+    if(x.guide)return `<button class="nav" onclick="openText('Orbit guide — what everything means','/guide',false)"><span class="ico">?</span><span class="navtxt">Guide</span></button>`;
+    if(x.diag)return `<div class="navlbl">Diagnostics</div>`+
+      `<button class="nav diag-toggle" id="diagToggle" aria-expanded="false" onclick="toggleDiag()" title="Engineering internals — queue mechanics, branches, agents, QA"><span class="ico">🛠</span><span class="navtxt">Engineering</span></button>`+
+      `<div class="diag-group" id="diagGroup">${DIAG_ITEMS.map(d=>_navBtn(d)).join('')}</div>`;
+    const digit=kv.indexOf(x.view);
+    return _navBtn(x,digit>=0?String(digit+1):'');
+  }).join('');
+  setHTML(document.getElementById('navRail'),html);
+  const foot=pm
+    ? `<button class="btn" id="loopBtn" onclick="toggleLoop()">…</button>
+       <button class="btn btn-ghost" id="feedBtn" onclick="toggleFeed()" title="When on, Orbit queues the next safe piece of work itself.">Auto-queue</button>
+       <button class="btn btn-ghost" onclick="newPrd()" title="start a PRD run — intake drafts the scope for your approval">＋ New PRD</button>
+       <button class="btn btn-ghost" onclick="newInsightForm()" title="ask a product question — Orbit researches it into a grounded insight">💡 Ask a question</button>
+       <div class="meter" id="budgetMeter"></div>`
+    : `<button class="btn" id="loopBtn" onclick="toggleLoop()">…</button>
+       <button class="btn btn-ghost" id="feedBtn" onclick="toggleFeed()" title="When on, the loop promotes the next safe task itself whenever the queue runs dry.">Auto-feed</button>
+       <button class="btn btn-ghost" onclick="newTaskForm()" title="create a backlog task right here — no YAML editing">＋ New task</button>
+       <button class="btn btn-ghost" onclick="newInsightForm()" title="quick-add an insights/ task — category, acceptance criteria, and queueing pre-filled">💡 New insight</button>
+       <button class="btn btn-ghost" onclick="reapStalled()" title="escalate tasks stuck mid-cycle (claimed/committed by a dead cycle) onto the gates — the loop does this each iteration, but a paused loop can't">🧹 Reap stalled</button>
+       <div class="meter" id="budgetMeter"></div>`;
+  setHTML(document.getElementById('railFoot'),foot);
+  applyHeadings();
+  const kd=document.getElementById('kbdMaxDigit');
+  if(kd)setText(kd,String(kv.length));
+  // native tooltips keep the icon-only rail usable when collapsed
+  document.querySelectorAll('.nav').forEach(n=>{if(!n.title)n.title=n.textContent.replace(/\s*\d+$/,'').trim();});
+}
 function go(v){
+  if(!viewAllowed(v))v='overview';
+  // A diagnostics view must never be reached "hidden": opening one expands
+  // the group so the rail shows where you are.
+  if(isProductMode()&&DIAG_VIEWS.includes(v)&&!diagOpen)toggleDiag();
   document.querySelectorAll('.view').forEach(x=>x.classList.toggle('on',x.id==='view-'+v));
   document.querySelectorAll('.nav').forEach(x=>x.classList.toggle('on',x.dataset.view===v));
   try{localStorage.setItem('cc-view',v)}catch(e){}
@@ -949,14 +1240,21 @@ function go(v){
   if(v==='knowledge')kbMaybeLoadGraph();   // now visible — safe to size a cytoscape canvas
 }
 document.addEventListener('keydown',e=>{
-  if(e.key==='Escape'){closePalette();closeModal();closeModal2();closeModal3();closeModal4();closeModal5();closeModal6();return;}
+  if(e.key==='Escape'){if(_dlg){ccDlgCancel();return;}closePalette();closeModal();closeModal2();closeModal3();closeModal4();closeModal5();closeModal6();return;}
   if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();openPalette();return;}
   if(e.target.tagName==='TEXTAREA'||e.target.tagName==='INPUT')return;
   if(e.key==='/'){e.preventDefault();openPalette();return;}
-  if(e.key==='?'){document.getElementById('modal4').style.display='flex';return;}
-  const i=parseInt(e.key,10); if(i>=1&&i<=8) go(VIEWS[i-1]);
+  if(e.key==='?'){openModalEl('modal4');return;}
+  const kv=keyViews();
+  const i=parseInt(e.key,10); if(i>=1&&i<=kv.length) go(kv[i-1]);
 });
-try{const v=localStorage.getItem('cc-view'); if(v&&VIEWS.includes(v)) go(v);}catch(e){}
+renderNav();
+// Restore the last-open view — validated against the ACTIVE mode. A persisted
+// engineering view never becomes a product-mode landing page.
+try{
+  const v=localStorage.getItem('cc-view');
+  if(v&&viewAllowed(v)&&(!isProductMode()||PM_VIEWS.includes(v)))go(v);
+}catch(e){}
 
 /* ── rail collapse (icon-only when collapsed) ───────────────────────────── */
 function toggleRail(){
@@ -991,7 +1289,7 @@ function card(t,kind){
   if(kind==='run'){live='live';
     timer=`<div class="meta"><span class="orbmark orbmark-sm" aria-hidden="true"></span> ${S&&S.stopped?'⏸ pause pending — finishing this cycle':'in orbit'} <span class="timer" data-start="${t._start||''}">…</span>`+
       `<div class="wd"><i data-wd="${t._start||''}" style="width:0%"></i></div></div>`;
-    btns=`<button class="btn btn-stop btn-mini" onclick="if(confirm('Abort the running cycle and set ${escJsAttr(t.id)} aside?'))post('/killtask',{id:'${escJsAttr(t.id)}'})">Abort &amp; skip</button>`;
+    btns=`<button class="btn btn-stop btn-mini" onclick="ccConfirm('Abort the running cycle and set ${escJsAttr(t.id)} aside?','Abort &amp; skip',true).then(k=>k&&post('/killtask',{id:'${escJsAttr(t.id)}'}))">Abort &amp; skip</button>`;
   }else if(kind==='next'){
     btns=`<button class="btn btn-go btn-mini" title="move it to the front and resume the loop" onclick="post('/runnow',{id:'${esc(t.id)}'})">Run this next</button>
       <button class="btn btn-mini" title="move up in the queue" onclick="post('/move',{id:'${esc(t.id)}',dir:'up'})">▲</button>
@@ -1012,7 +1310,7 @@ function card(t,kind){
       <button class="btn btn-mini" title="edit the task's contract (title, category, priority, context, acceptance criteria)" onclick="editTaskForm('${esc(t.id)}')">✎ Edit</button>
       <button class="btn btn-ghost btn-mini" title="park it in the graveyard orbit" onclick="post('/skip',{id:'${esc(t.id)}'})">Park</button>
       <button class="btn btn-vio btn-mini" title="build this as a dedicated feature agent in its own worktree off the loop branch" onclick="featureBuild('${esc(t.id)}')">⚡ Feature agent</button>
-      <button class="btn btn-stop btn-mini" title="delete this un-worked task from the backlog" onclick="if(confirm('Delete ${esc(t.id)} from the backlog?\\n\\nOnly un-worked tasks can be deleted — worked ones are history.'))post('/task-del',{id:'${esc(t.id)}'})">🗑</button>`;
+      <button class="btn btn-stop btn-mini" title="delete this un-worked task from the backlog" onclick="ccConfirm('Delete ${esc(t.id)} from the backlog?\\n\\nOnly un-worked tasks can be deleted — worked ones are history.','Delete',true).then(k=>k&&post('/task-del',{id:'${esc(t.id)}'}))">🗑</button>`;
   }else if(kind==='skipped'){
     btns=`<button class="btn btn-go btn-mini" onclick="post('/unskip',{id:'${esc(t.id)}'})">Bring back</button>`;
   }else if(kind==='esc'){
@@ -1030,7 +1328,11 @@ function card(t,kind){
     // Action buttons are LIFECYCLE-DRIVEN: the server evaluates the same state
     // machine ledger.py enforces (can_merge/can_reject/can_revert), so a button
     // only renders when the transition is legal — no client-side guessing.
-    if(t.can_merge)btns+=`<button class="btn btn-go btn-mini" title="record that this ship landed" onclick="markShip('${esc(t.id)}','merged')">Mark merged</button>`;
+    // Local-origin workspaces: the dashboard IS the git host, so offer the
+    // real merge. Hosted repos keep the record-only "Mark merged" (the merge
+    // itself happens on the host's PR).
+    if(t.can_land)btns+=`<button class="btn btn-go btn-mini" title="merge this ship into ${esc((S&&S.base_branch)||'the base branch')} — the document goes live in the workspace" onclick="landShip('${esc(t.id)}')">Merge &amp; land</button>`;
+    else if(t.can_merge)btns+=`<button class="btn btn-go btn-mini" title="record that this ship landed" onclick="markShip('${esc(t.id)}','merged')">Mark merged</button>`;
     if(t.can_reject)btns+=`<button class="btn btn-stop btn-mini" onclick="rejectTask('${esc(t.id)}')">Reject</button>`;
     if(t.merged&&t.can_revert&&!t.reverted)btns+=`<button class="btn btn-vio btn-mini" onclick="revertTask('${esc(t.id)}')">Revert</button>`;
     timer=`<div class="meta">${ref}${when}</div>`;
@@ -1148,64 +1450,273 @@ function tidsCompact(ws){
   const extra=ws.length-shown.length;
   return shown.join(', ')+(extra>0?` +${extra} more`:'');
 }
+
+/* ── Product-mode hero (source-owned: renderTop branches here, nothing is
+   patched after render) ───────────────────────────────────────────────── */
+function decisionCount(){return (S&&S.decisions)?S.decisions.length:0;}
+function renderHeroPM(){
+  const r=S,n=decisionCount();
+  const orbit=document.getElementById('orbit'),arc=document.getElementById('orbitArc');
+  const hs=document.getElementById('heroState'),hsub=document.getElementById('heroSub');
+  let state,sub,cls,dash;
+  if(r.stopped){
+    state=`Paused <span class=mut>— agents are holding</span>`;
+    sub='Nothing runs until you resume. Your decisions stay queued.';
+    cls='orbit paused';dash=ORBIT_C;
+  }else if(r.cycle_running){
+    state=`Working <span class=mut>— agents are busy</span>`;
+    sub='Orbit is researching or drafting. A Decision appears the moment a judgment call is needed.';
+    cls='orbit';dash=ORBIT_C*0.5;
+  }else if(n){
+    state=`Needs you <span class=mut>— ${n} decision${n===1?'':'s'}</span>`;
+    sub='Start with Decisions. Everything else can wait.';
+    cls='orbit idle';dash=ORBIT_C*0.25;
+  }else{
+    state=`Clear skies <span class=mut>— nothing blocked on you</span>`;
+    sub='Ask a question or start a PRD from Work, or let watches file the next insight.';
+    cls='orbit idle';dash=ORBIT_C*0.25;
+  }
+  if(orbit)orbit.className=cls;
+  if(arc)arc.style.strokeDashoffset=dash;
+  setHTML(hs,state);setText(hsub,sub);
+  setHTML(document.getElementById('heroBtns'),
+    (r.stopped
+      ? `<button class="btn btn-go" onclick="post('/resume',{})">Resume agents</button>`
+      : `<button class="btn btn-stop" onclick="post('/stop',{})">Pause agents</button>`)+
+    (n?`<button class="btn btn-amber" onclick="go('inbox')">Open Decisions (${n})</button>`:'')+
+    `<button class="btn btn-blue" onclick="go('work')">Open Work</button>`);
+}
+
+function _dawnList(items, empty){
+  if(!items || !items.length) return `<div class="dawn-empty">${empty}</div>`;
+  return items.map(it => `<div class="dawn-item">
+      <div><div class="di-title">${esc(it.title)}</div>
+      <div class="di-meta">${esc(it.meta || '')}</div></div>
+      ${it.act ? `<div class="di-act">${it.act}</div>` : ''}
+    </div>`).join('');
+}
+
+function renderDawn(){
+  const el = document.getElementById('dawnBrief');
+  if(!el || !isProductMode()) return;
+
+  // "Needs you" is a SUMMARY of the server-owned decisions list — the same
+  // list the Decisions view renders. The action lives in Decisions; every
+  // button here only navigates there.
+  const need = (S.decisions || []).map(d => ({
+    title: d.title,
+    meta: (d.detail || '').slice(0, 100),
+    act: `<button class="btn btn-mini ${d.urgency===0?'btn-amber':d.urgency===1?'btn-go':''}" onclick="go('inbox')">${d.urgency===0?'Decide':d.urgency===1?'Review':'Open'}</button>`
+  }));
+
+  const flight = [];
+  (S.running || []).forEach(t => flight.push({
+    title: t.title || t.id,
+    meta: 'Agents working now',
+    act: `<span class="b b-acc">live</span>`
+  }));
+  (S.prd || []).filter(r => {
+    const st = r.status || '';
+    if(/done|published|signed/i.test(st)) return false;
+    return !(r.next_actions || []).some(a => /approve|sign/i.test(a));
+  }).slice(0, 4).forEach(r => flight.push({
+    title: r.title || r.run_id,
+    meta: 'PRD · ' + (r.status || 'running').replace(/-/g, ' '),
+    act: ''
+  }));
+  (S.next_up || []).slice(0, 3).forEach(t => flight.push({
+    title: t.title || t.id,
+    meta: 'Next in queue',
+    act: ''
+  }));
+  (S.watches || []).filter(w => !w.task_id).slice(0, 2).forEach(w => flight.push({
+    title: w.name,
+    meta: 'Watch armed · every ' + (w.cadence_hours || '?') + 'h',
+    act: ''
+  }));
+
+  const landed = [];
+  (S.insight_docs || []).slice(-5).reverse().forEach(d => landed.push({
+    title: d.name,
+    meta: d.jira_key ? ('Filed · ' + d.jira_key) : 'Insight ready to read',
+    act: `<button class="btn btn-mini" onclick="openText('${escJsAttr(d.name)}','/product-artifact?kind=insight&name=${encodeURIComponent(d.name)}',false)">Read</button>`
+  }));
+  (S.prd || []).filter(r => /done|published|signed/i.test(r.status || '') || (r.published && r.published.url)).slice(0, 3).forEach(r => landed.push({
+    title: r.title || r.run_id,
+    meta: (r.published && r.published.url) ? 'Published' : 'PRD complete',
+    act: `<button class="btn btn-mini" onclick="go('library')">Open</button>`
+  }));
+  (S.surveys || []).filter(s => s.has_report).slice(0, 3).forEach(s => landed.push({
+    title: s.name,
+    meta: 'Survey report ready',
+    act: `<button class="btn btn-mini" onclick="openText('${escJsAttr(s.name)}','/product-artifact?kind=survey&name=${encodeURIComponent(s.name)}',false)">Read</button>`
+  }));
+
+  el.innerHTML =
+    `<div class="dawn-col need"><h3>Needs you</h3>
+      <p class="dawn-sub">${need.length ? (need.length + ' decision' + (need.length === 1 ? '' : 's') + ' waiting') : 'Clear — nothing blocked on you'}</p>
+      ${_dawnList(need.slice(0, 6), 'No decisions waiting.')}</div>
+     <div class="dawn-col flight"><h3>In flight</h3>
+      <p class="dawn-sub">${flight.length ? 'Orbit is working these' : 'Idle — start something from Work'}</p>
+      ${_dawnList(flight.slice(0, 6), 'Nothing in flight.')}</div>
+     <div class="dawn-col landed"><h3>Landed</h3>
+      <p class="dawn-sub">Ready to read or share</p>
+      ${_dawnList(landed.slice(0, 6), 'No artifacts yet — finish Setup below.')}</div>`;
+}
+
+/* True while the workspace has produced nothing a PM can see — drives the
+   Setup landing (first-run) and the coach. */
+function workspaceEmpty(){
+  if(!S)return false;
+  return !((S.prd||[]).length||(S.insight_docs||[]).length||(S.surveys||[]).length||
+           (S.watches||[]).length||(S.board||[]).length||(S.done||[]).length||
+           (S.escalated||[]).length||(S.next_up||[]).length);
+}
+function renderSetupCoach(){
+  const el = document.getElementById('setupCoach');
+  if(!el || !isProductMode()){ if(el){ el.style.display='none'; el.innerHTML=''; } return; }
+  const pub = S.publish_channels || {};
+  // Value before configuration: the first step is a product artifact, and
+  // connections come after. Nothing here blocks anything else.
+  const steps = [
+    { label: 'Create your first item — a question or a PRD', done: !workspaceEmpty(), go: "go('work')" },
+    { label: 'Connect data (watches or an analytics MCP)', done: !!(S.watches && S.watches.length), go: "go('settings')" },
+    { label: 'Connect publishing (Confluence / Jira)', done: !!(pub.confluence || pub.jira), go: "go('settings')" },
+  ];
+  const left = steps.filter(s => !s.done);
+  if(!left.length){ el.style.display = 'none'; setHTML(el,''); return; }
+  el.style.display = 'block';
+  setHTML(el, `<h3>Get set up — value first, connections after</h3>
+    <p>Orbit drafts grounded product work and waits for your decisions. Your day starts here on Today.</p>
+    <ul class="setup-steps">${steps.map((s,i) =>
+      `<li class="${s.done ? 'done' : ''}" ${s.done ? '' : `onclick="${s.go}" style="cursor:pointer"`}>
+        <span class="n">${s.done ? '✓' : (i + 1)}</span>${esc(s.label)}
+      </li>`).join('')}</ul>`);
+}
+
+function renderMarkdown(src){
+  const blocks = [];
+  let text = String(src || '').replace(/```([\w-]*)\n([\s\S]*?)```/g, (_, lang, code) => {
+    blocks.push('<pre><code>' + esc(code.replace(/\n$/, '')) + '</code></pre>');
+    return '@@MD' + (blocks.length - 1) + '@@';
+  });
+  text = esc(text);
+  text = text
+    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+    .replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>')
+    .replace(/^---$/gm, '<hr>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+    .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  text = text.replace(/(?:^|\n)((?:[-*] .+(?:\n|$))+)/g, m => {
+    const items = m.trim().split(/\n/).map(l => l.replace(/^[-*] /, '')).filter(Boolean);
+    return '\n<ul>' + items.map(i => '<li>' + i + '</li>').join('') + '</ul>';
+  });
+  text = text.replace(/(?:^|\n)((?:\d+\. .+(?:\n|$))+)/g, m => {
+    const items = m.trim().split(/\n/).map(l => l.replace(/^\d+\. /, '')).filter(Boolean);
+    return '\n<ol>' + items.map(i => '<li>' + i + '</li>').join('') + '</ol>';
+  });
+  text = text.split(/\n{2,}/).map(chunk => {
+    chunk = chunk.trim();
+    if(!chunk) return '';
+    if(/^<(h\d|ul|ol|pre|blockquote|hr)/.test(chunk)) return chunk;
+    return '<p>' + chunk.replace(/\n/g, '<br>') + '</p>';
+  }).join('\n');
+  text = text.replace(/@@MD(\d+)@@/g, (_, i) => blocks[+i] || '');
+  return '<div class="md-body">' + text + '</div>';
+}
+
+
+let _lastAnnounced=-1;
 function renderTop(){
   if(!S)return; const r=S,t=srvClock(),ib=inboxItems(),lw=liveWorkers(r);
+  const pm=isProductMode();
+  const needN=pm?decisionCount():ib.n;
   // status sentence
   const money=`$${(r.daily_spend||0).toFixed(2)} est.`;
   let s;
-  if(r.stopped)s=`⏸ <b>Paused.</b> Nothing runs or spends until you resume · ${r.counts.next} queued · ${money} today`;
-  else if(r.cycle_running&&r.cycle_start)s=(lw.length
-      ? `<b>In orbit: ${lw.length} cycle${lw.length===1?'':'s'} live</b> <span class=mut>(${tidsCompact(lw)})</span>`
-      : `<b>In orbit: ${esc(r.current_task||'claiming a task…')}</b>${r.current_task_tentative?' <span class=mut>(confirming…)</span>':''}`)
-    +` · ${fmt(t-r.cycle_start)} elapsed · ${r.daily_count}/${r.max_tasks} tasks + ${money} today · ${r.counts.next} queued behind it`;
-  else {const w=idleWhy(r,t); s=`<b>${w.tag}.</b> ${w.msg} · ${r.daily_count}/${r.max_tasks} tasks + ${money} today · ${r.counts.next} queued`;}
-  if(ib.n)s+=` · <span class=hot>${ib.n} item${ib.n===1?'':'s'} need you</span>`;
-  document.getElementById('statusText').innerHTML=s;
-  // orbit
-  const orbit=document.getElementById('orbit'),arc=document.getElementById('orbitArc');
-  const hs=document.getElementById('heroState'),hsub=document.getElementById('heroSub');
-  if(r.stopped){orbit.className='orbit paused';arc.style.strokeDashoffset=ORBIT_C;
-    hs.innerHTML=`Paused <span class=mut>— holding position</span>`;
-    hsub.innerHTML=`${r.stop_note?'<span class=mut>'+esc(r.stop_note)+'</span> · ':''}The loop idles free of charge. Resume when you're ready · <b>${r.counts.next}</b> task(s) queued.`;}
-  else if(r.cycle_running&&r.cycle_start){
-    const p=Math.min(1,(t-r.cycle_start)/r.cycle_timeout);
-    orbit.className='orbit';arc.style.strokeDashoffset=ORBIT_C*(1-p);
-    arc.style.stroke=p>.8?'var(--amber)':'var(--blue)';
-    hs.innerHTML = lw.length
-      ? `In orbit <span class=mut>· ${lw.length} cycle${lw.length===1?'':'s'} live (${tidsCompact(lw)})</span>`
-      : `In orbit <span class=mut>· ${esc(r.current_task||'claiming a task…')}${r.current_task_tentative?' (confirming…)':''}</span>`;
-    hsub.innerHTML=`<b>${fmt(t-r.cycle_start)}</b> elapsed of a ${Math.floor(r.cycle_timeout/60)}m watchdog window · one atomic commit per cycle, pushed to its own branch.`;}
-  else{const w=idleWhy(r,t);
-    orbit.className='orbit idle';arc.style.strokeDashoffset=ORBIT_C*0.25;
-    arc.style.stroke=w.cls==='amber'?'var(--amber)':'var(--green)';
-    hs.innerHTML=`${w.tag} <span class=mut>— nothing in orbit right now</span>`;
-    hsub.innerHTML = (r.idle_reason==='queue-empty' && !r.counts.next)
-      ? (r.auto_feed?`Launch pad is dry and Auto-feed found nothing safe to promote — queue something from <b>Deep space</b>.`
-                    :`Launch pad is dry — queue something from <b>Deep space</b>, or switch on Auto-feed.`)
-      : `${w.msg} <b>${r.counts.next}</b> task(s) ready to launch.`;}
-  // hero buttons
-  document.getElementById('heroBtns').innerHTML=
-    (r.stopped?`<button class="btn btn-go" onclick="post('/resume',{})">Resume loop</button>`
-             :`<button class="btn btn-stop" onclick="post('/stop',{})">Pause loop</button>`)+
-    (r.cycle_running?`<button class="btn" onclick="if(confirm('Abort the running cycle? The task is set aside, not retried.'))post('/killtask',{id:'${escJsAttr(r.current_task||'')}'})">Abort cycle</button>`:'');
-  // rail buttons + meter
+  if(pm){
+    if(r.stopped)s=`⏸ <b>Paused.</b> Agents hold until you resume · ${money} today`;
+    else if(r.cycle_running)s=`<b>Working.</b> Agents are researching or drafting · ${money} today`;
+    else s=`<b>Quiet.</b> Nothing running right now · ${money} today`;
+    if(needN)s+=` · <span class=hot>${needN} decision${needN===1?'':'s'} waiting</span>`;
+  }else{
+    if(r.stopped)s=`⏸ <b>Paused.</b> Nothing runs or spends until you resume · ${r.counts.next} queued · ${money} today`;
+    else if(r.cycle_running&&r.cycle_start)s=(lw.length
+        ? `<b>In orbit: ${lw.length} cycle${lw.length===1?'':'s'} live</b> <span class=mut>(${tidsCompact(lw)})</span>`
+        : `<b>In orbit: ${esc(r.current_task||'claiming a task…')}</b>${r.current_task_tentative?' <span class=mut>(confirming…)</span>':''}`)
+      +` · ${fmt(t-r.cycle_start)} elapsed · ${r.daily_count}/${r.max_tasks} tasks + ${money} today · ${r.counts.next} queued behind it`;
+    else {const w=idleWhy(r,t); s=`<b>${w.tag}.</b> ${w.msg} · ${r.daily_count}/${r.max_tasks} tasks + ${money} today · ${r.counts.next} queued`;}
+    if(ib.n)s+=` · <span class=hot>${ib.n} item${ib.n===1?'':'s'} need you</span>`;
+  }
+  // loop_loaded = "installed as an always-on service (launchd/systemd)".
+  // While launcher-managed slots are actually alive that's a footnote, not an
+  // alarm; when nothing runs at all it's the real headline.
+  if(!r.loop_loaded){
+    const alive=r.cycle_running||liveWorkers(r).length>0;
+    if(alive)s+=pm?'':' · <span class=mut>running unmanaged (no service unit)</span>';
+    else s+=pm?' · <span class=hot>agents are not running — start them from the workspace tab, or `orbit install` for always-on</span>'
+             :' · <span class=hot>daemon not loaded</span>';
+  }
+  setHTML(document.getElementById('statusText'),s);
+  // hero (orbit dial + state line + buttons)
+  if(pm){
+    renderHeroPM();
+  }else{
+    const orbit=document.getElementById('orbit'),arc=document.getElementById('orbitArc');
+    const hs=document.getElementById('heroState'),hsub=document.getElementById('heroSub');
+    if(r.stopped){orbit.className='orbit paused';arc.style.strokeDashoffset=ORBIT_C;
+      setHTML(hs,`Paused <span class=mut>— holding position</span>`);
+      setHTML(hsub,`${r.stop_note?'<span class=mut>'+esc(r.stop_note)+'</span> · ':''}The loop idles free of charge. Resume when you're ready · <b>${r.counts.next}</b> task(s) queued.`);}
+    else if(r.cycle_running&&r.cycle_start){
+      const p=Math.min(1,(t-r.cycle_start)/r.cycle_timeout);
+      orbit.className='orbit';arc.style.strokeDashoffset=ORBIT_C*(1-p);
+      arc.style.stroke=p>.8?'var(--amber)':'var(--blue)';
+      setHTML(hs, lw.length
+        ? `In orbit <span class=mut>· ${lw.length} cycle${lw.length===1?'':'s'} live (${tidsCompact(lw)})</span>`
+        : `In orbit <span class=mut>· ${esc(r.current_task||'claiming a task…')}${r.current_task_tentative?' (confirming…)':''}</span>`);
+      setHTML(hsub,`<b>${fmt(t-r.cycle_start)}</b> elapsed of a ${Math.floor(r.cycle_timeout/60)}m watchdog window · one atomic commit per cycle, pushed to its own branch.`);}
+    else{const w=idleWhy(r,t);
+      orbit.className='orbit idle';arc.style.strokeDashoffset=ORBIT_C*0.25;
+      arc.style.stroke=w.cls==='amber'?'var(--amber)':'var(--green)';
+      setHTML(hs,`${w.tag} <span class=mut>— nothing in orbit right now</span>`);
+      setHTML(hsub, (r.idle_reason==='queue-empty' && !r.counts.next)
+        ? (r.auto_feed?`Launch pad is dry and Auto-feed found nothing safe to promote — queue something from <b>Deep space</b>.`
+                      :`Launch pad is dry — queue something from <b>Deep space</b>, or switch on Auto-feed.`)
+        : `${w.msg} <b>${r.counts.next}</b> task(s) ready to launch.`);}
+    setHTML(document.getElementById('heroBtns'),
+      (r.stopped?`<button class="btn btn-go" onclick="post('/resume',{})">Resume loop</button>`
+               :`<button class="btn btn-stop" onclick="post('/stop',{})">Pause loop</button>`)+
+      (r.cycle_running?`<button class="btn" onclick="abortCycle('${escJsAttr(r.current_task||'')}')">Abort cycle</button>`:''));
+  }
+  // rail buttons + meter (labels are mode-authored here, not patched later)
   const lb=document.getElementById('loopBtn');
-  lb.innerHTML=r.stopped?'<span class="fi">▶</span><span class="lbl">Resume</span>':'<span class="fi">⏸</span><span class="lbl">Pause</span>';
-  lb.className='btn '+(r.stopped?'btn-go':'btn-stop');
-  lb.title=r.stopped?'Resume the loop':'Pause the loop';
+  if(lb){
+    setHTML(lb,r.stopped?'<span class="fi">▶</span><span class="lbl">'+(pm?'Resume agents':'Resume')+'</span>'
+                        :'<span class="fi">⏸</span><span class="lbl">'+(pm?'Pause agents':'Pause')+'</span>');
+    lb.className='btn '+(r.stopped?'btn-go':'btn-stop');
+    lb.title=(r.stopped?'Resume':'Pause')+(pm?' the agents':' the loop');
+  }
   const fb=document.getElementById('feedBtn');
-  fb.innerHTML='<span class="fi">⦿</span><span class="lbl">Auto-feed '+(r.auto_feed?'on':'off')+'</span>';
-  fb.className='btn '+(r.auto_feed?'btn-blue':'btn-ghost');
-  fb.title='Auto-feed '+(r.auto_feed?'on — the loop promotes safe work itself':'off');
+  if(fb){
+    const feedName=pm?'Auto-queue':'Auto-feed';
+    setHTML(fb,'<span class="fi">⦿</span><span class="lbl">'+feedName+' '+(r.auto_feed?'on':'off')+'</span>');
+    fb.className='btn '+(r.auto_feed?'btn-blue':'btn-ghost');
+    fb.title=feedName+' '+(r.auto_feed?'on — Orbit takes on safe work itself':'off');
+  }
   const spendPct=0; // spend is informational only — never a gauge against a cap
   const taskPct=Math.min(100,r.daily_count/r.max_tasks*100);
   const pct=Math.max(spendPct,taskPct);
-  document.getElementById('budgetMeter').innerHTML=
+  setHTML(document.getElementById('budgetMeter'),
     `<div class=row><span>Today</span><span>${r.daily_count}/${r.max_tasks} · $${(r.daily_spend||0).toFixed(2)}</span></div>
-     <div class=bar><i class="${pct>=85?'warn':''}" style="width:${pct}%"></i></div>`;
-  // nav badges
-  const nb=(id,n,hot)=>{const e2=document.getElementById(id);e2.textContent=n;e2.className='nb'+(hot&&n>0?' hot':'');};
-  nb('nb-inbox',ib.n,true); nb('nb-queue',r.counts.next,false); nb('nb-deepspace',(r.counts&&r.counts.board)||0,false);
+     <div class=bar><i class="${pct>=85?'warn':''}" style="width:${pct}%"></i></div>`);
+  // nav badges (null-guarded: each mode's rail carries its own subset)
+  const nb=(id,n,hot)=>{const e2=document.getElementById(id);if(!e2)return;e2.textContent=n;e2.className='nb'+(hot&&n>0?' hot':'');};
+  nb('nb-inbox',needN,true); nb('nb-queue',r.counts.next,false); nb('nb-deepspace',(r.counts&&r.counts.board)||0,false);
+  nb('nb-work',workItems().length,false);
   nb('nb-ships',(r.done||[]).filter(x=>!x.merged&&!x.rejected).length,false);
   nb('nb-branches',(r.branches||[]).filter(b=>b.category==='awaiting'||b.category==='orphan').length,false);
   // QA nav (Task 23): hidden entirely when the target has no flow library;
@@ -1215,61 +1726,129 @@ function renderTop(){
   // empty (byte-neutral), so `.length||0` handles both cases. Unlike the
   // always-on counters above, a "0" pill would just be noise when both strips
   // are empty.
-  const qaNav=document.querySelector('.nav[data-view="qa"]');
   const qaPending=((r.qa_flows&&r.qa_flows.pending_heals)||0)+((r.qa_flows&&r.qa_flows.generated&&r.qa_flows.generated.length)||0);
-  if(qaNav)qaNav.style.display=r.qa_flows?'':'none';
+  document.querySelectorAll('.nav[data-view="qa"]').forEach(qaNav=>{qaNav.style.display=r.qa_flows?'':'none';});
   const nbQa=document.getElementById('nb-qa');
   if(nbQa){nbQa.textContent=qaPending>0?qaPending:'';nbQa.className='nb'+(qaPending>0?' hot':'');}
-  if(!r.loop_loaded)document.getElementById('statusText').innerHTML+=' · <span class=hot>daemon not loaded</span>';
+  // Accessible announcement when the number of waiting decisions changes.
+  if(needN!==_lastAnnounced){
+    const an=document.getElementById('a11yAnnounce');
+    if(an&&_lastAnnounced>=0)an.textContent=needN?`${needN} decision${needN===1?'':'s'} waiting`:'No decisions waiting';
+    _lastAnnounced=needN;
+  }
   // pinned-tab notifier: title count + amber-dotted favicon while items wait
-  const wantTitle=(ib.n?`(${ib.n}) `:'')+'Orbit — Mission Control';
+  const wantTitle=(needN?`(${needN}) `:'')+'Orbit — Mission Control';
   if(document.title!==wantTitle)document.title=wantTitle;
   const fav=document.querySelector('link[rel=icon]');
-  const want=ib.n?FAV_HOT:FAV_BASE;
+  const want=needN?FAV_HOT:FAV_BASE;
   if(fav&&fav.href!==want)fav.href=want;
+}
+function abortCycle(tid){
+  ccConfirm('Abort the running cycle? The task is set aside, not retried.','Abort cycle',true)
+    .then(ok=>{if(ok)post('/killtask',{id:tid});});
 }
 const FAV_BASE="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='88'>🛰️</text></svg>";
 const FAV_HOT="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='88'>🛰️</text><circle cx='78' cy='24' r='20' fill='%23FFB454' stroke='%230B0E14' stroke-width='6'/></svg>";
 
-/* ── overview ───────────────────────────────────────────────────────────── */
+/* ── overview / Today ───────────────────────────────────────────────────── */
 function renderStats(){
   const r=S,mx=r.metrics||{};
   const stat=(k,v,s2)=>`<div class=stat><div class=k>${k}</div><div class=v>${v}</div><div class=s>${s2||''}</div></div>`;
+  const pe=document.getElementById('planEyebrow'),np=document.getElementById('nextPreview');
+  if(isProductMode()){
+    // Today never shows loop mechanics or code-centric statistics.
+    const inflight=(r.running||[]).length
+      +((r.prd||[]).filter(x=>!/done|published/i.test(x.status||'')).length);
+    const landed=((r.insight_docs||[]).length)
+      +((r.prd||[]).filter(x=>/done|published/i.test(x.status||'')).length)
+      +((r.surveys||[]).filter(s2=>s2.has_report).length);
+    setHTML(document.getElementById('stats'),
+      stat('Decisions',decisionCount(),'waiting on your judgment')+
+      stat('In flight',inflight,'being researched or drafted')+
+      stat('Landed',landed,'insights · PRDs · reports')+
+      stat('Watches',(r.watches||[]).length,'standing questions armed'));
+    pe.style.display='none';np.style.display='none';
+    return;
+  }
   const merged=(r.done||[]).filter(t=>t.merged).length;
   const wait=(r.done||[]).filter(t=>!t.merged&&!t.rejected).length;
-  document.getElementById('stats').innerHTML=
+  setHTML(document.getElementById('stats'),
     stat('Queued',r.counts.next,`${r.counts.board} in triage · ${r.counts.skipped} set aside`)+
     stat('Landed',mx.pushed||0,`${merged} merged · ${wait} need review`)+
     stat('Turnaround',r.avg_cycle_sec!=null?fmt(r.avg_cycle_sec):'—',`per task · last ${r.cycle_samples||0} cycle${(r.cycle_samples||0)===1?'':'s'}`)+
     stat('Code churn · 7d',`${mx.changes_7d||0}`,`+${mx.loc_added_7d||0} / −${mx.loc_removed_7d||0} lines`)+
     stat('Heartbeat',r.heartbeat?fmt(srvClock()-r.heartbeat)+`<span class=u> ago</span>`:'—','last sign of life in the log')+
-    stat('Escalated',mx.escalated||0,'stopped and asked for you');
+    stat('Escalated',mx.escalated||0,'stopped and asked for you'));
   // flight plan: the next few picks, in the picker's real order
   const plan=(r.next_up||[]).slice(0,4);
-  const pe=document.getElementById('planEyebrow'),np=document.getElementById('nextPreview');
   if(plan.length){
     pe.style.display='';np.style.display='';
-    np.innerHTML=plan.map((t,i)=>`<button class="chip" title="${esc(t.title)}" onclick="go('queue')">${i+1}. ${esc(t.title.length>52?t.title.slice(0,52)+'…':t.title)}</button>`).join('');
+    setHTML(np,plan.map((t,i)=>`<button class="chip" title="${esc(t.title)}" onclick="go('queue')">${i+1}. ${esc(t.title.length>52?t.title.slice(0,52)+'…':t.title)}</button>`).join(''));
   }else{pe.style.display='none';np.style.display='none';}
 }
+/* Renders a decision from the server-owned list as a full, actionable card by
+   delegating to the subsystem's own card renderer — context and actions stay
+   with the item, but the LIST comes from one place. */
+function decisionCard(d){
+  if(d.source==='escalation'){
+    const t=(S.escalated||[]).find(x=>x.id===d.id); if(t)return card(t,'esc');
+  }else if(d.source==='review'){
+    const t=(S.done||[]).find(x=>x.id===d.id); if(t)return card(t,'done');
+  }else if(d.source==='prd'){
+    const r=(S.prd||[]).find(x=>x.run_id===d.id); if(r)return prdCard(r);
+  }else if(d.source==='calibration'){
+    const c=(S.calibration||[]).find(x=>x.id===d.id); if(c)return calCard(c);
+  }
+  return `<div class=card><div class=title>${esc(d.title)}</div><div class=meta>${esc(d.detail||'')}</div></div>`;
+}
 function renderInboxAll(){
-  const ib=inboxItems();
+  const body=document.getElementById('inboxBody');
   const aside=document.getElementById('inboxAside');
   const prev=document.getElementById('inboxPreview');
+  if(isProductMode()){
+    // Decisions: one first-class destination, rendered from S.decisions alone.
+    const ds=S.decisions||[];
+    const groups=[
+      [0,'Blocked — Orbit stopped for your judgment','answer one and the agents continue with your call in the contract'],
+      [1,'Ready for your decision','read it, then approve, revise, or publish — Orbit waits'],
+      [2,'Lessons (optional)','approve to brief future agents; reject with a reason'],
+    ];
+    let html='';
+    groups.forEach(([u,h,a])=>{
+      const rows=ds.filter(d=>d.urgency===u);
+      if(!rows.length)return;
+      html+=`<div class="eyebrow">${h} <span class="aside">${a}</span></div>
+        <div class=rows>${rows.map(decisionCard).join('')}</div>`;
+    });
+    setHTML(body,html||`<div class="inbox-zero">✓ Clear skies. Nothing is blocked on you.</div>`);
+    // Today's summary: same list, navigation-only actions.
+    if(aside)setText(aside,ds.length?'approve, revise, or publish — Orbit waits':'');
+    if(prev){
+      setHTML(prev,ds.length
+        ?`<div class=rows>${ds.slice(0,4).map(d=>`<div class="dawn-item">
+            <div><div class="di-title">${esc(d.title)}</div><div class="di-meta">${esc(d.detail||'')}</div></div>
+            <div class="di-act"><button class="btn btn-mini btn-amber" onclick="go('inbox')">Open Decisions</button></div></div>`).join('')}</div>`
+          +(ds.length>4?`<button class=morelink onclick="go('inbox')">All decisions — ${ds.length} →</button>`:'')
+        :`<div class="inbox-zero">✓ All quiet. Nothing waits on you.</div>`);
+    }
+    return;
+  }
+  const ib=inboxItems();
   const proposed=(S.board||[]).filter(t=>t.status==='proposed').length;
   if(!ib.n){
-    aside.textContent='';
-    prev.innerHTML=`<div class="inbox-zero">✓ All quiet at mission control. ${proposed?`<b>${proposed}</b>&nbsp;proposed task(s) wait in Deep space.`:'Nothing waits on you.'}</div>`;
+    if(aside)setText(aside,'');
+    setHTML(prev,`<div class="inbox-zero">✓ All quiet at mission control. ${proposed?`<b>${proposed}</b>&nbsp;proposed task(s) wait in Deep space.`:'Nothing waits on you.'}</div>`);
   }else{
-    aside.textContent=`${ib.esc.length} escalation(s) · ${ib.ships.length} ship(s) to review`;
+    if(aside)setText(aside,`${ib.esc.length} escalation(s) · ${ib.ships.length} ship(s) to review`);
     const items=[...ib.esc.map(t=>card(t,'esc')),...ib.ships.map(t=>card(t,'done'))];
-    prev.innerHTML=`<div class=grid>${items.slice(0,4).join('')}</div>`+
-      (ib.n>4?`<button class=morelink onclick="go('inbox')">Open the full inbox — ${ib.n} items →</button>`:'');
+    setHTML(prev,`<div class=grid>${items.slice(0,4).join('')}</div>`+
+      (ib.n>4?`<button class=morelink onclick="go('inbox')">Open the full inbox — ${ib.n} items →</button>`:''));
   }
-  document.getElementById('inboxEsc').innerHTML=ib.esc.length?ib.esc.map(t=>card(t,'esc')).join('')
-    :`<div class=empty>No open escalations. When the agent hits a judgment call it stops and files one here.</div>`;
-  document.getElementById('inboxShips').innerHTML=ib.ships.length?ib.ships.map(t=>card(t,'done')).join('')
-    :`<div class=empty>Nothing waiting. Every ship has been merged or rejected.</div>`;
+  setHTML(body,
+    `<div class="eyebrow">Escalations — the agent stopped and asked <span class="aside">answer one and it re-queues with your answer in the contract</span></div>
+     <div class="rows">${ib.esc.length?ib.esc.map(t=>card(t,'esc')).join(''):`<div class=empty>No open escalations. When the agent hits a judgment call it stops and files one here.</div>`}</div>
+     <div class="eyebrow">Ships awaiting your review <span class="aside">read the packet, then merge or reject</span></div>
+     <div class="rows">${ib.ships.length?ib.ships.map(t=>card(t,'done')).join(''):`<div class=empty>Nothing waiting. Every ship has been merged or rejected.</div>`}</div>`);
 }
 
 /* ── queue view ─────────────────────────────────────────────────────────── */
@@ -1298,9 +1877,11 @@ function renderFilters(){
 function promoteAllShown(){
   const vis=filtered(S.board).filter(t=>t.promotable&&t.status==='proposed');
   if(!vis.length){toast('Nothing here is both safe and proposed — nothing to queue.');return;}
-  if(!confirm('Queue '+vis.length+' shown task(s)? The loop will work them one per cycle.'))return;
-  Promise.all(vis.map(t=>fetch('/promote',{method:'POST',headers:POST_HDRS,body:'id='+encodeURIComponent(t.id)})))
-    .then(()=>{toast('Queued '+vis.length+' task(s).');refresh();});
+  ccConfirm('Queue '+vis.length+' shown task(s)? The loop will work them one per cycle.','Queue all').then(ok=>{
+    if(!ok)return;
+    Promise.all(vis.map(t=>fetch('/promote',{method:'POST',headers:POST_HDRS,body:'id='+encodeURIComponent(t.id)})))
+      .then(()=>{toast('Queued '+vis.length+' task(s).');refresh();});
+  });
 }
 function renderQueue(){
   const r=S;
@@ -1327,14 +1908,14 @@ function epicStageBadge(st){
 function epicCard(e){
   let btns='';
   if(e.stage==='proposed')
-    btns+=`<button class="btn btn-vio btn-mini" title="one headless agent call writes a spec for your review — nothing is built" onclick="if(confirm('Run the planner for ${esc(e.id)}? It writes a spec to .autopilot/specs/ for your review.'))post('/epic-action',{id:'${esc(e.id)}',action:'plan'})">🪐 Plan</button>`;
+    btns+=`<button class="btn btn-vio btn-mini" title="one headless agent call writes a spec for your review — nothing is built" onclick="ccConfirm('Run the planner for ${esc(e.id)}? It writes a spec to .autopilot/specs/ for your review.','Plan').then(k=>k&&post('/epic-action',{id:'${esc(e.id)}',action:'plan'}))">🪐 Plan</button>`;
   if(e.has_spec)
     btns+=`<button class="btn btn-blue btn-mini" onclick="openText('Spec — ${esc(e.id)}','/epic-spec?id=${encodeURIComponent(e.id)}',false)">Spec</button>`;
   if(e.stage==='spec_ready')
-    btns+=`<button class="btn btn-go btn-mini" title="freeze the spec — decompose becomes available" onclick="if(confirm('Approve the spec for ${esc(e.id)}? Read it first — decompose translates it faithfully.'))post('/epic-action',{id:'${esc(e.id)}',action:'approve'})">Approve spec</button>
-      <button class="btn btn-mini" title="overwrite the current spec with a fresh plan" onclick="if(confirm('Re-run the planner for ${esc(e.id)}? The current spec is overwritten.'))post('/epic-action',{id:'${esc(e.id)}',action:'plan'})">Re-plan</button>`;
+    btns+=`<button class="btn btn-go btn-mini" title="freeze the spec — decompose becomes available" onclick="ccConfirm('Approve the spec for ${esc(e.id)}? Read it first — decompose translates it faithfully.','Approve').then(k=>k&&post('/epic-action',{id:'${esc(e.id)}',action:'approve'}))">Approve spec</button>
+      <button class="btn btn-mini" title="overwrite the current spec with a fresh plan" onclick="ccConfirm('Re-run the planner for ${esc(e.id)}? The current spec is overwritten.','Re-plan',true).then(k=>k&&post('/epic-action',{id:'${esc(e.id)}',action:'plan'}))">Re-plan</button>`;
   if(e.stage==='approved')
-    btns+=`<button class="btn btn-go btn-mini" title="turn the approved spec into child task proposals" onclick="if(confirm('Decompose ${esc(e.id)}? Children land HERE as proposals — you still queue each one.'))post('/epic-action',{id:'${esc(e.id)}',action:'decompose'})">Decompose</button>`;
+    btns+=`<button class="btn btn-go btn-mini" title="turn the approved spec into child task proposals" onclick="ccConfirm('Decompose ${esc(e.id)}? Children land HERE as proposals — you still queue each one.','Decompose').then(k=>k&&post('/epic-action',{id:'${esc(e.id)}',action:'decompose'}))">Decompose</button>`;
   const k=e.children||{};
   const kids=k.total?`<div class=meta>children: ${k.total} · ${k.queued} queued · ${k.shipped} shipped · <b style="color:var(--green)">${k.merged} merged</b></div>`:'';
   const ctx=e.context?`<details class=why><summary>context</summary><div style="white-space:pre-wrap;font-size:12px;opacity:.85">${esc(e.context)}</div></details>`:'';
@@ -1401,9 +1982,11 @@ function prdActionBtn(r,a){
   const fn=PRD_ACTION_CONFIRM[a];
   const msg=fn?fn(r.run_id,r.status):`${label} for '${r.run_id}'?`;
   const pii=(a==='approve-scope'&&!!r.pii_touch);
-  const gate=pii?`&&confirm('${escJsAttr(PRD_PII_CONFIRM)}')`:'';
+  // The PII gate is a SECOND, explicit dialog chained after the first — one
+  // click on the same button every other run uses is not a PII sign-off.
+  const gate=pii?`ccConfirm('${escJsAttr(PRD_PII_CONFIRM)}','I take responsibility',true)`:'Promise.resolve(true)';
   const body=`{run:'${escJsAttr(r.run_id)}',action:'${a}'${pii?",ack_pii:'1'":''}}`;
-  return `<button class="btn ${cls} btn-mini" onclick="if(confirm('${escJsAttr(msg)}')${gate})post('/prd-action',${body})">${esc(label)}</button>`;
+  return `<button class="btn ${cls} btn-mini" onclick="ccConfirm('${escJsAttr(msg)}','${escJsAttr(label.replace(/^[▶⬆↻] /,''))}').then(k=>k&&${gate}.then(k2=>k2&&post('/prd-action',${body})))">${esc(label)}</button>`;
 }
 /* Publish is handled OUTSIDE the generic next_actions -> prdActionBtn map:
    once a run has been published, the button becomes a smaller "re-publish"
@@ -1418,7 +2001,7 @@ function prdPublishBtn(r){
     ?`Re-publish '${r.run_id}'? The existing Confluence page is updated in place.`
     :`Publish '${r.run_id}' to Confluence?`;
   const cls=already?'btn btn-mini':'btn btn-go btn-mini';
-  return `<button class="${cls}" onclick="if(confirm('${escJsAttr(msg)}'))post('/prd-action',{run:'${escJsAttr(r.run_id)}',action:'publish'})">${label}</button>`;
+  return `<button class="${cls}" onclick="ccConfirm('${escJsAttr(msg)}','Publish').then(k=>k&&post('/prd-action',{run:'${escJsAttr(r.run_id)}',action:'publish'}))">${label}</button>`;
 }
 /* http(s)-only, mirroring publish.py's _safe_href defense-in-depth: escAttr
    stops attribute breakout (a stray '"') but does nothing about the SCHEME -
@@ -1462,7 +2045,7 @@ function newPrd(){
   document.getElementById('pfRun').value=''; document.getElementById('pfTitle').value='';
   document.getElementById('pfBrief').value=''; document.getElementById('pfPm').value='';
   document.getElementById('pfRunHint').textContent='';
-  document.getElementById('modal6').style.display='flex';
+  openModalEl('modal6');
   document.getElementById('pfRun').focus();
 }
 function _pfValidateRun(){
@@ -1486,9 +2069,12 @@ function submitPrdForm(){
       if((j.msg||'').startsWith('Created')){ closeModal6(); refresh(); }
     }).catch(e=>toast('error: '+e));
 }
-function closeModal6(){document.getElementById('modal6').style.display='none';}
+function closeModal6(){closeModalEl('modal6');}
 function renderPrd(){
   const band=document.getElementById('prdBand');if(!band)return;
+  // Product mode: PRDs live in Work (and their gates in Decisions) — never a
+  // duplicate action surface on the triage view.
+  if(isProductMode()){band.innerHTML='';return;}
   if(!S||!('prd' in S)){band.innerHTML='';return;}
   const rs=S.prd||[];
   band.innerHTML=`<div class=band><div class=bandhead><h3>PRDs - research pipeline</h3>
@@ -1514,7 +2100,7 @@ function insightArtifactRow(d){
     action=`<span class=meta>${esc(d.jira_key)}</span>`;
   }else if(jiraOk){
     const msg=`File insight '${d.name}' as a Jira issue?`;
-    action=`<button class="btn btn-mini" onclick="if(confirm('${escJsAttr(msg)}'))post('/artifact-action',{kind:'insight',name:'${escJsAttr(d.name)}',action:'file-jira'})">File→Jira</button>`;
+    action=`<button class="btn btn-mini" onclick="ccConfirm('${escJsAttr(msg)}','File to Jira').then(k=>k&&post('/artifact-action',{kind:'insight',name:'${escJsAttr(d.name)}',action:'file-jira'}))">File→Jira</button>`;
   }
   return `<div style="padding:4px 0">
     <div style="display:flex;justify-content:space-between;align-items:center">
@@ -1529,6 +2115,7 @@ function artifactGroup(title,rowsHtml){
 }
 function renderArtifacts(){
   const band=document.getElementById('artifactsBand');if(!band)return;
+  if(isProductMode()){band.innerHTML='';return;}   // lives in Work/Library now
   if(!S||(!('insight_docs' in S)&&!('prd' in S)&&!('surveys' in S))){band.innerHTML='';return;}
   const insights=(S.insight_docs)||[];
   const prds=((S.prd)||[]).filter(r=>(r.stages||[]).some(s=>s.name==='draft'&&s.stamped_at));
@@ -1571,6 +2158,7 @@ function watchCard(w){
 }
 function renderWatches(){
   const band=document.getElementById('watchesBand');if(!band)return;
+  if(isProductMode()){band.innerHTML='';return;}   // lives in Work now
   if(!S||!('watches' in S)){band.innerHTML='';return;}
   const ws=S.watches||[];
   band.innerHTML=`<div class=band><div class=bandhead><h3>Watches - standing metric questions</h3>
@@ -1593,6 +2181,7 @@ function surveyCard(s){
 }
 function renderSurveys(){
   const band=document.getElementById('surveysBand');if(!band)return;
+  if(isProductMode()){band.innerHTML='';return;}   // lives in Work now
   if(!S||!('surveys' in S)){band.innerHTML='';return;}
   const ss=S.surveys||[];
   band.innerHTML=`<div class=band><div class=bandhead><h3>Surveys - questionnaires and responses</h3>
@@ -1613,23 +2202,202 @@ function calCard(c){
     <div class=title>${esc(c.title||c.id)}</div>
     <div class=meta style="white-space:pre-wrap">${esc(c.card_line||'')}</div>${ev}
     <div class=btns>
-      <button class="btn btn-go btn-mini" title="append this lesson to goldens/LEARNED.md — briefed into every agent from the next cycle" onclick="if(confirm('Approve this lesson? It is briefed into the maker/checker/verifier from the next cycle.'))post('/calibration-action',{id:'${esc(c.id)}',action:'approve'})">Approve lesson</button>
+      <button class="btn btn-go btn-mini" title="append this lesson to goldens/LEARNED.md — briefed into every agent from the next cycle" onclick="ccConfirm('Approve this lesson? It is briefed into the maker/checker/verifier from the next cycle.','Approve lesson').then(k=>k&&post('/calibration-action',{id:'${esc(c.id)}',action:'approve'}))">Approve lesson</button>
       <button class="btn btn-stop btn-mini" onclick="calReject('${esc(c.id)}')">Reject</button>
     </div></div>`;
 }
 function calReject(id){
-  const why=prompt('Why is this lesson wrong or not worth briefing? (archived with the candidate — miner input)');
-  if(why===null)return;
-  if(!why.trim()){toast('A reason is required.');return;}
-  post('/calibration-action',{id:id,action:'reject',reason:why.trim()});
+  ccReason('Reject this lesson','Why is this lesson wrong or not worth briefing? It is archived with the candidate — miner input.','your reason…','Reject lesson')
+    .then(why=>{if(why!==null)post('/calibration-action',{id:id,action:'reject',reason:why});});
 }
 function renderCalibration(){
   const band=document.getElementById('calibrationBand');if(!band)return;
+  if(isProductMode()){band.innerHTML='';return;}   // gates live in Decisions now
   const cs=(S&&S.calibration)||[];
   if(!cs.length){band.innerHTML='';return;}
   band.innerHTML=`<div class=band><div class=bandhead><h3>Calibration — lessons mined from this repo's own ships</h3>
     <span class=bandsum>nothing is briefed into agents until you approve it · approve → goldens/LEARNED.md · reject archives with your reason</span></div>
     <div class=grid>${cs.map(calCard).join('')}</div></div>`;
+}
+
+/* ── Work view (product): PRDs, insights, surveys, watches — one filterable
+   list + a reader. What are we learning or making? ───────────────────────── */
+let workFilter='all', workSel=null, _workDocKey=null;
+const WORK_TYPES=[['all','All'],['prd','PRDs'],['insight','Insights'],['survey','Surveys'],['watch','Watches']];
+const PRODUCT_CATS=['insight','funnel','hypothesis','survey_design','survey_analysis','design_review'];
+function workItems(){
+  if(!S||!isProductMode())return[];
+  const items=[];
+  // In-flight asks FIRST: a question created a second ago is already visible
+  // here (the first-run contract: either path creates a visible Work item
+  // immediately) — running, queued, proposed, or blocked on a decision.
+  const seen=new Set();
+  const addTask=(t,state,kind,hot)=>{
+    if(seen.has(t.id)||!PRODUCT_CATS.includes(t.category))return;
+    seen.add(t.id);
+    items.push({type:'insight',task:kind,key:'task:'+t.id,id:t.id,
+                title:t.title||t.id,state,hot:!!hot});
+  };
+  (S.running||[]).forEach(t=>addTask(t,'agents working now','run'));
+  (S.escalated||[]).forEach(t=>addTask(t,'blocked — decide in Decisions','esc',true));
+  (S.next_up||[]).forEach(t=>addTask(t,'queued — agents pick it up next','next'));
+  (S.board||[]).forEach(t=>addTask(t,'proposed','board'));
+  (S.prd||[]).forEach(r=>items.push({type:'prd',key:'prd:'+r.run_id,id:r.run_id,
+    title:r.title||r.run_id,state:(r.status||'').replace(/-/g,' '),
+    hot:(r.next_actions||[]).some(a=>a.startsWith('approve'))}));
+  (S.insight_docs||[]).forEach(d=>items.push({type:'insight',key:'insight:'+d.name,id:d.name,
+    title:d.name,state:d.jira_key?('filed · '+d.jira_key):'ready to read'}));
+  (S.surveys||[]).forEach(s2=>items.push({type:'survey',key:'survey:'+s2.name,id:s2.name,
+    title:s2.name,state:s2.has_report?'report ready':(s2.raw_count?'responses landing':'collecting')}));
+  (S.watches||[]).forEach(w=>items.push({type:'watch',key:'watch:'+w.name,id:w.name,
+    title:w.name,state:'every '+(w.cadence_hours||'?')+'h'}));
+  return items;
+}
+function setWorkFilter(k){workFilter=k;renderWork();}
+function selectWork(key){
+  workSel=key;renderWork();
+  const rd=document.getElementById('workRead');if(rd)rd.scrollTop=0;
+}
+function _workTypeBadge(t){
+  return badge({prd:'PRD',insight:'insight',survey:'survey',watch:'watch'}[t]||t,
+               {prd:'acc',insight:'ok',survey:'warn',watch:'muted'}[t]||'muted');
+}
+/* Reader = meta strip (re-rendered with state: actions, publish status) +
+   document body (fetched once per selection — polling never resets reading). */
+function _workReaderMeta(it){
+  if(it.task){
+    // an in-flight ask: render the task's own card (context, criteria, live
+    // state); the finished document replaces it here once it lands.
+    const pools={run:S.running,esc:S.escalated,next:S.next_up,board:S.board};
+    const t=(pools[it.task]||[]).find(x=>x.id===it.id);
+    return t?card(t,it.task==='next'?'next':it.task):'';
+  }
+  if(it.type==='prd'){
+    const r=(S.prd||[]).find(x=>x.run_id===it.id); return r?prdCard(r):'';
+  }
+  if(it.type==='insight'){
+    const d=(S.insight_docs||[]).find(x=>x.name===it.id); return d?`<div class=card>${insightArtifactRow(d)}</div>`:'';
+  }
+  if(it.type==='survey'){
+    const s2=(S.surveys||[]).find(x=>x.name===it.id); return s2?surveyCard(s2):'';
+  }
+  if(it.type==='watch'){
+    const w=(S.watches||[]).find(x=>x.name===it.id); return w?watchCard(w):'';
+  }
+  return '';
+}
+function _workDocUrl(it){
+  if(it.task)return null;   // in-flight ask — no document yet
+  if(it.type==='insight')return '/product-artifact?kind=insight&name='+encodeURIComponent(it.id);
+  if(it.type==='survey'){
+    const s2=(S.surveys||[]).find(x=>x.name===it.id);
+    return (s2&&s2.has_report)?'/product-artifact?kind=survey&name='+encodeURIComponent(it.id):null;
+  }
+  if(it.type==='prd'){
+    const r=(S.prd||[]).find(x=>x.run_id===it.id);
+    return (r&&(r.stages||[]).some(s2=>s2.name==='draft'&&s2.stamped_at))
+      ?'/prd-artifact?run='+encodeURIComponent(it.id)+'&file=04-prd.md':null;
+  }
+  return null;
+}
+function renderWork(){
+  if(!isProductMode())return;
+  const listEl=document.getElementById('workList'),readEl=document.getElementById('workRead');
+  if(!listEl||!readEl)return;
+  const all=workItems();
+  setHTML(document.getElementById('workFilters'),WORK_TYPES.map(([k,l])=>{
+    const n=k==='all'?all.length:all.filter(x=>x.type===k).length;
+    return `<button class="chip ${k===workFilter?'on':''}" onclick="setWorkFilter('${k}')">${l}<b>${n}</b></button>`;
+  }).join('')+`<span style="margin-left:auto"></span>`
+    +`<button class="chip chip-go" onclick="newInsightForm()">💡 Ask a question</button>`
+    +`<button class="chip chip-go" onclick="newPrd()">＋ New PRD</button>`);
+  const list=workFilter==='all'?all:all.filter(x=>x.type===workFilter);
+  const sc=listEl.scrollTop;
+  if(!list.length){
+    setHTML(listEl,`<div class=empty style="padding:28px 14px">Nothing here yet. Ask a question or start a PRD above — Orbit does the drafting.</div>`);
+    setHTML(readEl,`<div class=ds-read-empty>✦<br><b>No work yet.</b><br>Your first question or PRD lands here.</div>`);
+    _workDocKey=null;
+    return;
+  }
+  if(!workSel||!list.some(x=>x.key===workSel))workSel=list[0].key;
+  setHTML(listEl,list.map(it=>`<button class="ds-row ${it.key===workSel?'sel':''}" onclick="selectWork('${escJsAttr(it.key)}')">
+      <div class=r-top>${_workTypeBadge(it.type)}${it.hot?badge('needs you','warn'):''}<span class=r-tid>${esc(it.id)}</span></div>
+      <div class=r-title>${esc(it.title)}</div>
+      <div class=r-snip><span class=wl-state>${esc(it.state)}</span></div></button>`).join(''));
+  listEl.scrollTop=sc;
+  const it=list.find(x=>x.key===workSel);
+  // Meta strip re-renders with state; the fetched document only reloads when
+  // the selection changes (never on a poll).
+  let meta=document.getElementById('workMeta'),doc=document.getElementById('workDoc');
+  if(!meta||!doc){
+    readEl.innerHTML='<div id="workMeta"></div><div id="workDoc"></div>';
+    readEl._cchtml=undefined;
+    meta=document.getElementById('workMeta');doc=document.getElementById('workDoc');
+  }
+  setHTML(meta,_workReaderMeta(it));
+  if(_workDocKey!==it.key){
+    _workDocKey=it.key;
+    const url=_workDocUrl(it);
+    if(!url){doc.innerHTML='';}
+    else{
+      doc.innerHTML='<div class=empty>Loading…</div>';
+      fetch(url).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.text();})
+        .then(txt=>{if(_workDocKey===it.key)doc.innerHTML=renderMarkdown(txt);})
+        .catch(e=>{if(_workDocKey===it.key)doc.innerHTML=`<div class=empty>Could not load the document: ${esc(e.message||String(e))}</div>`;});
+    }
+  }
+}
+
+/* ── Library view (product): finished + reference material, read as documents.
+   What can I read, reuse, or share? ─────────────────────────────────────── */
+let libSel=null,_libDocKey=null;
+function libItems(){
+  if(!S||!isProductMode())return[];
+  const items=[];
+  (S.prd||[]).filter(r=>/done|published/i.test(r.status||'')||(r.published&&r.published.url))
+    .forEach(r=>items.push({group:'Published PRDs',key:'prd:'+r.run_id,title:r.title||r.run_id,
+      url:'/prd-artifact?run='+encodeURIComponent(r.run_id)+'&file=04-prd.md',
+      note:(r.published&&r.published.url)?'published':'signed off'}));
+  (S.insight_docs||[]).forEach(d=>items.push({group:'Insight reports',key:'insight:'+d.name,title:d.name,
+    url:'/product-artifact?kind=insight&name='+encodeURIComponent(d.name),
+    note:d.jira_key?('filed · '+d.jira_key):''}));
+  (S.surveys||[]).filter(s2=>s2.has_report).forEach(s2=>items.push({group:'Survey reports',key:'survey:'+s2.name,title:s2.name,
+    url:'/product-artifact?kind=survey&name='+encodeURIComponent(s2.name),note:''}));
+  const docs=((S.onboarding||{}).knowledge_docs||[]).filter(d=>d!=='graph.json');
+  docs.forEach(d=>items.push({group:'Technical knowledge (optional)',key:'kb:'+d,title:d,
+    url:'/api/knowledge-doc?name='+encodeURIComponent(d),note:''}));
+  return items;
+}
+function selectLib(key){libSel=key;renderLibrary();const rd=document.getElementById('libRead');if(rd)rd.scrollTop=0;}
+function renderLibrary(){
+  if(!isProductMode())return;
+  const listEl=document.getElementById('libList'),readEl=document.getElementById('libRead');
+  if(!listEl||!readEl)return;
+  const items=libItems();
+  if(!items.length){
+    setHTML(listEl,`<div class=empty style="padding:28px 14px">Nothing published yet. Finished PRDs, insight reports, and survey reports land here.</div>`);
+    setHTML(readEl,`<div class=ds-read-empty>▤<br><b>The library is empty.</b><br>Finish something in Work and it appears here.</div>`);
+    _libDocKey=null;
+    return;
+  }
+  if(!libSel||!items.some(x=>x.key===libSel))libSel=items[0].key;
+  const sc=listEl.scrollTop;
+  let html='',lastGroup=null;
+  items.forEach(it=>{
+    if(it.group!==lastGroup){lastGroup=it.group;html+=`<div class=navlbl style="padding:10px 10px 4px">${esc(it.group)}</div>`;}
+    html+=`<button class="ds-row ${it.key===libSel?'sel':''}" onclick="selectLib('${escJsAttr(it.key)}')">
+      <div class=r-title>${esc(it.title)}</div>${it.note?`<div class=r-snip><span class=wl-state>${esc(it.note)}</span></div>`:''}</button>`;
+  });
+  setHTML(listEl,html);
+  listEl.scrollTop=sc;
+  const it=items.find(x=>x.key===libSel);
+  if(_libDocKey!==it.key){
+    _libDocKey=it.key;
+    readEl.innerHTML='<div class=empty>Loading…</div>';
+    fetch(it.url).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.text();})
+      .then(txt=>{if(_libDocKey===it.key){readEl.innerHTML=renderMarkdown(txt);readEl._cchtml=undefined;}})
+      .catch(e=>{if(_libDocKey===it.key)readEl.innerHTML=`<div class=empty>Could not load it: ${esc(e.message||String(e))}</div>`;});
+  }
 }
 
 /* ── deep space view (Gmail-style: row list + reading pane) ──────────────── */
@@ -1725,10 +2493,10 @@ function renderBranches(){
 }
 function delBranch(branch,safe){
   const warn = safe?'' : '\n\nThis branch is NOT merged — its work may be unreviewed. ';
-  if(confirm(`Delete origin/${branch}?${warn}`)) post('/delete-branch',{branch:branch});
+  ccConfirm(`Delete origin/${branch}?${warn}`,'Delete branch',true).then(k=>{if(k)post('/delete-branch',{branch:branch});});
 }
 function delBulk(kind,n){
-  if(confirm(`Delete all ${n} ${kind} branches from origin? This cannot be undone.`)) post('/delete-branches-bulk',{kind:kind});
+  ccConfirm(`Delete all ${n} ${kind} branches from origin? This cannot be undone.`,'Delete all',true).then(k=>{if(k)post('/delete-branches-bulk',{kind:kind});});
 }
 
 /* ── QA view (Task 23) — flow library, run-now, recent runs ───────────────── */
@@ -1742,16 +2510,13 @@ function runFlow(name){
   post('/qa-action',{action:'run-flow',flow:name});
 }
 function sweepFlows(){
-  if(confirm('Sweep all approved flows now?\n\nReplays every taught flow that has a steps.json (replay-proven at least once), capped by qa.regression.max_flows_per_run. Runs in the background — check Recent runs shortly.'))
-    post('/qa-action',{action:'run-regression'});
+  confirmPost('Sweep all approved flows now?\n\nReplays every taught flow that has a steps.json (replay-proven at least once), capped by qa.regression.max_flows_per_run. Runs in the background — check Recent runs shortly.','/qa-action',{action:'run-regression'},'Sweep now');
 }
 function runExplore(){
-  if(confirm('Run an exploratory crawl now?\n\nWalks qa.base_url breadth-first, same-origin only, capped by qa.exploratory.max_pages. Files only NEW findings to ops/qa/SEEN.md — never a verdict. Runs in the background.'))
-    post('/qa-action',{action:'run-explore'});
+  confirmPost('Run an exploratory crawl now?\n\nWalks qa.base_url breadth-first, same-origin only, capped by qa.exploratory.max_pages. Files only NEW findings to ops/qa/SEEN.md — never a verdict. Runs in the background.','/qa-action',{action:'run-explore'},'Explore now');
 }
 function runGenerate(){
-  if(confirm('Generate candidate tests now?\n\nReads your knowledge base and drives the browser to propose new tests, capped by ORBIT_QA_GENERATE_MAX (default 10). Writes CANDIDATES for you to review below — nothing is added to the flow library until you approve it. Runs in the background.'))
-    post('/qa-action',{action:'run-generate'});
+  confirmPost('Generate candidate tests now?\n\nReads your knowledge base and drives the browser to propose new tests, capped by ORBIT_QA_GENERATE_MAX (default 10). Writes CANDIDATES for you to review below — nothing is added to the flow library until you approve it. Runs in the background.','/qa-action',{action:'run-generate'},'Generate');
 }
 function qaFlowRow(f){
   const runs=f.runs==null?0:f.runs;
@@ -1786,15 +2551,13 @@ function healCard(h){
   return `<div class=card><div class="card-h"><span class=tid>${esc(h.flow||'—')}</span> ${badge('heal candidate','warn')}</div>
     <div class=meta style="white-space:pre-wrap">${esc(h.reason||'')}</div>${diff}${shot}
     <div class=btns>
-      <button class="btn btn-go btn-mini" title="write the corrected steps into this flow's steps.json" onclick="if(confirm('Approve this heal for ${escJsAttr(h.flow||'')}? Its steps.json is overwritten with the corrected steps.'))post('/qa-action',{action:'heal-approve',file:'${escJsAttr(h.file)}'})">Approve heal</button>
+      <button class="btn btn-go btn-mini" title="write the corrected steps into this flow's steps.json" onclick="ccConfirm('Approve this heal for ${escJsAttr(h.flow||'')}? Its steps.json is overwritten with the corrected steps.','Approve heal').then(k=>k&&post('/qa-action',{action:'heal-approve',file:'${escJsAttr(h.file)}'}))">Approve heal</button>
       <button class="btn btn-stop btn-mini" onclick="healReject('${escJsAttr(h.file)}')">Reject</button>
     </div></div>`;
 }
 function healReject(file){
-  const why=prompt('Why reject this heal candidate? (archived with the candidate)');
-  if(why===null)return;
-  if(!why.trim()){toast('A reason is required.');return;}
-  post('/qa-action',{action:'heal-reject',file:file,reason:why.trim()});
+  ccReason('Reject this heal candidate','Why reject it? The reason is archived with the candidate.','your reason…','Reject heal')
+    .then(why=>{if(why!==null)post('/qa-action',{action:'heal-reject',file:file,reason:why});});
 }
 
 /* ── generated-candidates strip — the human gate that closes the AI
@@ -1806,13 +2569,12 @@ function generateCard(g){
   return `<div class=card><div class="card-h"><span class=tid>${esc(g.name)}</span> ${badge('candidate','warn')} ${needsChip}</div>
     <div class=meta style="white-space:pre-wrap">${esc(g.summary||g.intent||'—')}</div>
     <div class=btns>
-      <button class="btn btn-go btn-mini" title="add this candidate to the flow library" onclick="if(confirm('Approve candidate ${escJsAttr(g.name)}? It becomes a real flow in the library.'))post('/qa-action',{action:'generate-approve',name:'${escJsAttr(g.name)}'})">Approve</button>
+      <button class="btn btn-go btn-mini" title="add this candidate to the flow library" onclick="ccConfirm('Approve candidate ${escJsAttr(g.name)}? It becomes a real flow in the library.','Approve').then(k=>k&&post('/qa-action',{action:'generate-approve',name:'${escJsAttr(g.name)}'}))">Approve</button>
       <button class="btn btn-stop btn-mini" onclick="generateReject('${escJsAttr(g.name)}')">Reject</button>
     </div></div>`;
 }
 function generateReject(name){
-  if(confirm('Reject candidate '+name+'? It is archived, never added to the flow library.'))
-    post('/qa-action',{action:'generate-reject',name:name});
+  confirmPost('Reject candidate '+name+'? It is archived, never added to the flow library.','/qa-action',{action:'generate-reject',name:name},'Reject',true);
 }
 
 /* ── Dev session — persistent qa.services, kept warm across test runs.
@@ -1823,9 +2585,11 @@ function qaServicesStart(){
     .catch(e=>toast('error: '+e));
 }
 function qaServicesStop(){
-  if(!confirm('Stop the persistent dev session?\n\nAny test run currently attached to it may fail. Flows/teach will each bring their own copy up again until you Start it here.'))return;
-  postJSON('/qa-services-stop',{}).then(j=>{toast(j.msg||'stopped');refresh();})
-    .catch(e=>toast('error: '+e));
+  ccConfirm('Stop the persistent dev session?\n\nAny test run currently attached to it may fail. Flows/teach will each bring their own copy up again until you Start it here.','Stop app',true).then(ok=>{
+    if(!ok)return;
+    postJSON('/qa-services-stop',{}).then(j=>{toast(j.msg||'stopped');refresh();})
+      .catch(e=>toast('error: '+e));
+  });
 }
 function qaServicesRestart(name){
   postJSON('/qa-services-restart',{service:name}).then(j=>{toast(j.msg||'restarted');refresh();})
@@ -2510,8 +3274,8 @@ function renderGraphLegend(){
 function relSince(ep){if(!ep)return'';const s=Math.max(0,Math.floor(Date.now()/1000-ep)),m=Math.floor(s/60);return m<60?m+'m':Math.floor(m/60)+'h'+String(m%60).padStart(2,'0')+'m';}
 function mergeToLoop(branch){
   if(!branch)return;const loop=(S&&S.base_branch)||'the loop branch';
-  if(confirm('Merge worktree branch\n\n'+branch+'\n\ninto '+loop+' and push?\n\n• runs in an isolated worktree — your checkout is untouched\n• aborts on conflict, nothing pushed\n• never force-pushes'))
-    post('/merge-to-loop',{branch:branch});
+  ccConfirm('Merge worktree branch\n\n'+branch+'\n\ninto '+loop+' and push?\n\n• runs in an isolated worktree — your checkout is untouched\n• aborts on conflict, nothing pushed\n• never force-pushes','Merge & push')
+    .then(k=>{if(k)post('/merge-to-loop',{branch:branch});});
 }
 function renderAgents(){
   const fb=(S&&S.feature_builds)||[];
@@ -2626,22 +3390,22 @@ ${ships.slice(0,15).join('\n')||'  (none)'}
 Discovery (by source):
 ${disc||'  —'}`;
   document.getElementById('digesttext').value=txt;
-  document.getElementById('modal').style.display='flex';
+  openModalEl('modal');
 }
 function copyDigest(){const t=document.getElementById('digesttext');t.select();
   (navigator.clipboard?navigator.clipboard.writeText(t.value):Promise.reject()).then(()=>toast('Digest copied.')).catch(()=>{document.execCommand('copy');toast('Digest copied.');});}
-function closeModal(){document.getElementById('modal').style.display='none';}
+function closeModal(){closeModalEl('modal');}
 
 /* ── inbox actions / text viewer ────────────────────────────────────────── */
 function featureBuild(id){
   const t=findTask(id); const branch='feature/'+id;
   const loop=(S&&S.base_branch)||'the loop branch';
-  if(confirm('Build "'+(t.title||id)+'" as a dedicated feature agent?\n\n• carves its own git worktree off '+loop+'\n• an agent implements it end-to-end (build → test → commit)\n• pushes '+branch+' for your review (never auto-merged)\n\nTrack it live in the Feature agents tab.'))
-    post('/feature-start',{id:id,title:t.title||id,branch:branch});
+  ccConfirm('Build "'+(t.title||id)+'" as a dedicated feature agent?\n\n• carves its own git worktree off '+loop+'\n• an agent implements it end-to-end (build → test → commit)\n• pushes '+branch+' for your review (never auto-merged)\n\nTrack it live in the Feature agents tab.','Start agent')
+    .then(k=>{if(k)post('/feature-start',{id:id,title:t.title||id,branch:branch});});
 }
 function forceTask(id,cat){
   const msg='Hand "'+id+'" to the agent?\n\nThis is a '+cat+' task — normally human-only. The agent will attempt a code fix on its own branch for your review (never merged). Work it cannot do — secret rotation, infra grants, migrations — comes back as an escalation.';
-  if(confirm(msg))post('/force',{id:id});
+  ccConfirm(msg,'Hand to agent').then(k=>{if(k)post('/force',{id:id});});
 }
 /* Answer / Reject — a real modal that keeps the task's context in view. */
 let m3={id:null,mode:null};
@@ -2658,7 +3422,7 @@ function answerTask(id){
   ta.value=''; ta.placeholder='What should the agent do, or what decision unblocks it? Your answer joins the contract and the task re-queues.';
   document.getElementById('m3go').textContent='Answer & re-queue';
   document.getElementById('m3go').className='btn btn-go btn-mini';
-  document.getElementById('modal3').style.display='flex'; ta.focus();
+  openModalEl('modal3'); ta.focus();
 }
 function rejectTask(id,isEsc){
   const t=findTask(id); m3={id:id,mode:'reject'};
@@ -2672,7 +3436,7 @@ function rejectTask(id,isEsc){
     :'Why is it rejected? The reason is recorded on the task and tunes what gets auto-fed.';
   document.getElementById('m3go').textContent=isEsc?"Won't do":'Reject ship';
   document.getElementById('m3go').className='btn btn-stop btn-mini';
-  document.getElementById('modal3').style.display='flex'; ta.focus();
+  openModalEl('modal3'); ta.focus();
 }
 // Mark with the lifecycle gate surfaced: if the ledger refuses the transition,
 // explain why and offer a FORCE (reason required; stamped forced:true, audited).
@@ -2681,11 +3445,17 @@ function markShip(id,outcome,note){
   fetch('/mark',{method:'POST',headers:POST_HDRS,body:new URLSearchParams(p).toString()})
     .then(r=>r.json()).then(j=>{
       if((j.msg||'').includes('illegal transition')){
-        const why=prompt('The lifecycle gate refused:\n\n'+j.msg+'\n\nTo FORCE it anyway, type the reason (recorded on the entry as forced:true) — or Cancel.');
-        if(why&&why.trim()) post('/mark',{id:id,outcome:outcome,note:why.trim(),force:'1'});
-        else toast('Not forced — nothing recorded.');
+        ccReason('Force this transition','The lifecycle gate refused:\n\n'+j.msg+'\n\nTo FORCE it anyway, give the reason — it is recorded on the entry as forced:true.','why force it…','Force it').then(why=>{
+          if(why!==null) post('/mark',{id:id,outcome:outcome,note:why,force:'1'});
+          else toast('Not forced — nothing recorded.');
+        });
       } else { toast(j.msg||'done'); refresh(); }
     }).catch(e=>toast('error: '+e));
+}
+function landShip(id){
+  const t=findTask(id);
+  ccConfirm(`Merge "${t.title||id}" into ${(S&&S.base_branch)||'the base branch'}?\n\nThe document goes live in this workspace (Work and Library) and future agent work builds on it.`,'Merge & land')
+    .then(ok=>{if(ok)post('/land-ship',{id:id});});
 }
 function revertTask(id){
   const t=findTask(id); m3={id:id,mode:'revert'};
@@ -2695,7 +3465,7 @@ function revertTask(id){
   ta.value=''; ta.placeholder='Why is it being reverted? The reason is recorded on the task and tunes what gets auto-fed.';
   document.getElementById('m3go').textContent='Revert ship';
   document.getElementById('m3go').className='btn btn-vio btn-mini';
-  document.getElementById('modal3').style.display='flex'; ta.focus();
+  openModalEl('modal3'); ta.focus();
 }
 function submitAction(){
   const txt=document.getElementById('m3text').value.trim();
@@ -2707,8 +3477,8 @@ function submitAction(){
     markShip(m3.id,'rejected',txt); }
   closeModal3();
 }
-function closeModal3(){document.getElementById('modal3').style.display='none';}
-function closeModal4(){document.getElementById('modal4').style.display='none';}
+function closeModal3(){closeModalEl('modal3');}
+function closeModal4(){closeModalEl('modal4');}
 
 /* ── task create/edit form (modal5) ─────────────────────────────────────── */
 let tfMode='new';
@@ -2740,8 +3510,8 @@ function newTaskForm(){
   document.getElementById('tfCat').innerHTML=_catOptions('bug');
   document.getElementById('tfPri').value='medium';
   document.getElementById('tfQueueRow').style.display='';
-  document.getElementById('modal5').style.display='flex';
-  document.getElementById('tfId').focus();
+  openModalEl('modal5');
+  document.getElementById('tfTitle').focus();
 }
 function newInsightForm(){
   // Same modal, pre-filled for the insights/ workflow: category insight, one
@@ -2769,10 +3539,25 @@ function editTaskForm(id){
   document.getElementById('tfCat').innerHTML=_catOptions(t.category||'');
   document.getElementById('tfPri').value=t.priority||'';
   document.getElementById('tfQueueRow').style.display='none';
-  document.getElementById('modal5').style.display='flex';
+  openModalEl('modal5');
   document.getElementById('tfTitle').focus();
 }
 function submitTaskForm(){
+  // Forgiving input: a human-typed id ("Referral Analytics") is slugified on
+  // Save instead of bouncing off the server's "invalid task id".
+  if(tfMode==='new'){
+    const idEl=document.getElementById('tfId');
+    const raw=idEl.value.trim();
+    if(raw&&!/^[a-z0-9][a-z0-9-]*$/.test(raw)){
+      const s=_slugify(raw);
+      if(!s){toast('The id must contain letters or digits.');return;}
+      idEl.value=s;
+    }
+    if(!raw){
+      const s=_slugify(document.getElementById('tfTitle').value);
+      if(s)idEl.value=s;
+    }
+  }
   const p={id:document.getElementById('tfId').value.trim(),
            title:document.getElementById('tfTitle').value.trim(),
            category:document.getElementById('tfCat').value,
@@ -2788,7 +3573,7 @@ function submitTaskForm(){
       if((j.msg||'').startsWith('Created')||(j.msg||'').startsWith('Updated')){ closeModal5(); refresh(); }
     }).catch(e=>toast('error: '+e));
 }
-function closeModal5(){document.getElementById('modal5').style.display='none';}
+function closeModal5(){closeModalEl('modal5');}
 
 /* ── command palette ────────────────────────────────────────────────────── */
 let palSel=0;
@@ -2870,11 +3655,13 @@ function openText(title,url,isDiff){
       if(l.startsWith('-')&&!l.startsWith('---'))return`<span class=dl-del>${e2}</span>`;
       if(l.startsWith('@@'))return`<span class=dl-hunk>${e2}</span>`;
       return e2;}).join('\n');}
-    else body.textContent=txt;
-    document.getElementById('modal2').style.display='flex';
+    else if(!isDiff && /\n## |^# |\n- |\*\*/.test(txt) && txt.length < 400000){
+      body.innerHTML = renderMarkdown(txt);
+    } else body.textContent=txt;
+    openModalEl('modal2');
   }).catch(e=>toast('Could not load it: '+e.message));
 }
-function closeModal2(){document.getElementById('modal2').style.display='none';}
+function closeModal2(){closeModalEl('modal2');}
 
 /* ── telemetry tail ─────────────────────────────────────────────────────── */
 function pollTail(){
@@ -2977,66 +3764,102 @@ function loadSettings(){
     const checks=(id,label,all,on,hint)=>`<div class=field><label>${label}</label><div class=checkrow id="set-${id}">`+
       all.map(o=>`<label class="${on.includes(o)?'on':''}"><input type="checkbox" value="${escAttr(o)}" ${on.includes(o)?'checked':''} onchange="this.parentNode.classList.toggle('on',this.checked)">${esc(o)}</label>`).join('')+
       `</div>${hint?`<div class=hint>${hint}</div>`:''}</div>`;
-    document.getElementById('settingsBody').innerHTML=
-      `<div class=setcard><h3>Repository &amp; branch</h3>
+    const repoCard=`<div class=setcard><h3>Repository &amp; branch</h3>
         ${txt('repo','Target repo path',c.repo||m.repo,'relative to .autopilot, or absolute')}
-        <div class=grid2>${txt('base_branch','Base branch — what Orbit orbits',c.base_branch||m.base_branch)}${txt('branch_prefix','Task-branch prefix',c.branch_prefix||'autopilot')}</div></div>
-      <div class=setcard><h3>Git host</h3>
+        <div class=grid2>${txt('base_branch','Base branch — what Orbit orbits',c.base_branch||m.base_branch)}${txt('branch_prefix','Task-branch prefix',c.branch_prefix||'autopilot')}</div></div>`;
+    const gitCard=`<div class=setcard><h3>Git host</h3>
         <div class=grid2>${sel('git_host','Provider',c.git_host||m.git_host,m.hosts_all||['bitbucket','github','gitlab'])}${txt('git_repo','Repo slug (org/repo)',c.git_repo||m.git_repo,'drives PR + source links')}</div>
         ${sel('pull_requests','Auto-raise PRs after each ship',c.pull_requests||'off',['off','github'])}
         <div class=hint>github = the wrapper runs \`gh pr create\` with the review packet as body (needs an authenticated gh). Merging stays manual either way.</div>
-        <div class=set-meta>New-PR link: <code>${esc(m.git_pr_url||'—')}</code></div></div>
-      <div class=setcard><h3>Agent</h3>
-        <div class=grid2>${txt('model','Model',c.model)}${sel('permission_mode','Permission mode',c.permission_mode,['acceptEdits','plan','bypassPermissions','default'])}</div></div>
-      <div class=setcard><h3>Cadence</h3>
+        <div class=set-meta>New-PR link: <code>${esc(m.git_pr_url||'—')}</code></div></div>`;
+    const agentCard=`<div class=setcard><h3>Agent</h3>
+        <div class=grid2>${txt('model','Model',c.model)}${sel('permission_mode','Permission mode',c.permission_mode,['acceptEdits','plan','bypassPermissions','default'])}</div></div>`;
+    const cadenceCard=`<div class=setcard><h3>Cadence</h3>
         <div class=grid2>${num('interval_seconds','Poll interval (s)',c.interval_seconds)}${num('max_tasks_per_day','Max tasks / day',c.max_tasks_per_day)}</div>
         ${num('cycle_timeout_seconds','Cycle timeout (s)',c.cycle_timeout_seconds)}
-        ${num('concurrency','Concurrent slots',c.concurrency,'how many task cycles the loop may run in parallel - each slot polls and claims independently; 1 = today\'s single worker')}</div>
-      <div class=setcard><h3>Discovery</h3>
+        ${num('concurrency','Concurrent slots',c.concurrency||1,'how many task cycles the loop may run in parallel - each slot polls and claims independently; 1 = the default single worker')}</div>`;
+    const discoveryCard=`<div class=setcard><h3>Discovery</h3>
         ${checks('sources','Task sources',m.sources_all||[],c.sources||[],'where the loop pulls work from')}
-        ${checks('workable_categories','Auto-workable categories',m.categories_all||[],c.workable_categories||[],'categories the loop may build unattended')}</div>
-      <div class=setcard><h3>Watches <span style="font-weight:500;text-transform:none;letter-spacing:0">(optional)</span></h3>
+        ${checks('workable_categories','Auto-workable categories',m.categories_all||[],c.workable_categories||[],'categories the loop may build unattended')}</div>`;
+    const watchesCard=`<div class=setcard><h3>Watches <span style="font-weight:500;text-transform:none;letter-spacing:0">(start here for product)</span></h3>
         <div class=watchrows id=watchRowsList></div>
         <button class="btn btn-mini" onclick="addWatchRow()">Add row</button>
-        <div class=hint>standing metric questions re-filed into a fresh insight past cadence - name is a lowercase slug, cadence is in hours, category drives the filed task's category. Leave empty to opt out.</div></div>
-      <div class=setcard><h3>Verification gates</h3>
+        <div class=hint>Standing metric questions Orbit re-files as insights on cadence — name is a lowercase slug, cadence is hours. Leave empty to skip.</div></div>`;
+    const gatesCard=`<div class=setcard><h3>Verification gates</h3>
         <div class=field><label>Gates — JSON: name → { cmd, cwd, needs: [] }</label>
           <textarea id="set-gates" spellcheck="false">${esc(JSON.stringify(c.gates||{},null,2))}</textarea>
-          <div class=hint>the commands that must pass before a change ships — the #1 thing to set per repo</div></div></div>
-      <div class=setcard><h3>QA <span style="font-weight:500;text-transform:none;letter-spacing:0">(optional)</span></h3>
+          <div class=hint>the commands that must pass before a change ships — the #1 thing to set per repo</div></div></div>`;
+    const qaCard=`<div class=setcard><h3>QA <span style="font-weight:500;text-transform:none;letter-spacing:0">(optional)</span></h3>
         <div class=field><label>qa — JSON: base_url, browser, flows_dir, gate_categories, exploratory, …</label>
           <textarea id="set-qa" spellcheck="false">${esc(JSON.stringify(c.qa||{},null,2))}</textarea>
-          <div class=hint>leave as {} to opt out — browser-driven QA only activates once this is set</div></div></div>
-      <div class=setcard><h3>Plan <span style="font-weight:500;text-transform:none;letter-spacing:0">(optional)</span></h3>
+          <div class=hint>leave as {} to opt out — browser-driven QA only activates once this is set</div></div></div>`;
+    const planCard=`<div class=setcard><h3>Plan <span style="font-weight:500;text-transform:none;letter-spacing:0">(optional)</span></h3>
         <div class=field><label>plan — JSON: enforce ("verifier"|"block"), categories, model</label>
           <textarea id="set-plan" spellcheck="false">${esc(JSON.stringify(c.plan||{},null,2))}</textarea>
-          <div class=hint>leave as {} to opt out — gates the planning tier's pre-work spec requirement</div></div></div>
-      <div class=setcard><h3>Knowledge <span style="font-weight:500;text-transform:none;letter-spacing:0">(optional)</span></h3>
+          <div class=hint>leave as {} to opt out — gates the planning tier's pre-work spec requirement</div></div></div>`;
+    const knowledgeCard=`<div class=setcard><h3>Knowledge <span style="font-weight:500;text-transform:none;letter-spacing:0">(optional)</span></h3>
         <div class=field><label>knowledge — JSON: refresh ("manual"|"auto"), stale_after_merges, timeout_seconds</label>
           <textarea id="set-knowledge" spellcheck="false">${esc(JSON.stringify(c.knowledge||{},null,2))}</textarea>
-          <div class=hint>leave as {} to opt out — controls the every-cycle knowledge-base staleness check</div></div></div>
-      <div class=setcard><h3>MCP <span style="font-weight:500;text-transform:none;letter-spacing:0">(optional)</span></h3>
+          <div class=hint>leave as {} to opt out — controls the every-cycle knowledge-base staleness check</div></div></div>`;
+    const mcpCard=`<div class=setcard><h3>MCP <span style="font-weight:500;text-transform:none;letter-spacing:0">(data &amp; publish connectors)</span></h3>
         <div class=field><label>mcp — JSON: server name → { transport, url|command, token_env, tools }</label>
           <textarea id="set-mcp" spellcheck="false">${esc(JSON.stringify(c.mcp||{},null,2))}</textarea>
-          <div class=hint>leave as {} to opt out — transport is "http" (needs url) or "stdio" (needs command); tools is "*" or a list of names; token_env names a secret set below. Deep validation runs on save.</div></div></div>
-      <div class=setcard><h3>Secrets</h3>
+          <div class=hint>Connect your analytics MCP / Confluence / Jira here. transport is "http" (needs url) or "stdio" (needs command); token_env names a secret below.</div></div></div>`;
+    const secretsCard=`<div class=setcard><h3>Secrets</h3>
         <div id="secretsList" class=secrets-list>Loading…</div>
         <div class=grid2>
-          <input id="secretName" placeholder="NAME (e.g. METAQL_TOKEN)" spellcheck="false" autocapitalize="off">
+          <input id="secretName" placeholder="NAME (e.g. ANALYTICS_TOKEN)" spellcheck="false" autocapitalize="off">
           <input id="secretValue" placeholder="value" type="password" spellcheck="false" autocapitalize="off">
         </div>
         <button class="btn btn-go btn-mini" style="margin-top:8px" onclick="addSecret()">Add</button>
-        <div class=hint>Used for MCP tokens (e.g. METAQL_TOKEN). Values may contain only letters, digits, and _-./:+=@,~ (no spaces or shell metacharacters). Names like PATH/LD_* are reserved. The loop parses this file — it is never executed as shell — and values are never shown again.</div></div>
-      <div class=setcard><h3>Advanced</h3>
+        <div class=hint>Used for MCP tokens (e.g. ANALYTICS_TOKEN). Values may contain only letters, digits, and _-./:+=@,~ (no spaces or shell metacharacters). Names like PATH/LD_* are reserved. Values are never shown again.</div></div>`;
+    const advancedCard=`<div class=setcard><h3>Advanced</h3>
         ${txt('spec','Standing spec file',c.spec||'','reread by the agent each cycle')}
-        ${txt('commit_trailer','Commit trailer',c.commit_trailer||'')}</div>
-      <div class=setcard><h3>Environment (read-only)</h3>
-        <div class=set-meta>.autopilot: <code>${esc(m.ap_home)}</code><br>repo: <code>${esc(m.repo)}</code><br>dashboard port: <code>${esc(m.port)}</code><br>loop service: <code>${esc(m.loop_label)}</code><br>dashboard service: <code>${esc(m.dashboard_label)}</code></div></div>
-      <div class=set-actions>
+        ${txt('commit_trailer','Commit trailer',c.commit_trailer||'')}</div>`;
+    const envCard=`<div class=setcard><h3>Environment (read-only)</h3>
+        <div class=set-meta>.autopilot: <code>${esc(m.ap_home)}</code><br>repo: <code>${esc(m.repo)}</code><br>dashboard port: <code>${esc(m.port)}</code><br>loop service: <code>${esc(m.loop_label)}</code><br>dashboard service: <code>${esc(m.dashboard_label)}</code></div></div>`;
+    const actions=`<div class=set-actions>
         <button class="btn btn-go" onclick="saveSettings()">Save config</button>
-        <button class="btn btn-amber" onclick="if(confirm('Restart the loop to apply saved config? Any in-flight cycle is aborted.'))post('/restart-loop',{})">Restart loop</button>
-        <button class="btn" onclick="if(confirm('Restart the dashboard? The page will blink — hard-refresh after ~2s.'))post('/restart-dashboard',{})">Restart dashboard</button>
-        <span class=set-meta>Save writes config.yaml · Restart loop applies it to the running loop</span></div>`;
+        <button class="btn btn-amber" onclick="confirmPost('Restart agents to apply saved config? Any in-flight work is aborted.','/restart-loop',{},'Restart',true)">${isProductMode()?'Restart agents':'Restart loop'}</button>
+        <button class="btn" onclick="confirmPost('Restart the dashboard? The page will blink — hard-refresh after ~2s.','/restart-dashboard',{},'Restart')">Restart dashboard</button>
+        <span class=set-meta>Save writes config.yaml · Restart applies it</span></div>`;
+    // Setup is progressive: first outcome, then data, then publishing, then
+    // watches/cadence, then advanced. Structured forms are the normal
+    // experience; JSON cards sit at the bottom as the Advanced disclosure.
+    const firstOutcome = (isProductMode() && workspaceEmpty())
+      ? `<div class="setcard first-outcome" style="border-color:#2b4f86;background:linear-gradient(105deg,rgba(124,156,255,.12),transparent 60%)">
+          <h3>Start with an outcome</h3>
+          <p style="margin:0 0 12px;font:500 13px/1.5 var(--body);color:var(--dim);max-width:62ch">
+            Orbit shows its value before asking for connections. Create the first piece of work now — integrations can wait.</p>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="btn btn-go" onclick="newInsightForm()">💡 Ask a product question</button>
+            <button class="btn btn-blue" onclick="newPrd()">＋ Start a PRD</button>
+          </div></div>`
+      : '';
+    const pmIntro = isProductMode()
+      ? `<div class=setcard style="border-color:#2b4f86;background:linear-gradient(105deg,rgba(124,156,255,.1),transparent 60%)">
+          <h3>Setup — a few minutes, once</h3>
+          <div class=hint style="margin:0;font:500 12.5px/1.55 var(--disp);color:var(--ink)">
+            <b>1.</b> Create a first item (above, or from Work) ·
+            <b>2.</b> Add secrets and connections for data / Confluence / Jira ·
+            <b>3.</b> Add watches — the questions Orbit keeps answering ·
+            <b>4.</b> Save, then Restart agents.
+            JSON sections at the bottom stay optional.
+          </div></div>`
+      : '';
+    // Product: watches + secrets + MCP first. Engineer: keep the classic order.
+    const body = isProductMode()
+      ? firstOutcome + pmIntro + secretsCard + mcpCard + watchesCard + cadenceCard + discoveryCard + agentCard + gatesCard + qaCard + planCard + knowledgeCard + repoCard + gitCard + advancedCard + envCard + actions
+      : repoCard + gitCard + agentCard + cadenceCard + discoveryCard + watchesCard + gatesCard + qaCard + planCard + knowledgeCard + mcpCard + secretsCard + advancedCard + envCard + actions;
+    document.getElementById('settingsBody').innerHTML = body;
+    const sa=document.getElementById('settingsAside'),sb=document.getElementById('settingsBlurb');
+    if(isProductMode()){
+      if(sa)setText(sa,'connect data, publish, and secrets');
+      if(sb)setText(sb,'Start with secrets and connections, then watches. Save, then Restart agents. You should not need a terminal after first setup.');
+    }else{
+      if(sa)setText(sa,'config.yaml is the source of truth');
+      if(sb)setText(sb,'Edit, Save, then Restart the loop to apply. Structured forms for watches and secrets; advanced JSON stays available when you need it.');
+    }
     renderWatchesCard();
     loadSecrets();
   }).catch(e=>{document.getElementById('settingsBody').innerHTML=`<div class=empty>Could not load settings: ${esc(String(e))}</div>`;});
@@ -3062,8 +3885,10 @@ function addSecret(){
   }).catch(e=>toast('Save failed: '+e));
 }
 function deleteSecret(name){
-  if(!confirm(`Delete secret ${name}?`))return;
-  postJSON('/api/secrets',{delete:[name]}).then(j=>{toast(j.msg||'deleted');loadSecrets();}).catch(e=>toast('Delete failed: '+e));
+  ccConfirm(`Delete secret ${name}?`,'Delete',true).then(ok=>{
+    if(!ok)return;
+    postJSON('/api/secrets',{delete:[name]}).then(j=>{toast(j.msg||'deleted');loadSecrets();}).catch(e=>toast('Delete failed: '+e));
+  });
 }
 function saveSettings(){
   const blocks={};
@@ -3094,6 +3919,12 @@ function saveSettings(){
     spec:v('spec'),commit_trailer:v('commit_trailer'),gates:blocks.gates,qa:blocks.qa,plan:blocks.plan,knowledge:blocks.knowledge,
     mcp:blocks.mcp,pull_requests:v('pull_requests')
   };
+  // An empty numeric field means "keep the current/default value", never a
+  // null the server bounces (the rejection message names the 1-32 range,
+  // which is exactly how a 32-slot fork bomb once got typed in).
+  for(const k of ['interval_seconds','max_tasks_per_day','cycle_timeout_seconds','concurrency']){
+    if(!Number.isInteger(payload[k]))delete payload[k];
+  }
   postJSON('/api/config',payload).then(j=>toast(j.msg||'saved')).catch(e=>toast('Save failed: '+e));
 }
 
@@ -3136,6 +3967,16 @@ function renderProjMenu(){
       +`<span class="projsw-name">${esc(p.name)}${p.has_autopilot?'':' <span class=mut>(not initialized)</span>'}`
       +`${p.loop_running?' <span class=live-dot>●</span>':''}${slots}</span>${acts}</div>`;
   }).join(''):'<div class="projsw-item mut">No other projects</div>';
+  // Back to the launcher's picker — the only place a NEW workspace is
+  // created. Deselecting the active project makes GET / serve the picker.
+  menu.innerHTML+=`<div class="projsw-item" onclick="openPicker()">＋ New workspace…</div>`;
+}
+function openPicker(){
+  document.getElementById('projSwMenu').style.display='none';
+  postJSON('/_launcher/close',{}).then(j=>{
+    if(j&&j.ok)location.reload();   // "/" now serves the picker with the create form
+    else toast(j&&j.msg||'could not open the workspace picker');
+  }).catch(e=>toast('Could not open the picker: '+e));
 }
 function toggleProjMenu(){
   const menu=document.getElementById('projSwMenu');
@@ -3175,12 +4016,13 @@ document.addEventListener('click',e=>{
 });
 
 /* ── render pipeline ────────────────────────────────────────────────────── */
-function sig(r){return JSON.stringify([r.running,r.next_up,r.done,r.board,r.skipped,r.escalated,r.runlog,r.history,r.funnel,r.feature_builds,r.spend_history,r.branches,r.epics,r.qa_flows,r.qa_services,r.onboarding,r.prd,r.watches,r.surveys,r.insight_docs,r.workers,r.publish_channels]);}
+function sig(r){return JSON.stringify([r.running,r.next_up,r.done,r.board,r.skipped,r.escalated,r.runlog,r.history,r.funnel,r.feature_builds,r.spend_history,r.branches,r.epics,r.qa_flows,r.qa_services,r.onboarding,r.prd,r.watches,r.surveys,r.insight_docs,r.workers,r.publish_channels,r.decisions,r.calibration]);}
 function renderViews(){
   // Preserve column scroll positions across rebuilds.
   const colsEl=document.getElementById('queueCols');
   const scrolls=[...colsEl.querySelectorAll('.col')].map(c=>c.scrollTop);
-  renderStats();renderInboxAll();renderFilters();renderEpics();renderPrd();renderArtifacts();renderWatches();renderSurveys();renderCalibration();renderDeepspace();renderQueue();renderShips();renderBranches();renderAgents();renderQa();
+  renderStats();renderInboxAll();renderDawn();renderSetupCoach();renderWork();renderLibrary();
+  renderFilters();renderEpics();renderPrd();renderArtifacts();renderWatches();renderSurveys();renderCalibration();renderDeepspace();renderQueue();renderShips();renderBranches();renderAgents();renderQa();
   renderKpis();renderSpend();renderHistory();renderFunnel();renderRunlog();renderOnboarding();renderKnowledge();
   [...colsEl.querySelectorAll('.col')].forEach((c,i)=>{if(scrolls[i])c.scrollTop=scrolls[i];});
 }
@@ -3201,11 +4043,25 @@ function trackTouchdowns(j){
     document.querySelectorAll(`.card[data-tid="${CSS.escape(i)}"]`).forEach(el=>el.classList.add('touchdown'));
   }));
 }
+let _landed=false;
+function maybeFirstRunLanding(){
+  // A brand-new product workspace never lands on an empty Today: Setup opens
+  // with the two first actions (ask a question / start a PRD). Only on a true
+  // first run — a persisted view means the PM has been here before.
+  if(!isProductMode()||!workspaceEmpty())return;
+  let stored=null; try{stored=localStorage.getItem('cc-view');}catch(e){}
+  if(!stored)go('settings');
+}
 function refresh(){
   fetch('/api/state').then(r=>r.json()).then(j=>{
     S=j;serverNow=j.now;fetchedAt=Date.now();
     window.CC_STATE=j;   // published for the orbital-background hover tooltips
     trackTouchdowns(j);
+    // The served __MODE__ and live state almost always agree; if config.yaml's
+    // mode flipped under a running tab, re-author the rail rather than serving
+    // a stale mix.
+    if(document.body.classList.contains('pm')!==isProductMode())renderNav();
+    if(!_landed){_landed=true;maybeFirstRunLanding();}
     document.getElementById('stalePill').style.display='none';
     renderTop();
     const s2=sig(j);

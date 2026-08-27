@@ -21,6 +21,7 @@ def test_product_scaffold_creates_workspace_dirs(tmp_path):
 def test_product_config_validates_and_carries_insight_gate(tmp_path):
     _init_product(tmp_path)
     cfg = (tmp_path / ".autopilot" / "config.yaml").read_text()
+    assert "mode: product" in cfg   # explicit marker — is_product_workspace reads it first
     assert "insight_lint" in cfg
     assert "workable_categories: [insight, funnel, hypothesis, survey_design, survey_analysis, design_review, documentation]" in cfg
     r = subprocess.run([sys.executable, str(ORBIT / "engine" / "config.py"),
@@ -181,18 +182,18 @@ def test_router_yaml_parses_and_has_funnel_hypothesis_categories():
 def test_doctor_warns_on_missing_mcp_token_env(tmp_path):
     _init_product(tmp_path)
     cfg = tmp_path / ".autopilot" / "config.yaml"
-    cfg.write_text(cfg.read_text() + '\nmcp:\n  metaql:\n    transport: http\n'
-                   '    url: "https://m/mcp"\n    token_env: METAQL_TOKEN\n    tools: "*"\n')
+    cfg.write_text(cfg.read_text() + '\nmcp:\n  analytics:\n    transport: http\n'
+                   '    url: "https://m/mcp"\n    token_env: ANALYTICS_TOKEN\n    tools: "*"\n')
     import os
     env = dict(os.environ, ORBIT_HOME=str(ORBIT))
-    env.pop("METAQL_TOKEN", None)
+    env.pop("ANALYTICS_TOKEN", None)
     r = subprocess.run([sys.executable, str(ORBIT / "engine" / "doctor.py"), str(tmp_path)],
                        capture_output=True, text=True, env=env)
-    assert "METAQL_TOKEN" in r.stdout
+    assert "ANALYTICS_TOKEN" in r.stdout
 
 def test_figma_mcp_stanza_scaffolded_in_product_template():
     """install/init.py's PRODUCT config template's commented mcp: example must
-    show a figma stanza alongside metaql, so a workspace operator sees how to
+    show a figma stanza alongside analytics, so a workspace operator sees how to
     declare one without reading the schema doc separately."""
     src = (ORBIT / "install" / "init.py").read_text()
     assert "#   figma:" in src

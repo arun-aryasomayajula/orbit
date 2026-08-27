@@ -11,17 +11,11 @@
   --ink:#E8EDF7; --dim:#8B96AC; --faint:#5A6478;
   --amber:#FFB35C; --amber-dim:#4a3416; --green:#4ADE9C; --green-dim:#0d3526;
   --blue:#7C9CFF; --blue-dim:#182a52; --red:#FF6B7A; --red-dim:#43181d;
-  --disp:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --disp:"Space Grotesk",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
   --body:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
 }
-@media (prefers-color-scheme: light){
-  :root{
-    --void:#F4F6FB; --panel:#FFFFFF; --card:#F7F9FD; --card2:#EEF1F9; --line:#E1E6F0; --line2:#CDD5E6;
-    --ink:#161B26; --dim:#5C6577; --faint:#8991A3;
-    --amber-dim:#FFEBCF; --green-dim:#DCF9EC; --blue-dim:#E4EAFF; --red-dim:#FFE3E5;
-  }
-}
+/* One sky — Mission Control is deep-space only; keep the launcher matched. */
 *{box-sizing:border-box}
 html,body{margin:0;min-height:100%}
 body{background:var(--void);color:var(--ink);font:14px/1.55 var(--body);
@@ -60,9 +54,36 @@ body.has-tabs{padding-top:104px}
 
 #shell{width:100%;max-width:640px}
 header{display:flex;flex-direction:column;align-items:center;text-align:center;margin-bottom:28px}
-.orbmark{font-size:40px;line-height:1}
-header h1{font:700 20px var(--disp);letter-spacing:.14em;text-transform:uppercase;margin:10px 0 4px}
-header .sub{font:500 12.5px var(--mono);color:var(--dim);margin:0}
+.orbmark{position:relative;width:44px;height:44px;margin:0 auto}
+.orbmark::before{content:"";position:absolute;inset:10px;border-radius:50%;
+  background:radial-gradient(circle at 35% 30%,var(--blue),#2c4390 70%);
+  box-shadow:0 0 14px rgba(124,156,255,.45)}
+.orbmark::after{content:"";position:absolute;inset:0;border-radius:50%;
+  border:1px solid rgba(124,156,255,.35);
+  background:radial-gradient(circle,var(--ink) 2px,transparent 2.5px) no-repeat 50% -1px/5px 5px;
+  animation:orb 3.2s linear infinite}
+@keyframes orb{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.orbmark::after{animation:none}}
+header h1{font:700 20px var(--disp);letter-spacing:.14em;text-transform:uppercase;margin:14px 0 6px}
+header .sub{font:500 13px/1.5 var(--body);color:var(--dim);margin:0;max-width:36ch}
+.howto{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:0 0 18px}
+@media(max-width:560px){.howto{grid-template-columns:1fr}}
+.howto .step{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 13px}
+.howto .n{font:700 10px var(--mono);letter-spacing:.14em;color:var(--blue);margin-bottom:6px}
+.howto b{display:block;font:600 13px var(--disp);margin-bottom:4px}
+.howto p{margin:0;font:500 12px/1.45 var(--body);color:var(--dim)}
+.mode{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
+@media(max-width:560px){.mode{grid-template-columns:1fr}}
+.mode label{display:flex;gap:10px;align-items:flex-start;padding:12px;border:1px solid var(--line2);
+  border-radius:10px;background:var(--card);cursor:pointer}
+.mode label:has(input:checked){border-color:#2b4f86;background:var(--blue-dim)}
+.mode input{accent-color:var(--blue);margin-top:2px;flex:none}
+.mode .mt{font:600 12.5px var(--disp);color:var(--ink)}
+.mode .ms{font:500 11.5px/1.4 var(--body);color:var(--dim);margin-top:2px}
+.adv{margin:8px 0 2px}
+.adv summary{font:500 11.5px var(--body);color:var(--dim);cursor:pointer;padding:4px 0}
+.adv summary:hover{color:var(--ink)}
+.adv[open] summary{margin-bottom:6px}
 
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px;margin-bottom:16px}
 .panel h2{font:600 10.5px var(--disp);letter-spacing:.18em;text-transform:uppercase;color:var(--faint);margin:0 0 12px}
@@ -113,30 +134,49 @@ header .sub{font:500 12.5px var(--mono);color:var(--dim);margin:0}
 <nav id="tabstrip" aria-label="Workspaces"></nav>
 <div id="shell">
   <header>
-    <div class="orbmark">🪐</div>
+    <div class="orbmark" aria-hidden="true"></div>
     <h1>Orbit</h1>
-    <p class="sub">pick a project</p>
+    <p class="sub">Your product co-pilot — create a workspace, open Dawn, decide what ships.</p>
   </header>
 
+  <div class="howto" aria-label="How Orbit works">
+    <div class="step"><div class="n">01</div><b>Create</b><p>Spin up a product workspace in one click. No terminal after that.</p></div>
+    <div class="step"><div class="n">02</div><b>Decide</b><p>Orbit drafts PRDs and insights. You approve gates — machines never force-merge.</p></div>
+    <div class="step"><div class="n">03</div><b>Publish</b><p>Send signed work to Confluence / Jira when you are ready.</p></div>
+  </div>
+
   <section class="panel">
-    <h2>Import a repo</h2>
-    <form id="importForm">
-      <input id="importPath" class="in" type="text" placeholder="/absolute/path/to/repo" autocomplete="off" spellcheck="false">
-      <button class="btn btn-blue" type="submit">Import</button>
+    <h2>New product workspace</h2>
+    <form id="createForm">
+      <div class="mode">
+        <label>
+          <input type="radio" name="wsKind" id="kindProduct" value="product" checked>
+          <span><span class="mt">Product (PM)</span><span class="ms">Insights, PRDs, surveys, watches — recommended</span></span>
+        </label>
+        <label>
+          <input type="radio" name="wsKind" id="kindEng" value="eng">
+          <span><span class="mt">Engineering</span><span class="ms">Code loop, ships, branches, QA gates</span></span>
+        </label>
+      </div>
+      <div class="row">
+        <input id="createName" class="in" type="text" placeholder="Product name (e.g. checkout)" autocomplete="off" spellcheck="false" aria-label="Product name">
+      </div>
+      <details class="adv">
+        <summary>Advanced — choose the folder yourself</summary>
+        <input id="createPath" class="in" type="text" placeholder="/absolute/path/for/new/workspace (default: ~/orbit-workspaces/&lt;name&gt;)" autocomplete="off" spellcheck="false" aria-label="Workspace path">
+      </details>
+      <div class="foot">
+        <span class="check" style="color:var(--faint)">Orbit drafts the work; you decide what ships</span>
+        <button class="btn btn-go" type="submit">Create &amp; open</button>
+      </div>
     </form>
   </section>
 
   <section class="panel">
-    <h2>New workspace</h2>
-    <form id="createForm">
-      <div class="row">
-        <input id="createName" class="in" type="text" placeholder="name" autocomplete="off" spellcheck="false">
-        <input id="createPath" class="in" type="text" placeholder="/absolute/path/to/new/workspace" autocomplete="off" spellcheck="false">
-      </div>
-      <div class="foot">
-        <label class="check"><input id="createProduct" type="checkbox"> product workspace (PM: insights, research, surveys)</label>
-        <button class="btn btn-go" type="submit">Create</button>
-      </div>
+    <h2>Import an existing repo</h2>
+    <form id="importForm">
+      <input id="importPath" class="in" type="text" placeholder="/absolute/path/to/repo" autocomplete="off" spellcheck="false">
+      <button class="btn btn-blue" type="submit">Import</button>
     </form>
   </section>
 
@@ -203,7 +243,7 @@ function render(state) {
   const list = document.getElementById('projects');
   list.innerHTML = '';
   if (!state.projects.length) {
-    list.innerHTML = '<div class="empty">No projects yet — import one above.</div>';
+    list.innerHTML = '<div class="empty">No workspaces yet — create a product workspace above.</div>';
     return;
   }
   state.projects.forEach(p => {
@@ -264,18 +304,30 @@ document.getElementById('createForm').addEventListener('submit', e => {
   e.preventDefault();
   const pathInput = document.getElementById('createPath');
   const nameInput = document.getElementById('createName');
-  const product = document.getElementById('createProduct').checked;
+  const product = !!(document.getElementById('kindProduct') && document.getElementById('kindProduct').checked);
   const path = pathInput.value.trim();
-  if (!path) { setMsg('a path for the new workspace is required'); return; }
+  const name = nameInput.value.trim();
+  if (!name && !path) { setMsg('Give the workspace a name (or set a path under Advanced)'); return; }
   const btn = e.target.querySelector('button[type=submit]');
   btn.disabled = true;
-  setMsg('creating workspace…');
+  setMsg(product ? 'Creating product workspace…' : 'Creating engineering workspace…');
   post('/_launcher/create', {path, name: nameInput.value.trim(), product}).then(j => {
-    setMsg(j.msg || (j.ok ? 'created' : 'failed'));
-    if (j.ok) { pathInput.value = ''; nameInput.value = ''; }
+    setMsg(j.msg || (j.ok ? 'Created — opening…' : 'Failed'));
+    if (j.ok) {
+      pathInput.value = '';
+      nameInput.value = '';
+      // do_create already spawn_child + set_active when opened; reload into MC.
+      if (j.opened) { location.reload(); return; }
+      const openPath = (j.project && j.project.path) || path;
+      post('/_launcher/open', {path: openPath}).then(o => {
+        if (o && o.ok) location.reload();
+        else { btn.disabled = false; refresh(); }
+      }).catch(() => { btn.disabled = false; refresh(); });
+      return;
+    }
     btn.disabled = false;
     refresh();
-  }).catch(() => { setMsg('request failed'); btn.disabled = false; });
+  }).catch(() => { setMsg('Request failed'); btn.disabled = false; });
 });
 
 refresh();

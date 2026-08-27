@@ -239,8 +239,12 @@ def load_queue() -> list[dict]:
 
 
 def load_ledger() -> dict:
+    """Corrupt-tolerant: entries must be a dict keyed by task id — anything
+    else (a hand-written `[]`, a string, null) reads as empty rather than
+    letting `.items()` blow up build_state and 502 the whole dashboard."""
     try:
-        return json.loads(LEDGER.read_text()).get("entries", {}) if LEDGER.exists() else {}
+        entries = json.loads(LEDGER.read_text()).get("entries", {}) if LEDGER.exists() else {}
+        return entries if isinstance(entries, dict) else {}
     except Exception:
         return {}
 
@@ -510,6 +514,16 @@ def _read_blocks() -> tuple[str, list[str], list[str]]:
 
 
 def _write_blocks(header: str, blocks: list[str]):
+    # An empty backlog is written as `tasks: []` (inline empty list — init's
+    # template and yaml.dump both produce it), a form you cannot append
+    # `- id:` blocks after. The first append rewrites that line to block-style
+    # `tasks:` so the file stays valid YAML. (Regression: a fresh product
+    # workspace's first dashboard task corrupted backlog.yaml, the loop's
+    # backlog→queue refresh failed, and nothing ever ran.)
+    if blocks:
+        # [ \t] only — \s would swallow the trailing newline and glue the
+        # first block onto the tasks: line.
+        header = re.sub(r"(?m)^tasks:[ \t]*\[[ \t]*\][ \t]*$", "tasks:", header)
     BACKLOG.write_text(header + "".join(blocks))
 
 
@@ -1205,6 +1219,55 @@ def merged_map() -> dict:
             out = {s: False for s in shas}
     _MERGED_CACHE.update(t=now, v=out)
     return out
+
+
+def _origin_url() -> str:
+    r = subprocess.run(["git", "-C", str(REPO), "remote", "get-url", "origin"],
+                       capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def is_local_origin() -> bool:
+    """True when origin is a filesystem path (the local bare repo init.py
+    seeds for name-first workspaces) — there is no git host to merge on, so
+    the dashboard must offer a REAL merge, not just the record-keeping mark."""
+    u = _origin_url()
+    return bool(u) and (u.startswith("/") or u.startswith("file://"))
+
+
+def do_land_ship(tid: str) -> str:
+    """Actually merge a reviewed ship into the base branch — local-origin
+    workspaces only. Hosted repos merge on their git host (PR) and use /mark;
+    here the dashboard IS the host. Merges origin/<branch> into the checkout,
+    pushes base back to the local origin (worktrees are carved from
+    origin/<base>, so this keeps future cycles building on the landed work),
+    then records `merged` through the same ledger path /mark uses."""
+    if not is_local_origin():
+        return "This workspace's origin is hosted — merge there, then Mark merged."
+    e = load_ledger().get(tid) or {}
+    branch = (e.get("remote_ref") or "").removeprefix("origin/") or e.get("branch") or ""
+    if not branch:
+        return f"No branch recorded for {tid} — nothing to land."
+    if lifecycle.check(e.get("state"), "merged", e) is not None:
+        return f"{tid} is not in a landable state ({e.get('state') or 'unknown'})."
+
+    def g(*a):
+        return subprocess.run(["git", "-C", str(REPO), *a], capture_output=True, text=True)
+
+    cur = g("symbolic-ref", "--short", "HEAD").stdout.strip()
+    if cur != BASE_BRANCH:
+        return f"Workspace checkout is on '{cur}', not {BASE_BRANCH} — refusing to merge."
+    if g("fetch", "origin").returncode != 0:
+        return "git fetch origin failed — see the dashboard server log."
+    r = g("merge", "--no-ff", "-m", f"merge: land {tid} ({branch})", f"origin/{branch}")
+    if r.returncode != 0:
+        g("merge", "--abort")
+        return f"Merge conflict — nothing landed, base untouched: {(r.stderr or r.stdout).strip()[-300:]}"
+    if g("push", "origin", BASE_BRANCH).returncode != 0:
+        return ("Merged into the checkout, but pushing base to origin failed — "
+                "future cycles may build on a stale base; see the server log.")
+    msg = do_mark(tid, "merged", note="landed via dashboard (local origin)")
+    return msg if "failed" in msg else f"Landed {branch} into {BASE_BRANCH} — the document is live in the workspace."
 
 
 def do_mark(tid: str, outcome: str, note: str = "", force: bool = False) -> str:
@@ -4015,7 +4078,7 @@ def do_save_config(raw: str) -> str:
 
 
 # ── secrets (.autopilot/.secrets.env) ─────────────────────────────────────
-# MCP tokens the loop needs at runtime (e.g. METAQL_TOKEN) but that must never
+# MCP tokens the loop needs at runtime (e.g. ANALYTICS_TOKEN) but that must never
 # round-trip through config.yaml (committed) or the dashboard's state poll.
 # File format is a contract shared with two other readers: engine/doctor.py's
 # _secrets_env (bare KEY=VALUE, no quotes, no export) and run.sh's own line
@@ -4476,6 +4539,69 @@ def _cmdlog_running(name: str, markers: tuple) -> bool:
     return age <= _CMDLOG_STALE_SECONDS
 
 
+def is_product_workspace() -> bool:
+    """True when this target is a PM product workspace (`orbit init --product`).
+
+    The explicit `mode:` marker in config.yaml is the truth (init.py writes
+    `mode: product`); an explicit `mode: engineering` wins over everything.
+    The scaffold-dir / gate heuristics survive only as a fallback for
+    workspaces created before the marker existed. Engineer repos stay false
+    so /api/state remains free of the product_mode key (absent-unless-true,
+    same discipline as qa_flows)."""
+    cfg = _load_cfg()
+    mode = cfg.get("mode")
+    if mode == "product":
+        return True
+    if mode == "engineering":
+        return False
+    for name in ("insights", "research", "surveys"):
+        if (REPO / name).is_dir():
+            return True
+    gates = cfg.get("gates") or {}
+    if isinstance(gates, dict) and "insight_lint" in gates:
+        return True
+    workable = cfg.get("workable_categories") or []
+    if isinstance(workable, list) and "insight" in workable:
+        return True
+    return False
+
+
+def decisions_state(escalated, done, prd, calibration) -> list:
+    """The one server-owned list every pending human gate lives in (product
+    mode). Today summarizes it; Decisions renders it; neither re-aggregates
+    subsystems on its own, so the two surfaces cannot drift. Uniform shape:
+    {id, source, kind, title, detail, urgency} - urgency orders the view
+    (0 = the agent is blocked, 1 = work is done and waits on review,
+    2 = optional learning approvals)."""
+    out = []
+    for t in escalated or []:
+        out.append({"id": t["id"], "source": "escalation", "kind": "answer",
+                    "title": t.get("title") or t["id"],
+                    "detail": t.get("recommendation") or t.get("operator_brief")
+                              or t.get("reason") or "Orbit stopped for your judgment",
+                    "urgency": 0})
+    for t in done or []:
+        if t.get("merged") or t.get("rejected"):
+            continue
+        out.append({"id": t["id"], "source": "review", "kind": "review",
+                    "title": t.get("title") or t["id"],
+                    "detail": "Ready for your review", "urgency": 1})
+    for r in prd or []:
+        gate = next((a for a in (r.get("next_actions") or [])
+                     if a in ("approve-scope", "approve-prd")), None)
+        if not gate:
+            continue
+        out.append({"id": r["run_id"], "source": "prd", "kind": gate,
+                    "title": r.get("title") or r["run_id"],
+                    "detail": "PRD - " + gate.replace("-", " "), "urgency": 1})
+    for c in calibration or []:
+        out.append({"id": c.get("id"), "source": "calibration", "kind": "lesson",
+                    "title": c.get("title") or c.get("id"),
+                    "detail": "Lesson awaiting approval", "urgency": 2})
+    out.sort(key=lambda d: d["urgency"])
+    return out
+
+
 def onboarding_state() -> dict:
     """Best-effort onboarding status for the Run/Knowledge views. Every value
     defaults to a falsy/empty shape — a target with no onboarding story yet
@@ -4538,6 +4664,10 @@ def build_state() -> dict:
         live = bool(cycle_pids())   # is a real cycle process actually running right now?
     cur_marker = MARKER.read_text().strip() if MARKER.exists() else ""
     mm = merged_map()
+    # Local-origin workspaces have no git host: the dashboard offers a REAL
+    # "Merge & land" on reviewable ships (absent unless true — hosted targets
+    # keep a byte-identical /api/state).
+    landable = is_local_origin()
     running, done, escalated = [], [], []
     for tid, e in ledger.items():
         meta = by_id.get(tid, {})
@@ -4601,6 +4731,8 @@ def build_state() -> dict:
                 "has_patch": bool(e.get("patch")),
             })
             row.update(_qa_evidence(e))
+            if landable and row["can_merge"] and not merged:
+                row["can_land"] = True
             done.append(row)
         elif st == "escalated":
             row.update({"state": st, "forced": bool(e.get("forced")),
@@ -4814,6 +4946,14 @@ def build_state() -> dict:
     # all. A target with neither channel configured still gets these keys,
     # just both false.
     rt["publish_channels"] = _publish_channels()
+    # Absent unless true — engineer targets keep a byte-identical /api/state
+    # shape; product workspaces flip the Mission Control chrome to PM-first.
+    # `decisions` is the server-owned union of every pending human gate
+    # (see decisions_state) — Today and Decisions render from it alone.
+    if is_product_workspace():
+        rt["product_mode"] = True
+        rt["decisions"] = decisions_state(escalated, done, rt.get("prd"),
+                                          rt.get("calibration"))
     return rt
 
 
@@ -4863,7 +5003,13 @@ class Handler(BaseHTTPRequestHandler):
             if not SHELL_FILE.exists():
                 self._send(b"engine/cc_shell.html is missing - restore it (git checkout) and reload", "text/plain", 500)
                 return
-            body = SHELL_FILE.read_text().replace("__BRANCH__", BASE_BRANCH).replace("__TOKEN__", _TOKEN)
+            # __MODE__ makes the first paint mode-correct (source-owned copy,
+            # no post-render relabeling) — the shell's render functions branch
+            # on it before the first /api/state ever lands.
+            body = (SHELL_FILE.read_text()
+                    .replace("__BRANCH__", BASE_BRANCH)
+                    .replace("__TOKEN__", _TOKEN)
+                    .replace("__MODE__", "product" if is_product_workspace() else "eng"))
             self._send(body.encode(), "text/html; charset=utf-8")
         elif path == "/api/state":
             self._send(json.dumps(build_state()).encode(), "application/json")
@@ -4939,8 +5085,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(b"no spec for this epic yet - run Plan first", "text/plain", 404); return
             self._send(f.read_text().encode(), "text/plain; charset=utf-8")
         elif path == "/guide":
-            # Operator guide: what each section means and how to decide.
-            for gf in GUIDE_FILES:
+            # Operator guide: what each section means and how to decide. A
+            # product workspace gets the PM guide (same names as its rail);
+            # a workspace-local GUIDE.md always wins in either mode.
+            guide_files = ([AP_HOME / "GUIDE.md", ORBIT_HOME / "docs" / "PM-GUIDE.md"]
+                           if is_product_workspace() else GUIDE_FILES)
+            for gf in guide_files:
                 if gf.exists():
                     self._send(gf.read_text().encode(), "text/plain; charset=utf-8"); return
             self._send(b"No guide found. Create GUIDE.md in your .autopilot/ directory.",
@@ -5018,6 +5168,8 @@ class Handler(BaseHTTPRequestHandler):
                 msg = do_mark(tid, (data.get("outcome", [""])[0]).strip(),
                               (data.get("note", [""])[0]).strip(),
                               force=(data.get("force", ["0"])[0]).strip() == "1")
+            elif path == "/land-ship":
+                msg = do_land_ship(tid)
             elif path == "/task-new":
                 msg = do_task_new(tid, (data.get("title", [""])[0]).strip(),
                                   (data.get("category", [""])[0]).strip(),
