@@ -85,7 +85,12 @@ def run_gates(repo: Path, cfg: dict, out_dir: Path) -> list[tuple[str, bool, str
 
 
 def run_survey_agent(target: Path, cfg: dict, timeout: int) -> bool:
-    """One headless Claude Code call: fill tracks + write proposals.json."""
+    """One headless Claude Code call: fill tracks + write proposals.json.
+
+    The agent's stdout/stderr land in $AP_STATE/intake/agent.log, and a
+    failure prints the log tail — a broken call (missing /orbit-intake
+    command, auth, bad model) must never masquerade as a clean 0-proposal
+    run. That silent-failure mode shipped once and cost a debugging session."""
     claude = shutil.which("claude")
     if not claude:
         print("  ✗ claude not on PATH — skipping the survey agent (deterministic part only)")
@@ -93,20 +98,40 @@ def run_survey_agent(target: Path, cfg: dict, timeout: int) -> bool:
     env = dict(os.environ)
     ap = target / ".autopilot"
     env.update(AP_HOME=str(ap), AP_STATE=str(ap / "state"), ORBIT_HOME=str(ORBIT_HOME))
+    if not (target / ".claude" / "commands" / "orbit-intake.md").exists():
+        print("  ✗ .claude/commands/orbit-intake.md is missing in the target — the survey agent")
+        print("    has no /orbit-intake command to run. Re-run `orbit init <target>` to refresh")
+        print("    the installed commands, then run intake again. (Skipping the agent.)")
+        return False
     cmd = [claude, "--print", "/orbit-intake",
            "--permission-mode", cfg.get("permission_mode", "acceptEdits"),
            "--settings", str(ORBIT_HOME / "config" / "orbit.settings.json"),
            "--model", cfg.get("model", "claude-opus-4-8"),
            "--add-dir", str(ORBIT_HOME)]
     print(f"  · survey agent: {' '.join(shlex.quote(c) for c in cmd[:3])} … (≤{timeout}s)")
+    log = ap / "state" / "intake" / "agent.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
     try:
-        p = subprocess.run(cmd, cwd=target, env=env, timeout=timeout,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           stdin=subprocess.DEVNULL)
-        return p.returncode == 0
+        with log.open("w") as lf:
+            p = subprocess.run(cmd, cwd=target, env=env, timeout=timeout,
+                               stdout=lf, stderr=subprocess.STDOUT,
+                               stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
-        print(f"  ✗ survey agent timed out after {timeout}s — merging whatever it wrote")
+        print(f"  ✗ survey agent timed out after {timeout}s — merging whatever it wrote (see {log})")
         return False
+    if p.returncode != 0:
+        print(f"  ✗ survey agent failed (rc={p.returncode}) — tail of {log}:")
+        print(_log_tail(log))
+        return False
+    return True
+
+
+def _log_tail(log: Path, lines: int = 12) -> str:
+    try:
+        tail = log.read_text().splitlines()[-lines:]
+        return "\n".join(f"    | {ln}" for ln in tail) or "    | (empty)"
+    except OSError:
+        return "    | (log unreadable)"
 
 
 def load_proposals(state: Path) -> list[dict]:
@@ -153,8 +178,14 @@ def main(argv: list[str]) -> int:
 
     # 2. agent survey (fills tracks in place; proposals land in proposals.json)
     if not no_agent:
-        run_survey_agent(target, cfg, timeout)
-        proposals.extend(load_proposals(state))
+        agent_ok = run_survey_agent(target, cfg, timeout)
+        agent_props = load_proposals(state)
+        if agent_ok and not agent_props:
+            # rc==0 with nothing written is suspicious, not "an empty repo" —
+            # say so instead of letting it read as a clean zero.
+            print(f"  ✗ survey agent exited cleanly but wrote no proposals.json — "
+                  f"check {state / 'intake' / 'agent.log'}")
+        proposals.extend(agent_props)
     else:
         print("  · --no-agent: skipping the survey (deterministic part only)")
 

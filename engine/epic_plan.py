@@ -93,14 +93,28 @@ class Epic:
                "--model", self.cfg.get("model", "claude-opus-4-8"),
                "--add-dir", str(ORBIT_HOME)]
         print(f"· /{command} {tid} (≤{timeout}s)")
+        # Agent output lands in $AP_STATE/epics/<tid>-agent.log and a failure
+        # prints the tail — never a silent rc!=0 that reads as "nothing to do"
+        # (the same DEVNULL failure mode intake.py once had).
+        log = self.state / "epics" / f"{tid}-agent.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
         try:
-            p = subprocess.run(cmd, cwd=self.target, env=env, timeout=timeout,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                               stdin=subprocess.DEVNULL)
-            return p.returncode == 0
+            with log.open("w") as lf:
+                p = subprocess.run(cmd, cwd=self.target, env=env, timeout=timeout,
+                                   stdout=lf, stderr=subprocess.STDOUT,
+                                   stdin=subprocess.DEVNULL)
         except subprocess.TimeoutExpired:
-            print(f"✗ /{command} timed out after {timeout}s")
+            print(f"✗ /{command} timed out after {timeout}s (see {log})")
             return False
+        if p.returncode != 0:
+            print(f"✗ /{command} failed (rc={p.returncode}) — tail of {log}:")
+            try:
+                tail = log.read_text().splitlines()[-12:]
+                print("\n".join(f"  | {ln}" for ln in tail) or "  | (empty)")
+            except OSError:
+                print("  | (log unreadable)")
+            return False
+        return True
 
 
 def check_epic(ep: Epic, tid: str, action: str) -> dict:

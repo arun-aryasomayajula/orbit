@@ -151,3 +151,55 @@ def test_concurrent_append_from_two_processes_loses_nothing(tmp_path):
     assert len(tasks) == 100                  # nothing lost, nothing duplicated
     assert len(ids) == 100
     assert ids == ({f"proc-a-{i}" for i in range(50)} | {f"proc-b-{i}" for i in range(50)})
+
+
+# ── survey-agent failure surfacing: a broken agent call must never read as a
+# clean 0-proposal run (missing command file, non-zero exit — both loud). ────
+
+def _intake_with_agent(target, fake_claude_dir):
+    env = dict(os.environ, PATH=f"{fake_claude_dir}:{os.environ['PATH']}")
+    return subprocess.run([sys.executable, str(ENGINE / "intake.py"), str(target)],
+                          capture_output=True, text=True, env=env)
+
+
+def _fake_claude(tmp_path, script):
+    d = tmp_path / "fakebin"
+    d.mkdir(exist_ok=True)
+    c = d / "claude"
+    c.write_text("#!/bin/sh\n" + script)
+    c.chmod(0o755)
+    return d
+
+
+def test_intake_reports_missing_orbit_intake_command(tmp_path):
+    t = _target(tmp_path, gates='gates:\n  ok: {cmd: "true"}\n')
+    fake = _fake_claude(tmp_path, "echo should-not-run; exit 0\n")
+    r = _intake_with_agent(t, fake)
+    assert r.returncode == 0
+    assert "orbit-intake.md is missing" in r.stdout
+    assert "orbit init" in r.stdout
+
+
+def test_intake_surfaces_agent_failure_with_log_tail(tmp_path):
+    t = _target(tmp_path, gates='gates:\n  ok: {cmd: "true"}\n')
+    cmd_dir = t / ".claude" / "commands"
+    cmd_dir.mkdir(parents=True)
+    (cmd_dir / "orbit-intake.md").write_text("# intake\n")
+    fake = _fake_claude(tmp_path, "echo boom-from-agent; exit 3\n")
+    r = _intake_with_agent(t, fake)
+    assert r.returncode == 0
+    assert "survey agent failed (rc=3)" in r.stdout
+    assert "boom-from-agent" in r.stdout          # log tail printed inline
+    log = t / ".autopilot" / "state" / "intake" / "agent.log"
+    assert log.exists() and "boom-from-agent" in log.read_text()
+
+
+def test_intake_flags_clean_exit_with_no_proposals(tmp_path):
+    t = _target(tmp_path, gates='gates:\n  ok: {cmd: "true"}\n')
+    cmd_dir = t / ".claude" / "commands"
+    cmd_dir.mkdir(parents=True)
+    (cmd_dir / "orbit-intake.md").write_text("# intake\n")
+    fake = _fake_claude(tmp_path, "echo ran fine; exit 0\n")
+    r = _intake_with_agent(t, fake)
+    assert r.returncode == 0
+    assert "wrote no proposals.json" in r.stdout
