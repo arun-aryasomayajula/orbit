@@ -22,7 +22,7 @@ the following method into the maker brief.
 3. **Generate 3-6 hypotheses about what the survey will find.** Challenge,
    don't validate: every hypothesis MUST name the concrete evidence that
    would FALSIFY it - a specific question's response pattern, an open-text
-   theme's absence, a cross-tab against a MetaQL cohort that comes out flat.
+   theme's absence, a cross-tab against an analytics cohort that comes out flat.
    "Users want X" with no falsifying signal named is not a hypothesis;
    rewrite it until it is.
 4. **Draft the questionnaire** in sections tied to the hypotheses:

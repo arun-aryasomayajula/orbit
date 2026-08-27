@@ -1,5 +1,5 @@
 ---
-description: Methodology for one grounded product-data insight — question to evidence-backed doc via MetaQL discovery, under the grounding contract (no fact without a source, abstain over guess). Invoked by the orchestrator to brief the analyst maker.
+description: Methodology for one grounded product-data insight — question to evidence-backed doc via analytics discovery, under the grounding contract (no fact without a source, abstain over guess). Invoked by the orchestrator to brief the analyst maker.
 argument-hint: "(no args — the task contract arrives via the cycle brief)"
 allowed-tools: Read, Grep, Glob
 model: opus
@@ -29,7 +29,7 @@ method into the maker brief.
 
    ```
    ## Basis
-   - S1: metaql query <explore>, 2026-08-21
+   - S1: analytics query <data model>, 2026-08-21
    - S2: doc raw/responses.csv
    ```
 8. **Definition of done**: `python3 $ORBIT_HOME/engine/insight_lint.py .` exits

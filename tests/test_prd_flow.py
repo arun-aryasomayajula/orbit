@@ -235,7 +235,7 @@ def test_verify_clean_on_full_done_run(tmp_path, monkeypatch):
 
 # --- secrets reach the stage child (.autopilot/.secrets.env) ---------------
 
-# A fake "claude" that reports what METAQL_TOKEN it was given, by writing it
+# A fake "claude" that reports what ANALYTICS_TOKEN it was given, by writing it
 # into the intake artifact's `pm` field (which keeps the artifact eval-valid).
 FAKE_PRD_SCRIPT_ECHO_TOKEN = r'''
 import json, os, sys
@@ -244,7 +244,7 @@ run = os.environ["PRD_RUN"]
 d = os.path.join("research", run)
 os.makedirs(d, exist_ok=True)
 with open(os.path.join(d, "01-intake.json"), "w") as f:
-    json.dump({"run_id": run, "title": "t", "pm": os.environ.get("METAQL_TOKEN", "<unset>"),
+    json.dump({"run_id": run, "title": "t", "pm": os.environ.get("ANALYTICS_TOKEN", "<unset>"),
                "goal": "g", "scope_in": ["a"], "scope_out": [], "data_targets": [],
                "code_targets": [], "pii_touch": False}, f)
 sys.exit(0)
@@ -260,10 +260,10 @@ def test_stage_child_sees_secrets_env_tokens(tmp_path, monkeypatch):
     ws = _ws(tmp_path)
     ap = ws / ".autopilot"
     ap.mkdir()
-    (ap / ".secrets.env").write_text("# tokens\nMETAQL_TOKEN=tok123\n")
+    (ap / ".secrets.env").write_text("# tokens\nANALYTICS_TOKEN=tok123\n")
     fake = _write_fake(tmp_path, "fake_token.py", FAKE_PRD_SCRIPT_ECHO_TOKEN)
     monkeypatch.setenv("ORBIT_PRD_CMD", f"{sys.executable} {fake}")
-    monkeypatch.delenv("METAQL_TOKEN", raising=False)
+    monkeypatch.delenv("ANALYTICS_TOKEN", raising=False)
     prd_flow.new(str(ws), "r1", "T")
     prd_flow.run_stage(str(ws), "r1", "intake")
     artifact = json.loads((ws / "research" / "r1" / "01-intake.json").read_text())
@@ -277,7 +277,7 @@ def test_secrets_env_does_not_override_the_calls_own_variables(tmp_path, monkeyp
     ws = _ws(tmp_path)
     ap = ws / ".autopilot"
     ap.mkdir()
-    (ap / ".secrets.env").write_text("PRD_STAGE=review\nMETAQL_TOKEN=tok123\n")
+    (ap / ".secrets.env").write_text("PRD_STAGE=review\nANALYTICS_TOKEN=tok123\n")
     fake = _write_fake(tmp_path, "fake_token2.py", FAKE_PRD_SCRIPT_ECHO_TOKEN)
     monkeypatch.setenv("ORBIT_PRD_CMD", f"{sys.executable} {fake}")
     prd_flow.new(str(ws), "r1", "T")

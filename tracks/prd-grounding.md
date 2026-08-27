@@ -8,7 +8,7 @@ The grounding contract for Orbit's five-stage PRD flow. Every artifact and stage
 - **Abstain over guess** - Unknown or unverified claims go to `coverage_gaps` or `open_questions`, never into findings or requirements.
 - **Stay in your lane** - Per-stage responsibilities are strict and non-overlapping. A stage that invents work outside its contract creates waste downstream.
   - Intake: grounds on title and brief, does not design or research.
-  - Research: gathers evidence via real systems (MetaQL, Jira, Confluence, code, docs), every finding cites source_ids.
+  - Research: gathers evidence via real systems (analytics, Jira, Confluence, code, docs), every finding cites source_ids.
   - Synthesis: advances beyond research (transforms findings into requirements), adds no new claims.
   - Writer (draft): adds no fact absent upstream, cites (S<n>) inline, numbering per acceptance criteria.
   - Review: two lenses only (CEO + feasibility), auto-decides, logs every verdict.
@@ -26,7 +26,7 @@ The grounding contract for Orbit's five-stage PRD flow. Every artifact and stage
 - Extract FROM title and brief only; do not hypothesize.
 - scope_in: features/areas explicitly in scope (required, non-empty).
 - scope_out: what is explicitly out (clarify non-obvious exclusions).
-- data_targets: systems/tables/explores the research will query (e.g., "MetaQL:lending", "Jira:PLAT").
+- data_targets: systems/tables/explores the research will query (e.g., "analytics:lending", "Jira:PLAT").
 - code_targets: repos/modules that research will review.
 - pii_touch: whether the PRD touches personally identifiable information (true/false only; no interpretation).
 - pm: the stakeholder/PM name if brief names one, otherwise empty string.
@@ -36,9 +36,9 @@ The grounding contract for Orbit's five-stage PRD flow. Every artifact and stage
 **Input:** 01-intake.json  
 **Output:** {run_id, sources: [...], findings: [...], coverage_gaps: [...]}
 
-- One typed source entry per tool result used (MetaQL queries, Jira reads, code extracts, etc.).
+- One typed source entry per tool result used (analytics queries, Jira reads, code extracts, etc.).
 - source.id format: "S<n>" (S1, S2, ...).
-- source.kind: one of metaql|jira|confluence|scrape|doc|code.
+- source.kind: one of analytics|jira|confluence|scrape|doc|code.
 - Every finding.claim must cite at least one source_id; unsourced claims are a hard failure.
 - coverage_gaps: explicitly record what research could not reach (e.g., "user sentiment data not available", "legacy system X not accessible").
 

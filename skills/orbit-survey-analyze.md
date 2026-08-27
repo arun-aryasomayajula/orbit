@@ -1,5 +1,5 @@
 ---
-description: Methodology for analyzing survey responses under the grounding contract - code open-text into themes with counts and verbatim quotes, score each design-time hypothesis to a verdict, cross-tab against MetaQL cohorts when reachable, abstain loudly when no raw responses exist. Invoked by the orchestrator to brief the analyst maker, with the survey slug carried in $ARGUMENTS.
+description: Methodology for analyzing survey responses under the grounding contract - code open-text into themes with counts and verbatim quotes, score each design-time hypothesis to a verdict, cross-tab against analytics cohorts when reachable, abstain loudly when no raw responses exist. Invoked by the orchestrator to brief the analyst maker, with the survey slug carried in $ARGUMENTS.
 argument-hint: "<survey-name-slug>"
 allowed-tools: Read, Grep, Glob, Write, Edit, mcp__*
 model: opus
@@ -25,7 +25,7 @@ Distill the following method into the maker brief.
      paraphrasing the claim itself.
    - Quantify closed-ended answers: counts and percentages per option, tied
      back to the hypothesis each question was designed to test.
-4. **Cross-tab against MetaQL cohorts when mcp tools are reachable**:
+4. **Cross-tab against analytics cohorts when mcp tools are reachable**:
    discover verticals -> projects -> use cases -> explores -> fields (same
    discipline as `orbit-insight` - never guess a column), then cross the
    respondent segments against a live cohort (e.g. paying vs. free, region)
@@ -39,7 +39,7 @@ Distill the following method into the maker brief.
 6. **Write** `surveys/<name>/report.md`: `# <title>`, `## Answer` (each
    hypothesis's verdict first, then the theme counts and quantified
    answers), `## Basis` with typed sources - every raw file cited as
-   `{kind: doc, ref: raw/<file>.csv}`, every MetaQL pull as its own source,
+   `{kind: doc, ref: raw/<file>.csv}`, every analytics pull as its own source,
    the questionnaire/meta as the design source. Every inline number cites
    `(S<n>)`. Include either at least 3 verbatim `> "..."` quote lines total
    or a `## Coverage gaps` section - never both absent.
@@ -48,7 +48,7 @@ Distill the following method into the maker brief.
 
    ```
    ## Basis
-   - S1: metaql query <explore>, 2026-08-21
+   - S1: analytics query <data model>, 2026-08-21
    - S2: doc raw/responses.csv
    ```
 8. **Definition of done**: `python3 $ORBIT_HOME/engine/insight_lint.py .`

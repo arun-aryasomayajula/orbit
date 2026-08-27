@@ -1,4 +1,4 @@
-# Example .autopilot/config.yaml for a FastAPI + React repo (modeled on cdp-metaql).
+# Example .autopilot/config.yaml for a FastAPI + React repo (FastAPI + React reference).
 # Copy to <your-repo>/.autopilot/config.yaml and edit. `orbit init` generates this for you.
 repo: "."
 base_branch: "main"

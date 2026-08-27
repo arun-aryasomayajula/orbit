@@ -11,7 +11,7 @@ GOOD = """# Funnel drop at plan-select
 Conversion from view-plans to pay fell 4.2% week over week (S1).
 
 ## Basis
-- S1: metaql_execute_query explore=premium_funnel, 2026-08-18, rows=14
+- S1: analytics_execute_query explore=premium_funnel, 2026-08-18, rows=14
 """
 
 def _run_cli(repo):

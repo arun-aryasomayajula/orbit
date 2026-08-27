@@ -7,19 +7,19 @@ import mcp  # noqa: E402
 
 
 def test_build_http_server_with_token_env():
-    cfg = {"metaql": {"transport": "http", "url": "https://m.example/mcp",
-                      "token_env": "METAQL_TOKEN", "tools": ["metaql_execute_query"]}}
+    cfg = {"analytics": {"transport": "http", "url": "https://m.example/mcp",
+                      "token_env": "ANALYTICS_TOKEN", "tools": ["analytics_execute_query"]}}
     out = mcp.build_mcp_config(cfg)
-    srv = out["mcpServers"]["metaql"]
+    srv = out["mcpServers"]["analytics"]
     assert srv["type"] == "http"
     assert srv["url"] == "https://m.example/mcp"
     # token must be an env reference, never a value
-    assert srv["headers"]["Authorization"] == "Bearer ${METAQL_TOKEN}"
+    assert srv["headers"]["Authorization"] == "Bearer ${ANALYTICS_TOKEN}"
 
 
 def test_build_http_server_without_token_has_no_headers():
-    cfg = {"metaql": {"transport": "http", "url": "https://m.example/mcp", "tools": "*"}}
-    srv = mcp.build_mcp_config(cfg)["mcpServers"]["metaql"]
+    cfg = {"analytics": {"transport": "http", "url": "https://m.example/mcp", "tools": "*"}}
+    srv = mcp.build_mcp_config(cfg)["mcpServers"]["analytics"]
     assert "headers" not in srv
 
 
@@ -46,7 +46,7 @@ BASE_CFG = 'repo: "."\ngates:\n  t: {cmd: "true", cwd: "."}\n'
 
 def test_cli_build_writes_file_and_prints_path(tmp_path):
     t = _mk_target(tmp_path, BASE_CFG +
-                   'mcp:\n  metaql:\n    transport: http\n    url: "https://m/mcp"\n    tools: "*"\n')
+                   'mcp:\n  analytics:\n    transport: http\n    url: "https://m/mcp"\n    tools: "*"\n')
     env = {k: v for k, v in os.environ.items() if k != "ORBIT_HOME"}
     r = subprocess.run([sys.executable, str(ORBIT / "engine" / "mcp.py"), "build", str(t)],
                        capture_output=True, text=True, env=env)
@@ -54,7 +54,7 @@ def test_cli_build_writes_file_and_prints_path(tmp_path):
     path = r.stdout.strip()
     assert path.endswith("mcp-config.json")
     data = json.loads(Path(path).read_text())
-    assert "metaql" in data["mcpServers"]
+    assert "analytics" in data["mcpServers"]
 
 
 def test_cli_build_no_mcp_block_prints_nothing(tmp_path):
@@ -67,16 +67,16 @@ def test_cli_build_no_mcp_block_prints_nothing(tmp_path):
 
 
 def test_permission_allows_tool_list_and_wildcard():
-    cfg = {"metaql": {"transport": "http", "url": "u", "tools": ["a", "b"]},
+    cfg = {"analytics": {"transport": "http", "url": "u", "tools": ["a", "b"]},
            "figma": {"transport": "stdio", "command": "npx", "tools": "*"}}
     allows = mcp.mcp_permission_allows(cfg)
-    assert "mcp__metaql__a" in allows and "mcp__metaql__b" in allows
+    assert "mcp__analytics__a" in allows and "mcp__analytics__b" in allows
     assert "mcp__figma__*" in allows
-    assert "mcp__metaql__*" not in allows   # a tool list must NOT widen to the whole server
+    assert "mcp__analytics__*" not in allows   # a tool list must NOT widen to the whole server
 
 
 def test_permission_allows_omitted_tools_grants_nothing():
-    cfg = {"metaql": {"transport": "http", "url": "u"}}
+    cfg = {"analytics": {"transport": "http", "url": "u"}}
     assert mcp.mcp_permission_allows(cfg) == []
 
 
@@ -194,14 +194,14 @@ def test_validate_accepts_http_localhost_confluence(tmp_path):
 
 def test_cli_settings_with_mcp_writes_merged_file(tmp_path):
     t = _mk_target(tmp_path, BASE_CFG +
-                   'mcp:\n  metaql:\n    transport: http\n    url: "https://m/mcp"\n    tools: [metaql_execute_query]\n')
+                   'mcp:\n  analytics:\n    transport: http\n    url: "https://m/mcp"\n    tools: [analytics_execute_query]\n')
     env = {k: v for k, v in os.environ.items() if k != "ORBIT_HOME"}
     r = subprocess.run([sys.executable, str(ORBIT / "engine" / "mcp.py"), "settings", str(t)],
                        capture_output=True, text=True, env=env)
     path = r.stdout.strip()
     assert path.endswith("settings.json")
     data = json.loads(Path(path).read_text())
-    assert "mcp__metaql__metaql_execute_query" in data["permissions"]["allow"]
+    assert "mcp__analytics__analytics_execute_query" in data["permissions"]["allow"]
     # the base file's own protections must survive the merge
     assert "Bash(git push:*)" in data["permissions"]["deny"]
 
@@ -236,8 +236,8 @@ def test_validate_rejects_missing_tools(tmp_path):
 
 def test_validate_accepts_good_mcp_block(tmp_path):
     t = _mk_target(tmp_path, BASE_CFG +
-                   'mcp:\n  metaql:\n    transport: http\n    url: "https://m/mcp"\n'
-                   '    token_env: METAQL_TOKEN\n    tools: [a]\n'
+                   'mcp:\n  analytics:\n    transport: http\n    url: "https://m/mcp"\n'
+                   '    token_env: ANALYTICS_TOKEN\n    tools: [a]\n'
                    '  figma:\n    transport: stdio\n    command: npx\n    args: ["-y", "x"]\n'
                    '    env_passthrough: [FIGMA_TOKEN]\n    tools: "*"\n')
     r = _validate(t)

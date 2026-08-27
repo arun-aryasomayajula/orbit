@@ -15,7 +15,7 @@
 # separately/by hand inside Claude — it's interactive, not part of this cron.
 #
 # Schedule (launchd) example — run Mondays 09:00:
-#   cp com.arun.metaql-autopilot.plist → a refresh plist with
+#   cp com.example.analytics-autopilot.plist → a refresh plist with
 #   ProgramArguments = [/bin/bash, <abs>/refresh_sources.sh], StartCalendarInterval
 #   {Weekday:1, Hour:9, Minute:0}, and EnvironmentVariables AP_REFRESH_FOUNDRY=1.
 #   Then: launchctl load ~/Library/LaunchAgents/<that>.plist

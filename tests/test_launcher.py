@@ -309,7 +309,7 @@ def test_spawn_child_passes_launchd_label_for_this_project(launcher, tmp_path, m
 
 def test_launchd_label_matches_install_service_slug(launcher, tmp_path):
     for basename, expected in [("orbit", "com.orbit.orbit-orbit"),
-                               ("cdp-metaql", "com.orbit.orbit-cdp-metaql"),
+                               ("cdp-analytics", "com.orbit.orbit-cdp-analytics"),
                                ("My Repo!!", "com.orbit.orbit-My-Repo"),
                                ("dots.in.name", "com.orbit.orbit-dots-in-name")]:
         assert launcher.launchd_label(str(tmp_path / basename)) == expected

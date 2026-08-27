@@ -15,7 +15,7 @@ CITE = re.compile(r"\(S(\d+)\)")
 TESTABLE = re.compile(r"\d|%|>=|<=|\bpass\b|\bfail\b")
 PRD_HEADINGS = ["## Problem", "## Goals", "## Non-goals", "## Requirements",
                 "## Acceptance criteria", "## Open questions", "## Basis"]
-KINDS = {"metaql", "jira", "confluence", "scrape", "doc", "code", "figma"}
+KINDS = {"analytics", "jira", "confluence", "scrape", "doc", "code", "figma"}
 
 
 def _need(d, key, typ, errs, where):

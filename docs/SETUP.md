@@ -362,7 +362,7 @@ The PRD pipeline (`engine/prd_flow.py`: intake, research, synthesis, draft, revi
 ### 7.2 MCP servers
 ```yaml
 mcp:
-  metaql: {transport: http, url: "https://<host>/mcp", token_env: METAQL_TOKEN, tools: [metaql_execute_query]}
+  analytics: {transport: http, url: "https://<host>/mcp", token_env: ANALYTICS_TOKEN, tools: [execute_query]}
   figma:  {transport: stdio, command: npx, args: ["-y", "figma-mcp"], env_passthrough: [FIGMA_TOKEN], tools: "*"}
 ```
 Declares which MCP servers a cycle may reach and which of their tools are allowed.
@@ -371,7 +371,7 @@ Once a `figma` server is declared, `orbit-prd-research` and `orbit-design-review
 Full field reference: `config/schema.yaml`.
 
 ### 7.3 Secrets
-Tokens - `METAQL_TOKEN`, `FIGMA_TOKEN`, and the `ATLASSIAN_EMAIL`/`ATLASSIAN_API_TOKEN` pair publishing uses - live in `.autopilot/.secrets.env`: one `KEY=VALUE` per line, mode 0600, gitignored.
+Tokens - `ANALYTICS_TOKEN`, `FIGMA_TOKEN`, and the `ATLASSIAN_EMAIL`/`ATLASSIAN_API_TOKEN` pair publishing uses - live in `.autopilot/.secrets.env`: one `KEY=VALUE` per line, mode 0600, gitignored.
 Write it by hand, or from the dashboard's Settings > Secrets panel (values masked in the UI, never echoed back in full).
 `run.sh` parses this file (never sources or executes it) once per loop iteration, so a token saved mid-run reaches the very next cycle without a service restart, and `prd_flow.py`/`publish.py` read it the same way for a stage or a publish launched straight from the dashboard.
 `orbit doctor` checks that every `token_env` named under `mcp:`, and the two `ATLASSIAN_*` names a configured `publish:` block needs, actually resolve.

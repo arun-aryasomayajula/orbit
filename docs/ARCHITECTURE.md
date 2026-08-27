@@ -2,7 +2,7 @@
 
 ## The boundary
 One line splits everything: **engine (generic) vs profile (per-repo)**. The engine never names a
-project; all project knowledge lives in the target's `.autopilot/`. metaql is just the first consumer.
+project; all project knowledge lives in the target's `.autopilot/`.
 
 ## The second boundary: machines propose, humans dispose
 Every way work ENTERS Orbit (intake survey, signal adapters, epic decomposition) may only

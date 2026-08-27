@@ -40,7 +40,7 @@ month (S2).
 
 ## Basis
 
-- S1: metaql checkout_funnel, 2026-08-01..2026-08-15
+- S1: analytics checkout_funnel, 2026-08-01..2026-08-15
 - S2: finance export, same window
 """
 
@@ -801,7 +801,7 @@ def test_finding_files_an_issue_with_answer_basis_and_path(tmp_path, stub):
     assert fields["issuetype"] == {"name": "Task"}
     assert fields["summary"] == "Checkout drop-off is card OTP"
     assert "62% (S1)" in fields["description"]
-    assert "S1: metaql checkout_funnel" in fields["description"]
+    assert "S1: analytics checkout_funnel" in fields["description"]
     assert "insights/checkout-otp.md" in fields["description"]
     assert doc.read_text().rstrip().endswith("<!-- published: jira ORB-1 -->")
 

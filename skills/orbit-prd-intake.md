@@ -22,7 +22,7 @@ Write `research/$ARGUMENTS/01-intake.json`:
   "goal": "<short, testable goal extracted from title and brief>",
   "scope_in": ["<feature/area explicitly in scope>", "..."],
   "scope_out": ["<explicitly out of scope>", "..."],
-  "data_targets": ["<systems research will query: MetaQL:explore, Jira:project, etc.>", "..."],
+  "data_targets": ["<systems research will query: analytics:model, Jira:project, etc.>", "..."],
   "code_targets": ["<repos/modules research will review>", "..."],
   "pii_touch": <true | false>
 }

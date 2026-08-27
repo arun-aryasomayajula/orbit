@@ -37,7 +37,7 @@ method into the maker brief.
 
    ```
    ## Basis
-   - S1: metaql query <explore>, 2026-08-21
+   - S1: analytics query <data model>, 2026-08-21
    - S2: doc raw/responses.csv
    ```
 9. **Definition of done**: `python3 $ORBIT_HOME/engine/insight_lint.py .`

@@ -37,12 +37,12 @@ def test_shared_parser_reads_the_documented_format(tmp_path):
     (ap / ".secrets.env").write_text(
         "# a comment\n"
         "\n"
-        "METAQL_TOKEN=tok123\n"
+        "ANALYTICS_TOKEN=tok123\n"
         "  SPACED_KEY = spaced value \n"
         "WITH_EQUALS=a=b=c\n"
         "no-equals-line\n")
     got = se.read(str(tmp_path))
-    assert got["METAQL_TOKEN"] == "tok123"
+    assert got["ANALYTICS_TOKEN"] == "tok123"
     assert got["SPACED_KEY"] == " spaced value"   # key stripped, value from the first '='
     assert got["WITH_EQUALS"] == "a=b=c"          # split on the FIRST '=' only
     assert "no-equals-line" not in got
@@ -64,24 +64,24 @@ def test_doctor_delegates_to_the_shared_parser():
 
 
 def test_doctor_quiet_when_token_env_in_secrets_file(tmp_path):
-    """Doctor should not warn if METAQL_TOKEN is in .secrets.env."""
+    """Doctor should not warn if ANALYTICS_TOKEN is in .secrets.env."""
     _init_product(tmp_path)
     cfg = tmp_path / ".autopilot" / "config.yaml"
-    cfg.write_text(cfg.read_text() + '\nmcp:\n  metaql:\n    transport: http\n'
-                   '    url: "https://m/mcp"\n    token_env: METAQL_TOKEN\n    tools: "*"\n')
+    cfg.write_text(cfg.read_text() + '\nmcp:\n  analytics:\n    transport: http\n'
+                   '    url: "https://m/mcp"\n    token_env: ANALYTICS_TOKEN\n    tools: "*"\n')
 
-    # Create .secrets.env with METAQL_TOKEN
+    # Create .secrets.env with ANALYTICS_TOKEN
     secrets = tmp_path / ".autopilot" / ".secrets.env"
-    secrets.write_text("# My secrets\nMETAQL_TOKEN=test-token-value\n")
+    secrets.write_text("# My secrets\nANALYTICS_TOKEN=test-token-value\n")
 
     env = dict(os.environ, ORBIT_HOME=str(ORBIT))
-    env.pop("METAQL_TOKEN", None)  # Remove from shell environment
+    env.pop("ANALYTICS_TOKEN", None)  # Remove from shell environment
 
     r = subprocess.run([sys.executable, str(ORBIT / "engine" / "doctor.py"), str(tmp_path)],
                        capture_output=True, text=True, env=env)
 
     # Doctor should NOT warn about the missing token env (it's in the file)
-    assert "METAQL_TOKEN" not in r.stdout, f"doctor should not warn when token is in .secrets.env: {r.stdout}"
+    assert "ANALYTICS_TOKEN" not in r.stdout, f"doctor should not warn when token is in .secrets.env: {r.stdout}"
     assert "ALL CHECKS PASSED" in r.stdout, f"doctor should pass: {r.stdout}"
 
 
@@ -92,7 +92,7 @@ def test_doctor_warns_on_loose_secrets_permissions(tmp_path):
     env = dict(os.environ, ORBIT_HOME=str(ORBIT))
 
     # Test 1: 0644 (group-readable) should warn
-    secrets.write_text("METAQL_TOKEN=test-token-value\n")
+    secrets.write_text("ANALYTICS_TOKEN=test-token-value\n")
     os.chmod(str(secrets), 0o644)
     r = subprocess.run([sys.executable, str(ORBIT / "engine" / "doctor.py"), str(tmp_path)],
                        capture_output=True, text=True, env=env)
@@ -127,7 +127,7 @@ def test_product_scaffold_creates_secrets_env_example(tmp_path):
     assert example.exists(), ".secrets.env.example should exist"
 
     content = example.read_text()
-    assert "METAQL_TOKEN" in content, ".secrets.env.example should mention METAQL_TOKEN"
+    assert "ANALYTICS_TOKEN" in content, ".secrets.env.example should mention ANALYTICS_TOKEN"
     assert content.startswith("#"), ".secrets.env.example should be all comments (example)"
 
 

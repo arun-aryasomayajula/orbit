@@ -7,7 +7,7 @@ sys.path.insert(0, str(ORBIT / "engine"))
 import prd_evals  # noqa: E402
 
 GOOD_RESEARCH = {"run_id": "r1",
-    "sources": [{"id": "S1", "kind": "metaql", "ref": "q", "date": "2026-08-21", "summary": "x"}],
+    "sources": [{"id": "S1", "kind": "analytics", "ref": "q", "date": "2026-08-21", "summary": "x"}],
     "findings": [{"claim": "c", "source_ids": ["S1"]}], "coverage_gaps": []}
 
 def test_intake_requires_nonempty_scope_and_bool_pii():
@@ -29,7 +29,7 @@ def test_synthesis_requirements_resolve_against_research():
     assert any("S2" in e for e in prd_evals.check_synthesis(bad, GOOD_RESEARCH))
 
 GOOD_PRD = ("# T\n\n## Problem\np (S1)\n\n## Goals\ng\n\n## Non-goals\nn\n\n## Requirements\n- R1 (S1)\n\n"
-            "## Acceptance criteria\n- recall >= 95% on the validation set\n\n## Open questions\n- q\n\n## Basis\n- S1: metaql q\n")
+            "## Acceptance criteria\n- recall >= 95% on the validation set\n\n## Open questions\n- q\n\n## Basis\n- S1: analytics q\n")
 
 def test_prd_md_headings_citations_testable_criteria():
     assert prd_evals.check_prd_md(GOOD_PRD, GOOD_RESEARCH) == []
