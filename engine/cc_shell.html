@@ -452,8 +452,10 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
 .watchrow .w-question{flex:2 1 220px}
 .watchrow .w-cadence{flex:0 0 90px}
 .watchrow .w-category{flex:0 0 110px}
-.routerTable{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
-.routerTable th,.routerTable td{text-align:left;padding:3px 8px;border-bottom:1px solid var(--line,rgba(128,128,128,.25))}
+.router-d summary{cursor:pointer}
+.router-d .bandhead{display:inline-flex;margin-bottom:0;vertical-align:middle}
+.routerTable{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px}
+.routerTable th,.routerTable td{text-align:left;padding:3px 8px;border-bottom:1px solid var(--line)}
 .routerTable tr.unrouted td{opacity:.45}
 .secrets-list{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}
 .secret-row{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--line2);
@@ -1949,11 +1951,12 @@ function renderRouter(){
     <td>${esc(c.category)}</td><td>${badge(c.tier,tierCls[c.tier]||'muted')}</td>
     <td>${esc(c.maker||'—')}</td><td>${esc(c.model?c.model+(c.effort?'/'+c.effort:''):'—')}</td>
     <td>${esc(c.skill||'—')}</td><td>${esc(c.golden||'—')}</td></tr>`).join('');
-  setHTML(band,`<details class=band><summary>Router — category → route
-    (${esc(R.source)}: ${esc(R.path)})</summary>
+  setHTML(band,`<div class=band><details class=router-d><summary><div class=bandhead>
+    <h3>Router — category → route</h3>
+    <span class=bandsum>${esc(R.source)}: ${esc(R.path)}</span></div></summary>
     <table class=routerTable><thead><tr><th>category</th><th>tier</th><th>maker</th>
     <th>model</th><th>skill</th><th>golden</th></tr></thead>
-    <tbody>${rows}</tbody></table></details>`);}
+    <tbody>${rows}</tbody></table></details></div>`);}
 function renderEpics(){
   const band=document.getElementById('epicsBand');if(!band)return;
   const es=(S&&S.epics)||[];
