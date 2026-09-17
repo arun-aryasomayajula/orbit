@@ -82,3 +82,32 @@ def test_unknown_category_resolves_to_none(env):
     assert rr.resolve_route("epic", router) is None
     assert rr.resolve_route("", router) is None
     assert rr.resolve_route("feature", None) is None
+
+
+def test_route_verb_attaches_to_existing_entry(env):
+    led = env["ledger"]
+    led.cmd_claim("t1", "t1 title")
+    led.cmd_route("t1", json.dumps({"skill": "ccos-route", "maker": "builder"}))
+    entry = json.loads((env["ap_state"] / "ledger.json").read_text())["entries"]["t1"]
+    assert entry["route"] == {"skill": "ccos-route", "maker": "builder"}
+    assert entry["state"] == "in_progress"      # untouched — route is metadata
+
+
+def test_route_verb_refuses_missing_entry(env):
+    led = env["ledger"]
+    with pytest.raises(SystemExit) as ex:
+        led.cmd_route("ghost", json.dumps({"skill": "x"}))
+    assert ex.value.code == 4
+    # Nothing written: refusal happens inside _locked_update, which only
+    # saves on a clean exit.
+    data = json.loads((env["ap_state"] / "ledger.json").read_text()) \
+        if (env["ap_state"] / "ledger.json").exists() else {"entries": {}}
+    assert "ghost" not in data["entries"]
+
+
+def test_route_verb_rejects_bad_json(env):
+    led = env["ledger"]
+    led.cmd_claim("t1", "t1 title")
+    with pytest.raises(SystemExit) as ex:
+        led.cmd_route("t1", "not-json")
+    assert ex.value.code == 2

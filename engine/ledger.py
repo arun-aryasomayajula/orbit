@@ -302,6 +302,30 @@ def cmd_pr(tid, url):
         _entry(data, tid).update(pr_url=url, updated_at=_now())
 
 
+def cmd_route(tid, route_json):
+    # Attach the claim-time resolved route to an EXISTING entry — metadata,
+    # not a lifecycle event, same family as cmd_pr/cmd_attach (no _gate).
+    # Refuses a missing entry: the recorder runs right after a won claim, so
+    # "no entry" means the caller is wrong, not the ledger. sys.exit inside
+    # _locked_update skips the save — refusals write nothing.
+    try:
+        route = json.loads(route_json)
+    except ValueError:
+        print("route: VALUE must be valid JSON", file=sys.stderr)
+        sys.exit(2)
+    if not isinstance(route, dict):
+        print("route: VALUE must be a JSON object", file=sys.stderr)
+        sys.exit(2)
+    with _locked_update() as data:
+        e = data["entries"].get(str(tid))
+        if e is None:
+            print(f"task {tid}: no ledger entry to attach a route to",
+                  file=sys.stderr)
+            sys.exit(4)
+        e["route"] = route
+        e["updated_at"] = _now()
+
+
 def cmd_attach_patch(tid, path):
     # Record the patch path the wrapper captured for this task (best-effort).
     with _locked_update() as data:
@@ -558,6 +582,8 @@ def main(argv):
             cmd_escalate(rest[0], rest[1] if len(rest) > 1 else "", force=force)
         elif cmd == "pr":
             cmd_pr(rest[0], rest[1])
+        elif cmd == "route":
+            cmd_route(rest[0], rest[1])
         elif cmd == "attach-patch":
             cmd_attach_patch(rest[0], rest[1])
         elif cmd == "attach":
