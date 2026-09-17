@@ -111,3 +111,32 @@ def test_route_verb_rejects_bad_json(env):
     with pytest.raises(SystemExit) as ex:
         led.cmd_route("t1", "not-json")
     assert ex.value.code == 2
+
+
+def test_recorder_end_to_end(env):
+    env["ledger"].cmd_claim("t1", "t1 title")
+    assert env["route_record"].main(["t1"]) == 0
+    entry = json.loads((env["ap_state"] / "ledger.json").read_text())["entries"]["t1"]
+    assert entry["route"]["skill"] == "ccos-route"
+    assert entry["route"]["category"] == "feature"
+    assert entry["route"]["source"] == "override"
+    assert entry["route"]["router_path"] == str(env["ap_home"] / "router.yaml")
+
+
+def test_recorder_never_fails_task_missing_from_queue(env, capsys):
+    env["ledger"].cmd_claim("t1", "t1 title")
+    assert env["route_record"].main(["absent-task"]) == 0
+    assert "skipping" in capsys.readouterr().err
+
+
+def test_recorder_never_fails_without_ledger_entry(env, capsys):
+    # Claim never happened (caller bug): the ledger verb refuses with
+    # SystemExit(4); the recorder swallows it and still exits 0.
+    assert env["route_record"].main(["t1"]) == 0
+    assert "skipping" in capsys.readouterr().err
+
+
+def test_recorder_never_fails_without_queue_file(env, capsys):
+    (env["ap_state"] / "queue.json").unlink()
+    assert env["route_record"].main(["t1"]) == 0
+    assert "skipping" in capsys.readouterr().err
