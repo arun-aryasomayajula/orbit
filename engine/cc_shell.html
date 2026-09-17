@@ -1948,9 +1948,15 @@ function epicCard(e){
     <div class=title>${esc(e.title)}</div>${kids}${ctx}${accList(e.acceptance_criteria)}<div class=btns>${btns}</div></div>`;
 }
 function copyRouterPath(p){
+  // No native dialogs in the shell (test_shell_has_no_native_dialogs):
+  // clipboard API first, hidden-textarea execCommand as the fallback.
   (navigator.clipboard?navigator.clipboard.writeText(p):Promise.reject())
     .then(()=>toast('Router path copied.'))
-    .catch(()=>prompt('Copy the router path:',p));}
+    .catch(()=>{const ta=document.createElement('textarea');ta.value=p;
+      document.body.appendChild(ta);ta.select();
+      try{document.execCommand('copy');toast('Router path copied.');}
+      catch(e){toast('Copy failed — hover the source label for the path.');}
+      ta.remove();});}
 function renderRouter(){
   const band=document.getElementById('routerBand');if(!band)return;
   const R=S&&S.router; if(!R){setHTML(band,'');return;}
