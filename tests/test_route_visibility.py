@@ -95,3 +95,10 @@ def test_route_fields_unknown_category(cc):
     f = cc._route_fields("nonexistent", None, _router(cc))
     assert f["route_planned"] is None
     assert f["route_actual"] is None
+
+
+def test_route_fields_tolerates_corrupt_actual(cc):
+    # A hand-edited ledger with a non-dict route must not crash build_state.
+    f = cc._route_fields("feature", {"route": "corrupt-string"}, _router(cc))
+    assert f["route_actual"] is None
+    assert "route_mismatch" not in f

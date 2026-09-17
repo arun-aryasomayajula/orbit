@@ -237,6 +237,8 @@ def _route_fields(category: str, entry: dict | None, router: dict | None) -> dic
     compared field differs — 'router changed since this run')."""
     planned = route_resolve.resolve_route(category, router)
     actual = (entry or {}).get("route")
+    if not isinstance(actual, dict):
+        actual = None     # corrupt-tolerant, like load_ledger — never break /api/state
     out = {"route_planned": planned, "route_actual": actual}
     if planned and actual and any(
             (planned.get(k) or "") != (actual.get(k) or "") for k in _ROUTE_CMP):
