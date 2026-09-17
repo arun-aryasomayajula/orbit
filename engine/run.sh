@@ -675,6 +675,10 @@ one_iteration() {
   printf '%s\n' "$tid" > "$MARKER"
   printf '%s\n' "$tid" > "$CAND_MARKER"
 
+  # Record the resolved route on the ledger entry (portal route visibility).
+  # Degrade-to-log: recording must never fail or delay the cycle.
+  python3 "$ENGINE/route_record.py" "$tid" >>"$LOGDIR/orbit.log" 2>&1 || true
+
   # Log and patch are named after the TASK (plus a start stamp), not just the
   # clock: with several slots writing into one logs/ dir, "the newest cycle log"
   # is no longer a useful way to find a given task's run, and a task worked twice
