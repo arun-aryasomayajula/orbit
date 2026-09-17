@@ -452,9 +452,12 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
 .watchrow .w-question{flex:2 1 220px}
 .watchrow .w-cadence{flex:0 0 90px}
 .watchrow .w-category{flex:0 0 110px}
-.router-d summary{cursor:pointer}
-.router-d .bandhead{display:inline-flex;margin-bottom:0;vertical-align:middle}
+.router-d summary{cursor:pointer;list-style:none}
+.router-d summary::-webkit-details-marker{display:none}
+.router-d .bandhead{margin-bottom:0}
 .router-d .bandhead h3{color:var(--green)}   /* accent like IN ORBIT (blue) / LAUNCH PAD (amber) */
+.router-d .chev{display:inline-block;font-size:10px;color:var(--dim);transition:transform .15s}
+.router-d[open] .chev{transform:rotate(90deg)}
 .routerTable{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px}
 .routerTable th,.routerTable td{text-align:left;padding:3px 8px;border-bottom:1px solid var(--line)}
 .routerTable tr.unrouted td{opacity:.45}
@@ -1952,9 +1955,10 @@ function renderRouter(){
     <td>${esc(c.category)}</td><td>${badge(c.tier,tierCls[c.tier]||'muted')}</td>
     <td>${esc(c.maker||'—')}</td><td>${esc(c.model?c.model+(c.effort?'/'+c.effort:''):'—')}</td>
     <td>${esc(c.skill||'—')}</td><td>${esc(c.golden||'—')}</td></tr>`).join('');
+  const srcLabel=R.source==='override'?'override · .autopilot/router.yaml':'engine default · router/router.yaml';
   setHTML(band,`<div class=band><details class=router-d><summary><div class=bandhead>
-    <h3>Router — category → route</h3>
-    <span class=bandsum>${esc(R.source)}: ${esc(R.path)}</span></div></summary>
+    <span class=chev>▶</span><h3>Router — category → route</h3>
+    <span class=bandsum title="${esc(R.path)}">${esc(srcLabel)}</span></div></summary>
     <table class=routerTable><thead><tr><th>category</th><th>tier</th><th>maker</th>
     <th>model</th><th>skill</th><th>golden</th></tr></thead>
     <tbody>${rows}</tbody></table></details></div>`);}
