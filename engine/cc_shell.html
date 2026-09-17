@@ -1947,6 +1947,10 @@ function epicCard(e){
   return `<div class=card><div class="card-h"><span class=tid>${esc(e.id)}</span> ${badge('epic','acc')} ${epicStageBadge(e.stage)} ${e.priority==='high'?badge('high','warn'):''}</div>
     <div class=title>${esc(e.title)}</div>${kids}${ctx}${accList(e.acceptance_criteria)}<div class=btns>${btns}</div></div>`;
 }
+function copyRouterPath(p){
+  (navigator.clipboard?navigator.clipboard.writeText(p):Promise.reject())
+    .then(()=>toast('Router path copied.'))
+    .catch(()=>prompt('Copy the router path:',p));}
 function renderRouter(){
   const band=document.getElementById('routerBand');if(!band)return;
   const R=S&&S.router; if(!R){setHTML(band,'');return;}
@@ -1958,7 +1962,9 @@ function renderRouter(){
   const srcLabel=R.source==='override'?'override · .autopilot/router.yaml':'engine default · router/router.yaml';
   setHTML(band,`<div class=band><details class=router-d><summary><div class=bandhead>
     <span class=chev>▶</span><h3>Router — category → route</h3>
-    <span class=bandsum title="${esc(R.path)}">${esc(srcLabel)}</span></div></summary>
+    <span class=bandsum title="${esc(R.path)}">${esc(srcLabel)}</span>
+    <button class="btn btn-mini" title="copy the router file's full path"
+      onclick="event.preventDefault();event.stopPropagation();copyRouterPath('${escJsAttr(R.path)}')">⧉ Copy path</button></div></summary>
     <table class=routerTable><thead><tr><th>category</th><th>tier</th><th>maker</th>
     <th>model</th><th>skill</th><th>golden</th></tr></thead>
     <tbody>${rows}</tbody></table></details></div>`);}
