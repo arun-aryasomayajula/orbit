@@ -452,6 +452,15 @@ kbd{font:600 10px var(--mono);background:var(--card);border:1px solid var(--line
 .watchrow .w-question{flex:2 1 220px}
 .watchrow .w-cadence{flex:0 0 90px}
 .watchrow .w-category{flex:0 0 110px}
+.router-d summary{cursor:pointer;list-style:none}
+.router-d summary::-webkit-details-marker{display:none}
+.router-d .bandhead{margin-bottom:0}
+.router-d .bandhead h3{color:var(--green)}   /* accent like IN ORBIT (blue) / LAUNCH PAD (amber) */
+.router-d .chev{display:inline-block;font-size:10px;color:var(--dim);transition:transform .15s}
+.router-d[open] .chev{transform:rotate(90deg)}
+.routerTable{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px}
+.routerTable th,.routerTable td{text-align:left;padding:3px 8px;border-bottom:1px solid var(--line)}
+.routerTable tr.unrouted td{opacity:.45}
 .secrets-list{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}
 .secret-row{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--line2);
   border-radius:8px;padding:7px 11px;font:500 12px var(--mono)}
@@ -716,6 +725,7 @@ body.pm .brand .base::before{content:"product · ";color:var(--blue)}
 
   <!-- ── QUEUE ── -->
   <section class="view" id="view-queue">
+    <div id="routerBand"></div>
     <div class="cols" id="queueCols"></div>
   </section>
 
@@ -1274,6 +1284,20 @@ function toggleRail(){
 /* ── shared card renderer ───────────────────────────────────────────────── */
 const SAFE_CATS=['testing','documentation','dependencies','code_quality','developer_experience'];
 function badge(t,c){return t?`<span class="b b-${c}">${esc(t)}</span>`:'';}
+function routeBadge(t,kind){
+  const r=t.route_actual||t.route_planned; if(!r)return'';
+  const planned=!t.route_actual;
+  // Unworked rows show the router's plan; worked rows without a claim-time
+  // record (pre-route-recording runs) say so instead of implying a plan applies.
+  const preRun=(kind==='next'||kind==='board');
+  const suffix=planned?(preRun?' · planned':' · not recorded'):'';
+  const txt='⛭ '+(r.skill||r.maker||'route')+suffix;
+  const cls=t.route_mismatch?'warn':(planned?'muted':'acc');
+  const tip='route '+(planned?(preRun?'(planned from router.yaml)':'(planned — not recorded for this run)'):'(recorded at claim)')
+    +': maker '+(r.maker||'—')+' · model '+(r.model||'—')+(r.effort?'/'+r.effort:'')
+    +' · skill '+(r.skill||'—')+(r.golden?' · golden '+r.golden:'')
+    +(t.route_mismatch?' · ⚠ router changed since this run':'');
+  return `<span class="b b-${cls}" title="${esc(tip)}">${esc(txt)}</span>`;}
 function gateCls(g){return{allow:'ok','review-only':'warn',human:'stop'}[g]||'muted';}
 function accList(list){if(!list||!list.length)return'';
   // Open by default — acceptance criteria are the task's contract (the agent gets
@@ -1285,6 +1309,7 @@ function card(t,kind){
   const cat=badge(t.category,(t.category&&SAFE_CATS.includes(t.category))?'ok':'warn');
   const gate=badge(t.autopilot,gateCls(t.autopilot));
   const src=t.source?badge(t.source,'muted'):'';
+  const routeb=routeBadge(t,kind);
   let live='',timer='',btns='';
   if(kind==='run'){live='live';
     timer=`<div class="meta"><span class="orbmark orbmark-sm" aria-hidden="true"></span> ${S&&S.stopped?'⏸ pause pending — finishing this cycle':'in orbit'} <span class="timer" data-start="${t._start||''}">…</span>`+
@@ -1384,7 +1409,7 @@ function card(t,kind){
   const qaBadge=(kind==='done'&&t.qa&&t.qa.verdict)?
     badge('QA: '+t.qa.verdict,{pass:'ok',fail:'stop',unable:'warn'}[t.qa.verdict]||'muted'):'';
   return `<div class="card ${live}" data-tid="${esc(t.id)}">
-    <div class="card-h"><span class="tid">${esc(t.id)}</span> ${cat} ${gate} ${pri} ${eff} ${rev} ${qaBadge} ${src} ${epicTag}</div>
+    <div class="card-h"><span class="tid">${esc(t.id)}</span> ${cat} ${routeb} ${gate} ${pri} ${eff} ${rev} ${qaBadge} ${src} ${epicTag}</div>
     <div class="title">${esc(t.title)}</div>
     ${plain}${brief}${rec}${hint}${timer}${reason}${lint}${note}${ctx}${why}${accList(t.acceptance_criteria)}${qaEvidence}
     <div class="btns">${btns}</div></div>`;
@@ -1922,6 +1947,33 @@ function epicCard(e){
   return `<div class=card><div class="card-h"><span class=tid>${esc(e.id)}</span> ${badge('epic','acc')} ${epicStageBadge(e.stage)} ${e.priority==='high'?badge('high','warn'):''}</div>
     <div class=title>${esc(e.title)}</div>${kids}${ctx}${accList(e.acceptance_criteria)}<div class=btns>${btns}</div></div>`;
 }
+function copyRouterPath(p){
+  // No native dialogs in the shell (test_shell_has_no_native_dialogs):
+  // clipboard API first, hidden-textarea execCommand as the fallback.
+  (navigator.clipboard?navigator.clipboard.writeText(p):Promise.reject())
+    .then(()=>toast('Router path copied.'))
+    .catch(()=>{const ta=document.createElement('textarea');ta.value=p;
+      document.body.appendChild(ta);ta.select();
+      try{document.execCommand('copy');toast('Router path copied.');}
+      catch(e){toast('Copy failed — hover the source label for the path.');}
+      ta.remove();});}
+function renderRouter(){
+  const band=document.getElementById('routerBand');if(!band)return;
+  const R=S&&S.router; if(!R){setHTML(band,'');return;}
+  const tierCls={core:'ok',safe:'ok','human-only':'stop',planning:'muted'};
+  const rows=(R.categories||[]).map(c=>`<tr class="${c.routed?'':'unrouted'}">
+    <td>${esc(c.category)}</td><td>${badge(c.tier,tierCls[c.tier]||'muted')}</td>
+    <td>${esc(c.maker||'—')}</td><td>${esc(c.model?c.model+(c.effort?'/'+c.effort:''):'—')}</td>
+    <td>${esc(c.skill||'—')}</td><td>${esc(c.golden||'—')}</td></tr>`).join('');
+  const srcLabel=R.source==='override'?'override · .autopilot/router.yaml':'engine default · router/router.yaml';
+  setHTML(band,`<div class=band><details class=router-d><summary><div class=bandhead>
+    <span class=chev>▶</span><h3>Router — category → route</h3>
+    <span class=bandsum title="${esc(R.path)}">${esc(srcLabel)}</span>
+    <button class="btn btn-mini" title="copy the router file's full path"
+      onclick="event.preventDefault();event.stopPropagation();copyRouterPath('${escJsAttr(R.path)}')">⧉ Copy path</button></div></summary>
+    <table class=routerTable><thead><tr><th>category</th><th>tier</th><th>maker</th>
+    <th>model</th><th>skill</th><th>golden</th></tr></thead>
+    <tbody>${rows}</tbody></table></details></div>`);}
 function renderEpics(){
   const band=document.getElementById('epicsBand');if(!band)return;
   const es=(S&&S.epics)||[];
@@ -4022,7 +4074,7 @@ function renderViews(){
   const colsEl=document.getElementById('queueCols');
   const scrolls=[...colsEl.querySelectorAll('.col')].map(c=>c.scrollTop);
   renderStats();renderInboxAll();renderDawn();renderSetupCoach();renderWork();renderLibrary();
-  renderFilters();renderEpics();renderPrd();renderArtifacts();renderWatches();renderSurveys();renderCalibration();renderDeepspace();renderQueue();renderShips();renderBranches();renderAgents();renderQa();
+  renderFilters();renderEpics();renderPrd();renderArtifacts();renderWatches();renderSurveys();renderCalibration();renderDeepspace();renderQueue();renderShips();renderBranches();renderAgents();renderQa();renderRouter();
   renderKpis();renderSpend();renderHistory();renderFunnel();renderRunlog();renderOnboarding();renderKnowledge();
   [...colsEl.querySelectorAll('.col')].forEach((c,i)=>{if(scrolls[i])c.scrollTop=scrolls[i];});
 }

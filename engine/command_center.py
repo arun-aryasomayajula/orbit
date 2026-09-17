@@ -101,6 +101,7 @@ import locks  # noqa: E402
 # (services_lock_path) - the Dev session is one of its consumers.
 import qa_check  # noqa: E402
 from backlog_lint import KNOWN_CATEGORIES  # noqa: E402
+import route_resolve  # noqa: E402  (Chunk 4: portal route visibility)
 # The ONE concurrency ceiling (see engine/config.py) - imported, never
 # re-stated, so the Admin panel and the loop's preflight can never disagree.
 from config import CONCURRENCY_MAX  # noqa: E402
@@ -211,6 +212,55 @@ SAFE = {"testing", "documentation", "dependencies", "code_quality", "developer_e
 # backlog_to_tasks.EMITTABLE_CATEGORIES. HUMAN_ONLY is never loop-pickable.
 EMITTABLE = SAFE | {"bug", "feature", "refactor"}
 HUMAN_ONLY = {"security", "infrastructure", "release_management", "git_practices"}
+
+# Trust tiers for the router table (Chunk 4). "core" = bug/feature/refactor;
+# "safe" = the SAFE set; "planning" = epic (never loop-worked); everything
+# else — including observability, which the lint marks human-only for the
+# emit gate but the sets above don't list — reads as human-only.
+CORE_EMITTABLE = {"bug", "feature", "refactor"}
+_ROUTE_CMP = ("maker", "model", "effort", "skill")
+
+
+def _route_tier(cat: str) -> str:
+    if cat in CORE_EMITTABLE:
+        return "core"
+    if cat in SAFE:
+        return "safe"
+    if cat == "epic":
+        return "planning"
+    return "human-only"
+
+
+def _route_fields(category: str, entry: dict | None, router: dict | None) -> dict:
+    """Per-task route keys: planned (live resolution), actual (the claim-time
+    ledger record), and route_mismatch (present only when both exist and a
+    compared field differs — 'router changed since this run')."""
+    planned = route_resolve.resolve_route(category, router)
+    actual = (entry or {}).get("route")
+    if not isinstance(actual, dict):
+        actual = None     # corrupt-tolerant, like load_ledger — never break /api/state
+    out = {"route_planned": planned, "route_actual": actual}
+    if planned and actual and any(
+            (planned.get(k) or "") != (actual.get(k) or "") for k in _ROUTE_CMP):
+        out["route_mismatch"] = True
+    return out
+
+
+def router_state(router_info: dict | None) -> dict | None:
+    """The category→route table for the dashboard: every KNOWN category plus
+    anything extra the router file names, each with its trust tier."""
+    if not router_info:
+        return None
+    cats = sorted(set(KNOWN_CATEGORIES) | set(router_info["categories"]))
+    rows = []
+    for c in cats:
+        r = router_info["categories"].get(c) or {}
+        rows.append({"category": c, "tier": _route_tier(c),
+                     "maker": r.get("maker"), "model": r.get("model"),
+                     "effort": r.get("effort"), "skill": r.get("skill"),
+                     "golden": r.get("golden"), "routed": bool(r)})
+    return {"source": router_info["source"], "path": router_info["path"],
+            "categories": rows}
 _LOGTS = re.compile(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\]")
 _TERMINAL = re.compile(r"pushed origin/|cycle produced no changes|cycle rc=|REFUSING|"
                        r"single-cycle|cycle committed|cycle left uncommitted|no-op|daily budget|daily task cap")
@@ -4625,6 +4675,7 @@ def build_state() -> dict:
     backlog = load_backlog()
     ledger = load_ledger()
     skips = load_skips()
+    router_info = route_resolve.load_router(AP_HOME)   # fresh per poll, like reload_settings
     by_id = {str(t.get("id")): t for t in backlog}
     worked = set(ledger.keys())
     hist = agent_history()
@@ -4645,7 +4696,8 @@ def build_state() -> dict:
                 "effort": meta.get("effort", ""), "decision_hint": meta.get("decision_hint", ""),
                 "docs": [d for d in (meta.get("docs") or []) if isinstance(d, str)],
                 "acceptance_criteria": [a for a in (meta.get("acceptance_criteria") or [])
-                                        if isinstance(a, str)]}
+                                        if isinstance(a, str)],
+                **_route_fields(meta.get("category", ""), None, router_info)}
 
     workers = workers_state()   # None only when unconfigured/empty AND concurrency==1 - see workers_state()
     if WORKERS_DIR.is_dir():
@@ -4676,6 +4728,8 @@ def build_state() -> dict:
         # readable name instead of showing the id twice on the card.
         row["title"] = (meta.get("title") or e.get("title")
                         or (f"Foundry task #{tid} (legacy)" if tid.isdigit() else tid))
+        row.update(_route_fields(row["category"] or e.get("route", {}).get("category", ""),
+                                 e, router_info))
         row.update({"sha": e.get("sha"), "remote_ref": e.get("remote_ref"),
                     "reason": e.get("reason", ""), "updated": e.get("updated_at", ""),
                     # Escalation decision support (written by the operator/reconcile):
@@ -4761,7 +4815,8 @@ def build_state() -> dict:
                         "effort": bmeta.get("effort", ""), "decision_hint": bmeta.get("decision_hint", ""),
                         "docs": [d for d in (bmeta.get("docs") or []) if isinstance(d, str)],
                         "acceptance_criteria": [a for a in (q.get("acceptance_criteria") or [])
-                                                if isinstance(a, str)]})
+                                                if isinstance(a, str)],
+                        **_route_fields(q.get("category", ""), None, router_info)})
     next_up.sort(key=lambda t: PRIORITY_RANK.get(t.get("priority", "medium"), 1))
 
     # BOARD = human-curated, not auto-shipped (review-only / human / proposed),
@@ -4896,6 +4951,7 @@ def build_state() -> dict:
     rt.update({"running": running, "next_up": next_up, "board": board, "skipped": skipped,
                "auto_feed": AUTO_PROMOTE.exists(), "metrics": agent_metrics(), "history": hist["days"],
                "funnel": funnel,
+               "router": router_state(router_info),
                "feature_builds": feature_builds_annotated(),
                "epics": epics,
                "calibration": load_calibration_candidates(),
